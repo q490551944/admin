@@ -18,4 +18,4 @@ logging:
   level:
     com.hpj.admin.modules.sys.mapper: debug
 mybatis-plus:
-  type-enums-package: com.hpj.admin.modules.sys.enums
+  type-enums-package: com.hpj.admin.enums

@@ -1,13 +1,13 @@
-package com.hpj.admin.modules.sys.controller;
+package com.hpj.admin.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hpj.admin.common.annotation.Edit;
-import com.hpj.admin.modules.sys.entity.BaseEntity;
-import com.hpj.admin.modules.sys.entity.User;
-import com.hpj.admin.modules.sys.mapper.UserMapper;
-import com.hpj.admin.modules.sys.service.UserService;
+import com.hpj.admin.entity.BaseEntity;
+import com.hpj.admin.entity.User;
+import com.hpj.admin.mapper.UserMapper;
+import com.hpj.admin.service.UserService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -52,7 +52,6 @@ public class UserController {
         QueryWrapper<User> wrapper = new QueryWrapper<>();
         wrapper.having("username = {0}", user.getUsername());
         userService.save(user);
-
         return user;
     }
 
@@ -74,29 +73,5 @@ public class UserController {
         System.out.println(id);
     }
 
-    public static void main(String[] args) {
-        Runnable runnable = () -> {
-            System.out.println("线程组名称:" + Thread.currentThread().getThreadGroup());
-            System.out.println("线程名称:" + Thread.currentThread().getName());
-            try {
-                Thread.sleep(3000);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-        };
-        ThreadGroup threadGroup = new ThreadGroup("user");
-        threadGroup.setMaxPriority(Thread.MAX_PRIORITY);
-
-        Thread thread = new Thread(threadGroup, runnable, "user-task 1");
-        Thread thread1 = new Thread(threadGroup, runnable, "user-task 2");
-
-        thread.setPriority(1);
-        thread1.setPriority(2);
-
-        thread.start();
-        thread1.start();
-
-        System.out.println(threadGroup.activeCount());
-    }
 
 }

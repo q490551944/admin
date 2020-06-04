@@ -12,7 +12,7 @@ import org.springframework.cache.annotation.EnableCaching;
 @EnableAdminServer
 @EnableCaching
 @SpringBootApplication
-@MapperScan("com.hpj.admin.modules.sys.mapper")
+@MapperScan("com.hpj.admin.mapper")
 public class AdminApplication {
 
     public static void main(String[] args) {

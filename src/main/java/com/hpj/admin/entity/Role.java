@@ -1,4 +1,4 @@
-package com.hpj.admin.modules.sys.entity;
+package com.hpj.admin.entity;
 
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;

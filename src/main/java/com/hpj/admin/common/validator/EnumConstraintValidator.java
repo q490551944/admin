@@ -7,7 +7,7 @@ import javax.validation.ConstraintValidatorContext;
  * @author huangpeijun
  * @date 2020/4/18
  */
-public class EnumConstraintValidator implements ConstraintValidator<EnumValue, > {
+public class EnumConstraintValidator implements ConstraintValidator<EnumValue, Object> {
     @Override
     public boolean isValid(Object value, ConstraintValidatorContext context) {
         return false;

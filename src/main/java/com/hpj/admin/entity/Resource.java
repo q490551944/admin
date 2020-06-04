@@ -1,4 +1,4 @@
-package com.hpj.admin.modules.sys.entity;
+package com.hpj.admin.entity;
 
 import lombok.Data;
 import lombok.EqualsAndHashCode;

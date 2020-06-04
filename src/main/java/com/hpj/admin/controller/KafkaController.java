@@ -1,8 +1,5 @@
-package com.hpj.admin.modules.sys.controller;
+package com.hpj.admin.controller;
 
-import com.baomidou.mybatisplus.core.conditions.AbstractWrapper;
-import com.hpj.admin.common.kafka.KafkaConsumers;
-import com.hpj.admin.modules.sys.entity.User;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;

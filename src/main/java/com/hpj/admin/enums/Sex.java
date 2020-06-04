@@ -1,4 +1,4 @@
-package com.hpj.admin.modules.sys.enums;
+package com.hpj.admin.enums;
 
 import com.baomidou.mybatisplus.core.enums.IEnum;
 import com.fasterxml.jackson.annotation.JsonValue;

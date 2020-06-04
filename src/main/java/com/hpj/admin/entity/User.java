@@ -1,8 +1,8 @@
-package com.hpj.admin.modules.sys.entity;
+package com.hpj.admin.entity;
 
 
 import com.baomidou.mybatisplus.annotation.TableName;
-import com.hpj.admin.modules.sys.enums.Sex;
+import com.hpj.admin.enums.Sex;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 

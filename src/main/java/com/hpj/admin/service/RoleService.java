@@ -1,7 +1,7 @@
-package com.hpj.admin.modules.sys.service;
+package com.hpj.admin.service;
 
 import com.baomidou.mybatisplus.extension.service.IService;
-import com.hpj.admin.modules.sys.entity.Role;
+import com.hpj.admin.entity.Role;
 
 /**
  * @author huangpeijun

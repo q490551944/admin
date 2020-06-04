@@ -1,7 +1,7 @@
-package com.hpj.admin.modules.sys.mapper;
+package com.hpj.admin.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.hpj.admin.modules.sys.entity.User;
+import com.hpj.admin.entity.User;
 
 /**
  * @author huangpeijun
