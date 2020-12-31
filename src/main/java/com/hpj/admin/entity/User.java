@@ -2,6 +2,7 @@ package com.hpj.admin.entity;
 
 
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.hpj.admin.common.extend.SuperEntity;
 import com.hpj.admin.enums.Sex;
 import lombok.Data;
 import lombok.EqualsAndHashCode;

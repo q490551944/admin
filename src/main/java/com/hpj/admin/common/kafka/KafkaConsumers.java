@@ -37,15 +37,15 @@ public class KafkaConsumers implements Runnable {
     /**
      * key序列化策略
      */
-    public Class keyDeserializer;
+    public Class<?> keyDeserializer;
 
     /**
      * value序列化策略
      */
-    public Class valueDeserializer;
+    public Class<?> valueDeserializer;
 
 
-    public KafkaConsumers(List<String> topic, String bootStrapServers, String groutId, Class keyDeserializer, Class valueDeserializer) {
+    public KafkaConsumers(List<String> topic, String bootStrapServers, String groutId, Class<?> keyDeserializer, Class<?> valueDeserializer) {
         this.topic = topic;
         this.bootStrapServers = bootStrapServers;
         this.groutId = groutId;
@@ -56,8 +56,8 @@ public class KafkaConsumers implements Runnable {
     /**
      * 初始化消费者（配置写死是为了快速测试，请大家使用配置文件）
      *
-     * @param topicList
-     * @return
+     * @param topicList topic列表
+     * @return 消费者实例
      */
     public KafkaConsumer<String, String> getInitConsumer(List<String> topicList) {
         //配置信息
@@ -83,7 +83,7 @@ public class KafkaConsumers implements Runnable {
         while (flag) {
             ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
             for (ConsumerRecord<String, String> record : records) {
-                if ("stop".equals(record.value())){
+                if ("stop".equals(record.value())) {
                     flag = false;
                 }
                 System.out.println(record.value());

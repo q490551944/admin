@@ -1,6 +1,7 @@
 package com.hpj.admin.entity;
 
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.hpj.admin.common.extend.SuperEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 

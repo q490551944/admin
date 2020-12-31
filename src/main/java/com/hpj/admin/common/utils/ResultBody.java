@@ -111,4 +111,12 @@ public class ResultBody {
         return JSONObject.toJSONString(this);
     }
 
+    public static void main(String[] args) {
+        try {
+            Thread.sleep(1000*300L);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
 }

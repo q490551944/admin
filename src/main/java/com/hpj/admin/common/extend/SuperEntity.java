@@ -1,4 +1,4 @@
-package com.hpj.admin.entity;
+package com.hpj.admin.common.extend;
 
 import com.baomidou.mybatisplus.annotation.FieldFill;
 import com.baomidou.mybatisplus.annotation.TableField;

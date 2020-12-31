@@ -9,7 +9,9 @@ import lombok.Data;
 @Data
 public class Condition {
 
-    private int currPage;
+    private int page;
 
     private int size;
+
+    private boolean pageable = true;
 }

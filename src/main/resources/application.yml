@@ -14,8 +14,15 @@ spring:
       filter:
         commons-log:
           statement-executable-sql-log-enable: true
+  redis:
+    host: 127.0.0.1
+    password: 123456
+    port: 6379
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/test
 logging:
   level:
     com.hpj.admin.modules.sys.mapper: debug
 mybatis-plus:
-  type-enums-package: com.hpj.admin.enums
+  type-enums-package: com.hpj.admin.enum
