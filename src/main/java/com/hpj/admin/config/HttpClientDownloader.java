@@ -12,7 +12,6 @@ import us.codecraft.webmagic.Request;
 import us.codecraft.webmagic.Site;
 import us.codecraft.webmagic.Task;
 import us.codecraft.webmagic.downloader.AbstractDownloader;
-import com.hpj.admin.config.HttpClientGenerator;
 import us.codecraft.webmagic.downloader.HttpClientRequestContext;
 import us.codecraft.webmagic.downloader.HttpUriRequestConverter;
 import us.codecraft.webmagic.proxy.Proxy;
@@ -20,6 +19,7 @@ import us.codecraft.webmagic.proxy.ProxyProvider;
 import us.codecraft.webmagic.selector.PlainText;
 import us.codecraft.webmagic.utils.CharsetUtils;
 import us.codecraft.webmagic.utils.HttpClientUtils;
+import us.codecraft.webmagic.utils.HttpConstant;
 
 import java.io.IOException;
 import java.nio.charset.Charset;
@@ -37,7 +37,7 @@ public class HttpClientDownloader extends AbstractDownloader {
 
     private Logger logger = LoggerFactory.getLogger(getClass());
 
-    private final Map<String, CloseableHttpClient> httpClients = new HashMap<String, CloseableHttpClient>();
+    private final Map<String, CloseableHttpClient> httpClients = new HashMap<>();
 
     private HttpClientGenerator httpClientGenerator = new HttpClientGenerator();
 
@@ -110,23 +110,28 @@ public class HttpClientDownloader extends AbstractDownloader {
     }
 
     protected Page handleResponse(Request request, String charset, HttpResponse httpResponse, Task task) throws IOException {
-        byte[] bytes = IOUtils.toByteArray(httpResponse.getEntity().getContent());
-        String contentType = httpResponse.getEntity().getContentType() == null ? "" : httpResponse.getEntity().getContentType().getValue();
         Page page = new Page();
-        page.setBytes(bytes);
-        if (!request.isBinaryContent()){
-            if (charset == null) {
-                charset = getHtmlCharset(contentType, bytes);
+        if (httpResponse.getStatusLine().getStatusCode() != HttpConstant.StatusCode.CODE_200) {
+            page.setDownloadSuccess(false);
+        } else {
+            byte[] bytes = IOUtils.toByteArray(httpResponse.getEntity().getContent());
+            String contentType = httpResponse.getEntity().getContentType() == null ? "" : httpResponse.getEntity().getContentType().getValue();
+
+            page.setBytes(bytes);
+            if (!request.isBinaryContent()) {
+                if (charset == null) {
+                    charset = getHtmlCharset(contentType, bytes);
+                }
+                page.setCharset(charset);
+                page.setRawText(new String(bytes, charset));
             }
-            page.setCharset(charset);
-            page.setRawText(new String(bytes, charset));
-        }
-        page.setUrl(new PlainText(request.getUrl()));
-        page.setRequest(request);
-        page.setStatusCode(httpResponse.getStatusLine().getStatusCode());
-        page.setDownloadSuccess(true);
-        if (responseHeader) {
-            page.setHeaders(HttpClientUtils.convertHeaders(httpResponse.getAllHeaders()));
+            page.setUrl(new PlainText(request.getUrl()));
+            page.setRequest(request);
+            page.setStatusCode(httpResponse.getStatusLine().getStatusCode());
+            page.setDownloadSuccess(true);
+            if (responseHeader) {
+                page.setHeaders(HttpClientUtils.convertHeaders(httpResponse.getAllHeaders()));
+            }
         }
         return page;
     }
