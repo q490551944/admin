@@ -33,7 +33,6 @@ public class GetDetail implements PageProcessor {
         Html html = page.getHtml();
         Selectable xpath = html.xpath("//div[@class='original mainPlayerDiv']/script");
         Selectable regex = xpath.regex("[flashvars_375751561]");
-        System.out.println(regex.toString());
 //        System.out.println(html);
 //        Document document = html.getDocument();#app > div.block-area.block-timeline.cc_cursor > div.timeline-wrapper.block-left > div.timeline-box.clearfix > ul > li:nth-child(1)
 //        String src = document.getElementsByClass("level-item").get(0).child(0).attr("src");

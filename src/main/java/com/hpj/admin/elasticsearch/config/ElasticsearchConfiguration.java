@@ -4,6 +4,7 @@ import org.elasticsearch.action.bulk.BackoffPolicy;
 import org.elasticsearch.action.bulk.BulkProcessor;
 import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.bulk.BulkResponse;
+import org.elasticsearch.action.support.WriteRequest;
 import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.common.unit.ByteSizeUnit;
@@ -22,6 +23,7 @@ public class ElasticsearchConfiguration {
                 client.bulkAsync(bulkRequest, RequestOptions.DEFAULT, bulkResponseActionListener)), new BulkProcessor.Listener() {
             @Override
             public void beforeBulk(long executionId, BulkRequest request) {
+                request.setRefreshPolicy(WriteRequest.RefreshPolicy.NONE);
                 // 批量请求之前，进行处理
             }
 
