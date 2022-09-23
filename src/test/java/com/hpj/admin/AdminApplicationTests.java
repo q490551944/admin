@@ -4,6 +4,11 @@ import com.alibaba.fastjson.JSONObject;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.hpj.admin.common.config.MongoDBDataSourceConfig;
 import com.hpj.admin.entity.User;
+import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
+import org.apache.poi.util.Units;
+import org.apache.poi.xddf.usermodel.chart.*;
+import org.apache.poi.xwpf.usermodel.XWPFChart;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.elasticsearch.action.bulk.BulkProcessor;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.search.SearchRequest;
@@ -28,6 +33,7 @@ import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.test.context.junit4.SpringRunner;
 
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.List;
 import java.util.Random;
@@ -120,5 +126,58 @@ class AdminApplicationTests {
         SearchHits hits = search.getHits();
         System.out.println("查询文档总数:" + hits.totalHits);
         hits.forEach(e -> System.out.println("原生文档信息：" + e.getSourceAsString()));
+    }
+
+    @Test
+    public void exportWord() throws IOException, InvalidFormatException {
+        // 创建word文档对象
+        XWPFDocument xwpfDocument = new XWPFDocument();
+        // 创建chart图表对象
+        XWPFChart chart = xwpfDocument.createChart(15 * Units.EMU_PER_CENTIMETER, 10 * Units.EMU_PER_CENTIMETER);
+        // 设置chart标题
+        chart.setTitleText("测试图表");
+        // 设置图例是否覆盖标题
+        chart.setTitleOverlay(false);
+        // 设置图例
+        XDDFChartLegend legend = chart.getOrAddLegend();
+        legend.setPosition(LegendPosition.TOP);
+        // X轴设置
+        XDDFCategoryAxis categoryAxis = chart.createCategoryAxis(AxisPosition.BOTTOM);
+        categoryAxis.setTitle("日期");
+        String[] xAxisData = new String[] {
+                "2021-01","2021-02","2021-03","2021-04","2021-05","2021-06",
+                "2021-07","2021-08","2021-09","2021-10","2021-11","2021-12",
+        };
+        XDDFCategoryDataSource xAxisSource = XDDFDataSourcesFactory.fromArray(xAxisData); // 设置X轴数据
+
+        // 6、Y轴(值轴)相关设置
+        XDDFValueAxis yAxis = chart.createValueAxis(AxisPosition.LEFT); // 创建Y轴,指定位置
+        yAxis.setTitle("粉丝数（个）"); // Y轴标题
+        Integer[] yAxisData = new Integer[]{
+                10, 35, 21, 46, 79, 88,
+                39, 102, 71, 28, 99, 57
+        };
+        XDDFNumericalDataSource<Integer> yAxisSource = XDDFDataSourcesFactory.fromArray(yAxisData); // 设置Y轴数据
+
+        // 7、创建折线图对象
+        XDDFLineChartData lineChart = (XDDFLineChartData) chart.createData(ChartTypes.LINE, categoryAxis, yAxis);
+
+        // 8、加载折线图数据集
+        XDDFLineChartData.Series lineSeries = (XDDFLineChartData.Series) lineChart.addSeries(xAxisSource, yAxisSource);
+        lineSeries.setTitle("粉丝数", null); // 图例标题
+        lineSeries.setSmooth(true); // 线条样式:true平滑曲线,false折线
+        lineSeries.setMarkerSize((short) 6); // 标记点大小
+        lineSeries.setMarkerStyle(MarkerStyle.CIRCLE); // 标记点样式
+
+        // 9、绘制折线图
+        chart.plot(lineChart);
+
+        // 10、输出到word文档
+        FileOutputStream fos = new FileOutputStream("G:\\测试数据\\lineChart.docx");
+        xwpfDocument.write(fos); // 导出word
+
+        // 11、关闭流
+        fos.close();
+        xwpfDocument.close();
     }
 }
