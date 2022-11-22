@@ -1,5 +1,6 @@
 package com.hpj.admin.util;
 
+import com.google.common.collect.ImmutableList;
 import org.apache.commons.io.IOUtils;
 
 import java.io.*;
@@ -29,6 +30,18 @@ public class FileUtils {
             result.add( Arrays.asList(line.split(COMMA_STRING)));
         }
         return result;
+    }
+
+    public static void main(String[] args) {
+
+        List<String> list = new ArrayList<>();
+        list.add("a");
+        list.add("b");
+        list.add("c");
+        for (String s : list) {
+            list.add("d");
+        }
+        System.out.println(list);
     }
 
 }
