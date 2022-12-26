@@ -32,56 +32,58 @@ public class AddGongShi {
     }
 
     public static void main(String[] args) throws InterruptedException, ParseException {
-//        String firstUrl = "http://113.247.222.69:8899/api/cube/new/card/layoutBase?type=1&modeId=165&formId=-401&_key=bqxb78&guid=card&uuid=9204CC42802CB0378629FF76045186E1&modedatastatus=0&__random__=1665663344151";
-//        String url = "http://113.247.222.69:8899/api/cube/new/card/doSubmit";
-//        String jsonStr = "{\"field15418\":\"464\",\"field15429\":\"95\",\"field15419\":\"${date}\",\"detail_1\":[{\"field15428\":\"\",\"field15749\":\"\",\"dtl_index\":\"\",\"field15424\":\"1107\",\"field15425\":\"ISIMCloud云仿真平台\",\"field15426\":\"2\",\"dtl_id\":\"\",\"field15427\":\"8.00\",\"field15647\":\"\",\"checkbox\":\"\"}],\"deldtlid1\":\"\",\"field15420\":\"\",\"field15431\":\"\",\"submitdtlid1\":\"0\",\"field15421\":\"\",\"field15432\":\"\",\"field15422\":\"\",\"field15423\":\"8.00\",\"field15430\":\"0\"}";
-        List<String> list = getBetweenDate("2022-09-10", "2022-10-12");
+        String firstUrl = "http://113.247.222.69:8899/api/cube/new/card/layoutBase?type=1&modeId=165&formId=-401&_key=a87mgg&guid=card&uuid=E55DD8DE6AEEB47B3E087F64D868D04D&modedatastatus=0&__random__=1670589663537";
+        String url = "http://113.247.222.69:8899/api/cube/new/card/doSubmit";
+        String jsonStr = "{\"field15418\":\"307\",\"field15429\":\"72\",\"field15419\":\"${date}\",\"detail_1\":[{\"field15428\":\"\",\"field15749\":\"\",\"dtl_index\":\"\",\"field15424\":\"1573\",\"field15425\":\"站五某能力建设课题\",\"field15426\":\"0\",\"dtl_id\":\"\",\"field15427\":\"8.00\",\"field15647\":\"\",\"field17824\":\"\",\"checkbox\":\"\"}],\"deldtlid1\":\"\",\"field15420\":\"\",\"field15431\":\"\",\"submitdtlid1\":\"0\",\"field15421\":\"\",\"field15432\":\"\",\"field15422\":\"\",\"field15423\":\"8.00\",\"field15430\":\"0\"}";
+        List<String> list = getBetweenDate("2022-11-17", "2022-12-10");
         System.out.println(list);
-//        for (String s : list) {
-//            String replace = jsonStr.replace("${date}", s);
-//            RestTemplate restTemplate = new RestTemplate();
-//            restTemplate.getMessageConverters().add(  new MappingJackson2HttpMessageConverter());
-//            HttpHeaders httpHeaders = new HttpHeader();
-//            HttpMethod httpMethod = HttpMethod.POST;
-//            httpHeaders.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-//            httpHeaders.set("Cookie", "ecology_JSessionid=aaaItWuqc022_hgUMgrpy; JSESSIONID=aaaItWuqc022_hgUMgrpy; languageidweaver=7; loginidweaver=H01076; loginuuids=464; __randcode__=9322e178-cebd-4221-8b92-206ab57502d0");
-//
-//            //预处理请求
-//            HttpEntity<Object> httpEntity = new HttpEntity<>(httpHeaders);
-//            ResponseEntity<JSONObject> response = restTemplate.exchange(firstUrl, HttpMethod.GET, httpEntity, JSONObject.class);
-//            Thread.sleep(100);
-//            if (response.getStatusCode() == HttpStatus.OK) {
-//                String token = response.getBody().getString("token");
-//                System.out.println(token);
-//                MultiValueMap<String, String> param = new LinkedMultiValueMap<>();
-//                param.add("billid", "");
-//                param.add("type", "1");
-//                param.add("modeId", "165");
-//                param.add("formId", "-401");
-//                param.add("_key", "bqxb78");
-//                param.add("guid", "card");
-//                param.add("token", token);
-//                param.add("layoutid", "770");
-//                param.add("isFormMode", "1");
-//                param.add("iscreate", "1");
-//                param.add("src", "submit");
-//                param.add("currentLayoutId", "770");
-//                param.add("pageexpandid", "3694");
-//                param.add("JSONStr", replace);
-//                param.add("btntype", "");
-//                param.add("issystemflag", "1");
-//                param.add("oldmodedatastatus", "0");
-//                HttpEntity<MultiValueMap<String, String>> multiValueMapHttpEntity = new HttpEntity<>(param, httpHeaders);
-//                ResponseEntity<JSONObject> exchange = restTemplate.exchange(url, httpMethod, multiValueMapHttpEntity, JSONObject.class);
-//                if (exchange.getStatusCode() == HttpStatus.OK) {
-//                    System.out.println(exchange.getBody());
-//                }
-//            }
-//
-//            // 新增工时请求
-//
-//            Thread.sleep(200);
-//        }
+        for (String s : list) {
+            String replace = jsonStr.replace("${date}", s);
+            RestTemplate restTemplate = new RestTemplate();
+            restTemplate.getMessageConverters().add(  new MappingJackson2HttpMessageConverter());
+            HttpHeaders httpHeaders = new HttpHeaders();
+            HttpMethod httpMethod = HttpMethod.POST;
+            httpHeaders.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            httpHeaders.set("Cookie", "ecology_JSessionid=aaa8nkheOaV944y2qdIsy; languageidweaver=7; JSESSIONID=aaa8nkheOaV944y2qdIsy; loginidweaver=Y00927; loginuuids=307; __randcode__=22500395-9e9f-488c-8351-920d074049e1");
+
+            //预处理请求
+            HttpEntity<Object> httpEntity = new HttpEntity<>(httpHeaders);
+            ResponseEntity<String> response = restTemplate.exchange(firstUrl, HttpMethod.GET, httpEntity, String.class);
+            Thread.sleep(100);
+            System.out.println(response.getBody());
+            JSONObject jsonObject = JSONObject.parseObject(response.getBody());
+            if (response.getStatusCode() == HttpStatus.OK) {
+                String token = jsonObject.getString("token");
+                System.out.println(token);
+                MultiValueMap<String, String> param = new LinkedMultiValueMap<>();
+                param.add("billid", "");
+                param.add("type", "1");
+                param.add("modeId", "165");
+                param.add("formId", "-401");
+                param.add("_key", "a87mgg");
+                param.add("guid", "card");
+                param.add("token", token);
+                param.add("layoutid", "770");
+                param.add("isFormMode", "1");
+                param.add("iscreate", "1");
+                param.add("src", "submit");
+                param.add("currentLayoutId", "770");
+                param.add("pageexpandid", "3694");
+                param.add("JSONStr", replace);
+                param.add("btntype", "");
+                param.add("issystemflag", "1");
+                param.add("oldmodedatastatus", "0");
+                HttpEntity<MultiValueMap<String, String>> multiValueMapHttpEntity = new HttpEntity<>(param, httpHeaders);
+                ResponseEntity<String> exchange = restTemplate.exchange(url, httpMethod, multiValueMapHttpEntity, String.class);
+                if (exchange.getStatusCode() == HttpStatus.OK) {
+                    System.out.println(exchange.getBody());
+                }
+            }
+
+            // 新增工时请求
+
+            Thread.sleep(200);
+        }
 
     }
 

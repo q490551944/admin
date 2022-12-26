@@ -11,6 +11,7 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
+import javax.servlet.http.HttpServletRequest;
 import javax.validation.Valid;
 import java.util.Collections;
 import java.util.List;
@@ -41,7 +42,7 @@ public class UserController {
 
 
     @GetMapping("/one")
-    public User one(@RequestParam Long id) {
+    public User one(HttpServletRequest request, @RequestParam Long id) {
         return userService.getById(id);
     }
 
