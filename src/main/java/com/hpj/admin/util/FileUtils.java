@@ -1,9 +1,9 @@
 package com.hpj.admin.util;
 
-import com.google.common.collect.ImmutableList;
 import org.apache.commons.io.IOUtils;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -31,17 +31,4 @@ public class FileUtils {
         }
         return result;
     }
-
-    public static void main(String[] args) {
-
-        List<String> list = new ArrayList<>();
-        list.add("a");
-        list.add("b");
-        list.add("c");
-        for (String s : list) {
-            list.add("d");
-        }
-        System.out.println(list);
-    }
-
 }

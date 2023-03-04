@@ -4,9 +4,9 @@ import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.internal.MongoClientImpl;
-import org.springframework.data.mongodb.MongoDbFactory;
+import org.springframework.data.mongodb.MongoDatabaseFactory;
 import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.SimpleMongoClientDbFactory;
+import org.springframework.data.mongodb.core.SimpleMongoClientDatabaseFactory;
 
 /**
  * @author huangpeijun
@@ -24,10 +24,10 @@ public abstract class AbstractMongoConfig {
         this.uri = uri;
     }
 
-    public MongoDbFactory mongoDbFactory(String database) {
+    public MongoDatabaseFactory mongoDbFactory(String database) {
         MongoClient client = new MongoClientImpl(MongoClientSettings.builder()
                 .applyConnectionString(new ConnectionString(uri)).build(), null);
-        return new SimpleMongoClientDbFactory(client, database);
+        return new SimpleMongoClientDatabaseFactory(client, database);
     }
 
     abstract public MongoTemplate getMongoTemplate(String database) throws Exception;
