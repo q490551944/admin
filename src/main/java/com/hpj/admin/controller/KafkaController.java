@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * @author huangpeijun
@@ -38,15 +39,21 @@ public class KafkaController {
         props.put("value.deserializer", StringDeserializer.class);
         KafkaConsumer<String, String> kafkaConsumer = new KafkaConsumer<>(props);
         kafkaConsumer.subscribe(list);
+        AtomicBoolean flag = new AtomicBoolean(true);
 //        KafkaConsumers kafkaConsumers = new KafkaConsumers(list, "192.168.0.107", "test", StringDeserializer.class, StringDeserializer.class);
 //        kafkaConsumers.run();
         new Thread(() -> {
-            while (true) {
+            while (flag.get()) {
                 ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofSeconds(1000));
                 for (ConsumerRecord<String, String> record : records) {
-                    System.out.println(record.value());
+                    String value = record.value();
+                    System.out.println(value);
+                    if (value.equals("END_FLAG")) {
+                        flag.set(false);
+                    }
                 }
             }
+            kafkaConsumer.close();
         }).start();
         return null;
     }

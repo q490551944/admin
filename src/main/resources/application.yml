@@ -33,3 +33,12 @@ spring:
 logging:
   level:
     com.hpj.admin.modules.sys.mapper: debug
+mybatis-plus:
+  type-enums-package: com.hpj.admin.enum
+knife4j:
+  enable: true
+test:
+  list:
+    a
+    b
+    c

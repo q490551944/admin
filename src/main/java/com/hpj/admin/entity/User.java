@@ -9,12 +9,6 @@ import lombok.EqualsAndHashCode;
 
 import javax.validation.constraints.NotBlank;
 import javax.validation.constraints.Pattern;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Calendar;
-import java.util.Date;
-import java.util.List;
 
 /**
  * @author huangpeijun
@@ -37,11 +31,6 @@ public class User extends SuperEntity {
 
     private Sex sex;
 
-    public static void main(String[] args) throws ParseException {
-        String startTime = "2022-10-1";
-        String endTime = "2022-10-20";
-
-    }
 
 }
 

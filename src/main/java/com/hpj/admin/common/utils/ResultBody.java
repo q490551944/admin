@@ -112,36 +112,5 @@ public class ResultBody {
     }
 
 
-    public static void main(String[] args) {
-        JSONObject jsonObject = JSONObject.parseObject("{\n" +
-                "  \"detail_1\": [\n" +
-                "    {\n" +
-                "      \"checkbox\": \"\",\n" +
-                "      \"dtl_index\": \"\",\n" +
-                "      \"dtl_id\": \"\",\n" +
-                "      \"field15428\": \"\",\n" +
-                "      \"field15749\": \"\",\n" +
-                "      \"field15424\": \"1107\",\n" +
-                "      \"field15425\": \"ISIM\",\n" +
-                "      \"field15426\": \"2\",\n" +
-                "      \"field15427\": \"8.00\",\n" +
-                "      \"field15647\": \"\"\n" +
-                "    }\n" +
-                "  ],\n" +
-                "  \"submitdtlid1\": \"0\",\n" +
-                "  \"deldtlid1\": \"\",\n" +
-                "  \"field15418\": \"464\",\n" +
-                "  \"field15429\": \"64\",\n" +
-                "  \"field15419\": \"2021-12-14\",\n" +
-                "  \"field15420\": \"\",\n" +
-                "  \"field15431\": \"\",\n" +
-                "  \"field15421\": \"\",\n" +
-                "  \"field15432\": \"\",\n" +
-                "  \"field15422\": \"\",\n" +
-                "  \"field15423\": \"8.00\",\n" +
-                "  \"field15430\": \"0\"\n" +
-                "}");
-        System.out.println(jsonObject.toJSONString());
-    }
 
 }
