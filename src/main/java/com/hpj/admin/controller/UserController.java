@@ -4,9 +4,11 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hpj.admin.common.annotation.Edit;
+import com.hpj.admin.common.config.XhConfig;
 import com.hpj.admin.entity.User;
 import com.hpj.admin.mapper.UserMapper;
 import com.hpj.admin.service.UserService;
+import com.hpj.common.extend.R;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -29,6 +31,9 @@ public class UserController {
 
     @Resource
     private UserMapper userMapper;
+
+    @Resource
+    private XhConfig xhConfig;
 
 
     @GetMapping
@@ -71,6 +76,11 @@ public class UserController {
     @DeleteMapping("/{id}")
     public void j(@PathVariable String id) {
         System.out.println(id);
+    }
+
+    @GetMapping("getXhConfig")
+    public R<XhConfig> getConfig() {
+        return R.ok(xhConfig);
     }
 
 

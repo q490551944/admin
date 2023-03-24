@@ -13,7 +13,7 @@ import org.springframework.data.mongodb.core.MongoTemplate;
 public class MongoDBDataSourceConfig extends AbstractMongoConfig {
 
     @Override
-    public MongoTemplate getMongoTemplate(String database) throws Exception {
+    public MongoTemplate getMongoTemplate(String database) {
         return new MongoTemplate(mongoDbFactory(database));
     }
 }

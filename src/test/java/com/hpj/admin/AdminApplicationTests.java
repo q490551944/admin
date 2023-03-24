@@ -124,7 +124,7 @@ class AdminApplicationTests {
         searchRequest.source(sourceBuilder);
         SearchResponse search = client.search(searchRequest, RequestOptions.DEFAULT);
         SearchHits hits = search.getHits();
-        System.out.println("查询文档总数:" + hits.totalHits);
+        System.out.println("查询文档总数:" + hits.getTotalHits());
         hits.forEach(e -> System.out.println("原生文档信息：" + e.getSourceAsString()));
     }
 

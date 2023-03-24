@@ -22,7 +22,7 @@ spring:
     password: 123456
     url: jdbc:mysql://localhost:3306/test?useUnicode=true&characterEncoding=utf8&allowMultiQueries=true&serverTimezone=Asia/Shanghai
   redis:
-    host: 127.0.0.1
+    host: 172.31.184.181
     port: 6379
   data:
     mongodb:
@@ -30,6 +30,16 @@ spring:
   elasticsearch:
     rest:
       uris: ["127.0.0.1:9200"]
+  cloud:
+    inetutils:
+      ignored-interfaces:
+        - .*VMware
+        - aabb
 logging:
   level:
     com.hpj.admin.modules.sys.mapper: debug
+xh:
+  test:
+    - a
+    - b
+    - c
