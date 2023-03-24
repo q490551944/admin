@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
+ * 获取人人视频资源列表
  * @author huangpeijun
  * @date 2020/12/14
  */

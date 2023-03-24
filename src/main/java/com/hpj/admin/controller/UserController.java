@@ -9,6 +9,8 @@ import com.hpj.admin.entity.User;
 import com.hpj.admin.mapper.UserMapper;
 import com.hpj.admin.service.UserService;
 import com.hpj.common.extend.R;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiOperation;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -22,6 +24,7 @@ import java.util.List;
  * @author huangpeijun
  * @date 2020/3/3
  */
+@Api(tags = "用户管理")
 @RestController
 @RequestMapping("/sys/users")
 public class UserController {
@@ -37,6 +40,7 @@ public class UserController {
 
 
     @GetMapping
+    @ApiOperation("查询用户信息")
     public List<User> query(@RequestParam long current,
                             @RequestParam long size) {
         QueryWrapper<User> wrapper = new QueryWrapper<>();
