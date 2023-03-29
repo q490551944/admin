@@ -29,12 +29,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.runner.RunWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.core.io.support.ResourcePatternResolver;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.test.context.junit4.SpringRunner;
 
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.Random;
 
@@ -48,6 +52,9 @@ class AdminApplicationTests {
     private BulkProcessor bulkProcessor;
     @Autowired
     private RestHighLevelClient client;
+
+    @Autowired
+    ResourcePatternResolver resourceLoader;
 
     @Test
     void contextLoads() {
@@ -96,6 +103,7 @@ class AdminApplicationTests {
 
     /**
      * es数据测试
+     *
      * @throws IOException IO异常
      */
     @Test
@@ -144,9 +152,9 @@ class AdminApplicationTests {
         // X轴设置
         XDDFCategoryAxis categoryAxis = chart.createCategoryAxis(AxisPosition.BOTTOM);
         categoryAxis.setTitle("日期");
-        String[] xAxisData = new String[] {
-                "2021-01","2021-02","2021-03","2021-04","2021-05","2021-06",
-                "2021-07","2021-08","2021-09","2021-10","2021-11","2021-12",
+        String[] xAxisData = new String[]{
+                "2021-01", "2021-02", "2021-03", "2021-04", "2021-05", "2021-06",
+                "2021-07", "2021-08", "2021-09", "2021-10", "2021-11", "2021-12",
         };
         XDDFCategoryDataSource xAxisSource = XDDFDataSourcesFactory.fromArray(xAxisData); // 设置X轴数据
 
@@ -179,5 +187,26 @@ class AdminApplicationTests {
         // 11、关闭流
         fos.close();
         xwpfDocument.close();
+    }
+
+    @Test
+    public void testClassPathResource() throws IOException {
+//        Resource[] resources = resourceLoader.getResources("classpath*:db/migration/*");
+//        for (Resource resource : resources) {
+//            System.out.println(resource.getURI().getPath());
+//            if (resource.isReadable()) {
+//                System.out.println(IOUtils.toString(resource.getInputStream(), StandardCharsets.UTF_8));
+//            }
+//        }
+        List<URL> locationUrls = new ArrayList<>();
+        Enumeration<URL> urls;
+        urls = resourceLoader.getClassLoader().getResources("db/migration");
+        while (urls.hasMoreElements()) {
+            locationUrls.add(urls.nextElement());
+        }
+        for (URL locationUrl : locationUrls) {
+            System.out.println(locationUrl.getProtocol());
+        }
+        System.out.println(locationUrls);
     }
 }
