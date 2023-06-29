@@ -8,7 +8,6 @@ import com.hpj.admin.common.config.XhConfig;
 import com.hpj.admin.entity.User;
 import com.hpj.admin.mapper.UserMapper;
 import com.hpj.admin.service.UserService;
-import com.hpj.common.extend.R;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
 import org.springframework.validation.annotation.Validated;
@@ -35,9 +34,6 @@ public class UserController {
     @Resource
     private UserMapper userMapper;
 
-    @Resource
-    private XhConfig xhConfig;
-
 
     @GetMapping
     @ApiOperation("查询用户信息")
@@ -51,7 +47,7 @@ public class UserController {
 
 
     @GetMapping("/one")
-    public User one(HttpServletRequest request, @RequestParam Long id) {
+    public User one(@RequestParam Long id) {
         return userService.getById(id);
     }
 
@@ -82,10 +78,6 @@ public class UserController {
         System.out.println(id);
     }
 
-    @GetMapping("getXhConfig")
-    public R<XhConfig> getConfig() {
-        return R.ok(xhConfig);
-    }
 
 
 }
