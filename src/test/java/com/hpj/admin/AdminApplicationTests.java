@@ -9,10 +9,14 @@ import org.apache.poi.util.Units;
 import org.apache.poi.xddf.usermodel.chart.*;
 import org.apache.poi.xwpf.usermodel.XWPFChart;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.elasticsearch.action.bulk.BulkItemResponse;
 import org.elasticsearch.action.bulk.BulkProcessor;
+import org.elasticsearch.action.bulk.BulkRequest;
+import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.action.support.WriteRequest;
 import org.elasticsearch.client.IndicesClient;
 import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.RestHighLevelClient;
@@ -37,10 +41,7 @@ import org.springframework.test.context.junit4.SpringRunner;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.Enumeration;
-import java.util.List;
-import java.util.Random;
+import java.util.*;
 
 @RunWith(SpringRunner.class)
 @SpringBootTest
@@ -55,6 +56,8 @@ class AdminApplicationTests {
 
     @Autowired
     ResourcePatternResolver resourceLoader;
+    @Autowired
+    private BulkProcessor processor;
 
     @Test
     void contextLoads() {
@@ -209,4 +212,20 @@ class AdminApplicationTests {
         }
         System.out.println(locationUrls);
     }
+
+    @Test
+    public void bulk() throws InterruptedException {
+
+        String indexName = "test";
+        String id = "aaa";
+        BulkRequest request = new BulkRequest();
+        for (int i = 0; i < 10; i++) {
+            Map<String, Object> map =new HashMap<>();
+            map.put("name","批量"+i);
+            map.put("val","批量的数据");
+            processor.add(new IndexRequest(indexName, "_doc", id + i).source(map, XContentType.JSON));
+        }
+        Thread.sleep(10000);
+    }
+
 }
