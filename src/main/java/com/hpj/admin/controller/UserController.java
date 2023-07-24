@@ -4,17 +4,17 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hpj.admin.common.annotation.Edit;
-import com.hpj.admin.common.config.XhConfig;
 import com.hpj.admin.entity.User;
 import com.hpj.admin.mapper.UserMapper;
 import com.hpj.admin.service.UserService;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
-import javax.servlet.http.HttpServletRequest;
 import javax.validation.Valid;
 import java.util.Collections;
 import java.util.List;
@@ -27,6 +27,8 @@ import java.util.List;
 @RestController
 @RequestMapping("/sys/users")
 public class UserController {
+
+    private static final Logger logger = LoggerFactory.getLogger(UserController.class);
 
     @Resource
     private UserService userService;
@@ -75,6 +77,7 @@ public class UserController {
 
     @DeleteMapping("/{id}")
     public void j(@PathVariable String id) {
+        logger.info("aaa");
         System.out.println(id);
     }
 

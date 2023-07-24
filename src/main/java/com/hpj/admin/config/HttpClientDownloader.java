@@ -35,7 +35,7 @@ import java.util.Map;
  */
 public class HttpClientDownloader extends AbstractDownloader {
 
-    private Logger logger = LoggerFactory.getLogger(getClass());
+    private final Logger logger = LoggerFactory.getLogger(getClass());
 
     private final Map<String, CloseableHttpClient> httpClients = new HashMap<>();
 
