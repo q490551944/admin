@@ -1,53 +1,38 @@
 package com.hpj.admin.config;
 
-import org.springframework.beans.factory.annotation.Autowired;
+import io.swagger.v3.oas.models.ExternalDocumentation;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.info.Info;
+import io.swagger.v3.oas.models.info.License;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.env.ConfigurableEnvironment;
-import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
-import springfox.documentation.builders.ApiInfoBuilder;
-import springfox.documentation.builders.PathSelectors;
-import springfox.documentation.builders.RequestHandlerSelectors;
-import springfox.documentation.service.ApiInfo;
-import springfox.documentation.spi.DocumentationType;
-import springfox.documentation.spring.web.plugins.Docket;
-import springfox.documentation.swagger2.annotations.EnableSwagger2WebMvc;
 
 @Configuration
-@EnableSwagger2WebMvc
 public class SwaggerConfig implements WebMvcConfigurer {
 
-    @Autowired
-    private ConfigurableEnvironment environment;
+    private License license() {
+        return new License()
+                .name("MIT")
+                .url("https://opensource.org/licenses/MIT");
+    }
+
+    private Info info(){
+        return new Info()
+                .title("系统管理服务")
+                .description("A test project for Mr.Huang.")
+                .version("v1.0.0");
+    }
+    private ExternalDocumentation externalDocumentation() {
+        return new ExternalDocumentation()
+                .description("这是一个额外的描述。")
+                .url("https://shijizhe.github.io/");
+    }
 
     @Bean
-    public Docket createRestApi() {
-        return new Docket(DocumentationType.SWAGGER_2)  // DocumentationType.SWAGGER_2 固定的，代表swagger2
-//                .groupName("分布式任务系统") // 如果配置多个文档的时候，那么需要配置groupName来分组标识
-                .apiInfo(apiInfo()) // 用于生成API信息
-                .select() // select()函数返回一个ApiSelectorBuilder实例,用来控制接口被swagger做成文档
-                .apis(RequestHandlerSelectors.basePackage("com.hpj.admin.controller")) // 用于指定扫描哪个包下的接口
-                .paths(PathSelectors.any())// 选择所有的API,如果你想只为部分API生成文档，可以配置这里
-                .build();
-    }
-
-    /**
-     * 用于定义API主界面的信息，比如可以声明所有的API的总标题、描述、版本
-     */
-    private ApiInfo apiInfo() {
-        return new ApiInfoBuilder()
-                .title("XX项目API") //  可以用来自定义API的主标题
-                .description("XX项目SwaggerAPI管理") // 可以用来描述整体的API
-                .termsOfServiceUrl("") // 用于定义服务的域名
-                .version("1.0") // 可以用来定义版本。
-                .build(); //
-    }
-
-    @Override
-    public void addResourceHandlers(ResourceHandlerRegistry registry) {
-        registry.addResourceHandler("/swagger-ui.html").addResourceLocations("classpath:/META-INF/resources/");
-        registry.addResourceHandler("/doc.html").addResourceLocations("classpath:/META-INF/resources/");
-        registry.addResourceHandler("/webjars/**").addResourceLocations("classpath:/META-INF/resources/webjars/");
+    public OpenAPI springShopOpenAPI() {
+        return new OpenAPI()
+                .info(info())
+                .externalDocs(externalDocumentation());
     }
 }

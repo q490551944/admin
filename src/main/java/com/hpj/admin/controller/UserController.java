@@ -7,15 +7,17 @@ import com.hpj.admin.common.annotation.Edit;
 import com.hpj.admin.entity.User;
 import com.hpj.admin.mapper.UserMapper;
 import com.hpj.admin.service.UserService;
-import io.swagger.annotations.Api;
-import io.swagger.annotations.ApiOperation;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.Parameters;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.annotation.Resource;
+import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
-import jakarta.annotation.Resource;
-import jakarta.validation.Valid;
 import java.util.Collections;
 import java.util.List;
 
@@ -23,7 +25,7 @@ import java.util.List;
  * @author huangpeijun
  * @date 2020/3/3
  */
-@Api(tags = "用户管理")
+@Tag(name = "用户管理")
 @RestController
 @RequestMapping("/sys/users")
 public class UserController {
@@ -38,7 +40,11 @@ public class UserController {
 
 
     @GetMapping
-    @ApiOperation("查询用户信息")
+    @Operation(description = "查询用户信息")
+    @Parameters({
+            @Parameter(name = "current", required = true),
+            @Parameter(name = "size", required = true)
+    })
     public List<User> query(@RequestParam long current,
                             @RequestParam long size) {
         QueryWrapper<User> wrapper = new QueryWrapper<>();
@@ -80,7 +86,6 @@ public class UserController {
         logger.info("aaa");
         System.out.println(id);
     }
-
 
 
 }
