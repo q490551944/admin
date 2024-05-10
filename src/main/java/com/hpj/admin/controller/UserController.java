@@ -40,10 +40,10 @@ public class UserController {
 
 
     @GetMapping
-    @Operation(description = "查询用户信息")
+    @Operation(summary = "查询用户信息")
     @Parameters({
-            @Parameter(name = "current", required = true),
-            @Parameter(name = "size", required = true)
+            @Parameter(name = "current", description = "当前页", required = true),
+            @Parameter(name = "size", description = "每个数量", required = true)
     })
     public List<User> query(@RequestParam long current,
                             @RequestParam long size) {
