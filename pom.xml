@@ -173,6 +173,12 @@
             <version>4.0.14</version>
             <type>pom</type>
         </dependency>
+        <!-- https://mvnrepository.com/artifact/cn.afterturn/easypoi-spring-boot-starter -->
+        <dependency>
+            <groupId>cn.afterturn</groupId>
+            <artifactId>easypoi-spring-boot-starter</artifactId>
+            <version>4.5.0</version>
+        </dependency>
     </dependencies>
 
     <dependencyManagement>

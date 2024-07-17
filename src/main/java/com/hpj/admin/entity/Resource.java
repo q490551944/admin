@@ -1,6 +1,7 @@
 package com.hpj.admin.entity;
 
 import com.hpj.admin.common.extend.SuperEntity;
+import jakarta.validation.constraints.Pattern;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
@@ -12,6 +13,7 @@ import lombok.EqualsAndHashCode;
 @Data
 public class Resource extends SuperEntity {
 
+    @Pattern(regexp = "^[\\[()\\]][0-9,]*[\\[()\\]]$")
     private String name;
 
     private Long parentId;
