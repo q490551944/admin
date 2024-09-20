@@ -5,6 +5,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.util.*;
+import java.util.concurrent.locks.AbstractQueuedSynchronizer;
 
 @RunWith(JUnit4.class)
 public class AlgorithmTests {

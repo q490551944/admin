@@ -2,9 +2,10 @@ package com.hpj.admin.util;
 
 import cn.afterturn.easypoi.excel.ExcelExportUtil;
 import cn.afterturn.easypoi.excel.entity.ExportParams;
-import com.google.common.collect.Lists;
 import com.hpj.admin.entity.PerformanceInfo;
+import com.hpj.admin.entity.Translate;
 import org.apache.poi.ss.usermodel.Workbook;
+import org.junit.jupiter.api.Test;
 
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -38,8 +39,26 @@ public class ExcelUtils {
         System.out.println(performanceInfo);
         ExportParams params = new ExportParams();
         params.setStyle(ExcelExportStatisticStyler.class);
-        Workbook workbook = ExcelExportUtil.exportExcel(params, PerformanceInfo.class, Lists.newArrayList(performanceInfo));
+        List<PerformanceInfo> arrayList = new ArrayList<>();
+        arrayList.add(performanceInfo);
+        Workbook workbook = ExcelExportUtil.exportExcel(params, PerformanceInfo.class, arrayList);
         OutputStream os = new FileOutputStream("C:\\workerspace\\test\\test.xlsx");
+        workbook.write(os);
+    }
+
+    @Test
+    public void test() throws IOException {
+        List<Translate> list = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            Translate translate = new Translate();
+            translate.setZh("a");
+            translate.setEn("b");
+            list.add(translate);
+        }
+        ExportParams params = new ExportParams();
+        params.setStyle(ExcelExportStatisticStyler.class);
+        Workbook workbook = ExcelExportUtil.exportExcel(params, PerformanceInfo.class, list);
+        OutputStream os = new FileOutputStream("C:\\workerspace\\test\\translate.xlsx");
         workbook.write(os);
     }
 }

@@ -184,7 +184,95 @@
             <artifactId>easypoi-spring-boot-starter</artifactId>
             <version>4.5.0</version>
         </dependency>
+        <!--    shp文件解析 开始    -->
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-shapefile</artifactId>
+            <version>19.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.ejml</groupId>
+            <artifactId>ejml-ddense</artifactId>
+            <version>0.39</version>
+        </dependency>
+        <dependency>
+            <groupId>org.ejml</groupId>
+            <artifactId>ejml-core</artifactId>
+            <version>0.39</version>
+        </dependency>
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-opengis</artifactId>
+            <version>19.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-data</artifactId>
+            <version>19.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-api</artifactId>
+            <version>19.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-main</artifactId>
+            <version>19.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-metadata</artifactId>
+            <version>19.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-referencing</artifactId>
+            <version>19.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-geojson</artifactId>
+            <version>19.2</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.8.5</version>
+        </dependency>
+        <dependency>
+            <groupId>com.vividsolutions</groupId>
+            <artifactId>jts</artifactId>
+            <version>1.13</version>
+        </dependency>
+
+        <!--    shp文件解析 结束    -->
+
+
+        <dependency>
+            <groupId>com.hankcs</groupId>
+            <artifactId>hanlp</artifactId>
+            <version>portable-1.8.4</version> <!-- 请根据最新版本调整版本号 -->
+        </dependency>
     </dependencies>
+
+    <repositories>
+        <repository>
+            <id>osgeo</id>
+            <name>OSGeo Release Repository</name>
+            <url>https://repo.osgeo.org/repository/release/</url>
+            <snapshots><enabled>false</enabled></snapshots>
+            <releases><enabled>true</enabled></releases>
+        </repository>
+        <repository>
+            <id>osgeo-snapshot</id>
+            <name>OSGeo Snapshot Repository</name>
+            <url>https://repo.osgeo.org/repository/snapshot/</url>
+            <snapshots><enabled>true</enabled></snapshots>
+            <releases><enabled>false</enabled></releases>
+        </repository>
+
+    </repositories>
 
     <dependencyManagement>
         <dependencies>
