@@ -110,6 +110,13 @@ public class ShpTests {
     }
 
 
+    /**
+     * 翻译
+     * @param en  英文原文
+     * @return    中文结果
+     * @throws URISyntaxException URI语法错误
+     * @throws IOException        IO异常
+     */
     public Translate translate(String en) throws URISyntaxException, IOException {
         Translate translate = new Translate();
         String appid = "20240919002154092";

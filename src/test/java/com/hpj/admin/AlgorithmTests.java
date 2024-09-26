@@ -5,7 +5,6 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.util.*;
-import java.util.concurrent.locks.AbstractQueuedSynchronizer;
 
 @RunWith(JUnit4.class)
 public class AlgorithmTests {
@@ -216,5 +215,66 @@ public class AlgorithmTests {
             }
         }
         return d[n];
+    }
+
+    @Test
+    public void testDistinctNames() {
+        String[] ideas = {"coffee","donuts","time","toffee"};
+        long distinctNames = distinctNames(ideas);
+        System.out.println(distinctNames);
+    }
+
+    public long distinctNames(String[] ideas) {
+        Map<String, Set<String>> map = new HashMap<>();
+        for(String s : ideas) {
+            String first = s.substring(0, 1);
+            String rest = s.substring(1);
+            Set<String> set = map.getOrDefault(first, new HashSet<>());
+            set.add(rest);
+            map.put(first, set);
+        }
+        long result = 0;
+        for (Map.Entry<String, Set<String>> entry : map.entrySet()) {
+            for (Map.Entry<String, Set<String>> bEntry : map.entrySet()) {
+                if (Objects.equals(entry.getKey(), bEntry.getKey())) {
+                    continue;
+                }
+                result += ((long) (entry.getValue().size() - getIntersectSize(entry.getValue(), bEntry.getValue())) * (bEntry.getValue().size() - getIntersectSize(entry.getValue(), bEntry.getValue())));
+            }
+        }
+        return result;
+    }
+
+    public int getIntersectSize(Set<String> a, Set<String> b) {
+        int result = 0;
+        for (String s : a) {
+            if (b.contains(s)) {
+                result++;
+            }
+        }
+        return result;
+    }
+
+    @Test
+    public void testMaximumSubsequenceCount() {
+        String text = "aaaaaaaaaaaaa";
+        String pattern = "aa";
+        System.out.println(maximumSubsequenceCount(text, pattern));
+    }
+
+    public long maximumSubsequenceCount(String text, String pattern) {
+        int cnt1 = 0;
+        int cnt2 = 0;
+        long result = 0;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == pattern.charAt(1)) {
+                result += cnt1;
+                cnt2++;
+            }
+            if (text.charAt(i) == pattern.charAt(0)) {
+                cnt1 ++;
+            }
+        }
+        return result + Math.max(cnt1, cnt2);
     }
 }
