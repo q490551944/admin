@@ -51,7 +51,7 @@ public class RedissonTests {
                 redissonClient.getStream("a").createGroup("b", StreamMessageId.ALL);
             }
             while (true) {
-                RFuture<Map<StreamMessageId, Map<String, String>>> mapRFuture = a.readGroupAsync("b", "a", StreamReadGroupArgs.greaterThan(StreamMessageId.NEVER_DELIVERED).count(1).timeout(Duration.ofSeconds(2)));
+                RFuture<Map<StreamMessageId, Map<String, String>>> mapRFuture = a.readGroupAsync("b", "a", StreamReadGroupArgs.greaterThan(StreamMessageId.NEVER_DELIVERED).timeout(Duration.ofSeconds(2)));
                 try {
                     Map<StreamMessageId, Map<String, String>> map = mapRFuture.get();
                     map.forEach((streamMessageId, objectObjectMap) -> {
@@ -59,6 +59,7 @@ public class RedissonTests {
                             logger.info("streamMessageId:{},key:{}, value:{}", streamMessageId, k, v);
                         });
                         a.ack("b", streamMessageId);
+                        a.remove(streamMessageId);
                     });
                 } catch (InterruptedException | ExecutionException e) {
                     throw new RuntimeException(e);
@@ -72,16 +73,18 @@ public class RedissonTests {
     public void testSendStream() throws InterruptedException {
         RStream<String, String> a = redissonClient.getStream("a");
         new Thread(() -> {
-            for (int i = 0; i < 10; i++) {
-                StreamAddArgs<String, String> entries = StreamAddArgs.entries("hpj", i + "", "cc", i + "");
+            logger.info("开始推送数据");
+            for (int i = 0; i < 100000; i++) {
+                StreamAddArgs<String, String> entries = StreamAddArgs.entry("hpj", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
                 a.add(entries);
-                try {
-                    // 每500ms加一条数据
-                    Thread.sleep(500);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
+//                try {
+//                    // 每500ms加一条数据
+//                    Thread.sleep(500);
+//                } catch (InterruptedException e) {
+//                    throw new RuntimeException(e);
+//                }
             }
+            logger.info("数据推送完毕");
         }).start();
         Thread.sleep(100000);
     }

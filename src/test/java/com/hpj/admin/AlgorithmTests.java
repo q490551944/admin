@@ -5,6 +5,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @RunWith(JUnit4.class)
 public class AlgorithmTests {
@@ -277,4 +278,96 @@ public class AlgorithmTests {
         }
         return result + Math.max(cnt1, cnt2);
     }
+
+    @Test
+    public void test() {
+        List<AtomicInteger> list = new ArrayList<>();
+        list.add(new AtomicInteger());
+        list.get(0).getAndAdd(-100);
+        list.get(0).set(0);
+        System.out.println(list);
+        String s = "abc";
+    }
+
+    @Test
+    public void testTaskCharacters() {
+        String s = "aabaaaacaabc";
+        int k = 2;
+        int i = takeCharacters(s, k);
+        System.out.println(i);
+    }
+
+    public int takeCharacters(String s, int k) {
+        int[] cnt = new int[3];
+        int len = s.length();
+        int ans = len;
+        for(int i = 0; i < len; i++) {
+            cnt[s.charAt(i) - 'a']++;
+        }
+        if(cnt[0] >= k && cnt[1] >= k && cnt[2] >= k) {
+            ans = Math.min(ans, len);
+        } else {
+            return -1;
+        }
+        int left = 0;
+        for(int right = 0; right < len; right++) {
+            cnt[s.charAt(right) - 'a']--;
+            while(left < right && (cnt[0] < k || cnt[1] < k || cnt[2] < k)) {
+                cnt[s.charAt(left) - 'a']++;
+                left++;
+            }
+            if(cnt[0] >= k && cnt[1] >= k && cnt[2] >= k) {
+                ans = Math.min(ans, len - (right - left + 1));
+            }
+        }
+        return ans;
+    }
+
+    @Test
+    public void testArray() {
+//        Arrays.fill(nums, 1);
+//        System.out.println(Arrays.toString(nums));
+        Map<String, String> map = new HashMap<>();
+        String next = map.keySet().iterator().next();
+    }
+
+    @Test
+    public void testMinimumDifference() {
+        int[] nums = {1, 2, 4, 5};
+        int i = minimumDifference(nums, 3);
+        System.out.println(i);
+    }
+
+    public int minimumDifference(int[] nums, int k) {
+        int n = nums.length;
+        int[] bitsMaxPos = new int[31];
+        Arrays.fill(bitsMaxPos, -1);
+        List<int[]> posToBit = new ArrayList<int[]>();
+        int res = Integer.MAX_VALUE;
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j <= 30; j++) {
+                if ((nums[i] >> j & 1) != 0) {
+                    bitsMaxPos[j] = i;
+                }
+            }
+            posToBit.clear();
+            for (int j = 0; j <= 30; j++) {
+                if (bitsMaxPos[j] != -1) {
+                    posToBit.add(new int[]{bitsMaxPos[j], j});
+                }
+            }
+            Collections.sort(posToBit, (a, b) -> a[0] != b[0] ? b[0] - a[0] : b[1] - a[1]);
+            int val = 0;
+            for (int j = 0, p = 0; j < posToBit.size(); ) {
+                while (j < posToBit.size() && posToBit.get(j)[0] == posToBit.get(p)[0]) {
+                    val |= 1 << posToBit.get(j)[1];
+                    j++;
+                }
+                res = Math.min(res, Math.abs(val - k));
+                p = j;
+            }
+        }
+        return res;
+    }
 }
+
