@@ -20,11 +20,7 @@ public class FileUtils {
     public static List<List<String>> parseCsv(InputStream inputStream) {
         List<List<String>> result = new ArrayList<>();
         List<String> lines = new ArrayList<>();
-        try {
-            lines = IOUtils.readLines(inputStream, StandardCharsets.UTF_8);
-        }catch (IOException e) {
-            e.printStackTrace();
-        }
+        lines = IOUtils.readLines(inputStream, StandardCharsets.UTF_8);
         // csv文件每一行以逗号分隔
         for (String line : lines) {
             result.add( Arrays.asList(line.split(COMMA_STRING)));

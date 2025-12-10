@@ -21,7 +21,7 @@ import java.util.concurrent.ExecutionException;
 public class RedissonTests {
 
 
-    @Autowired
+    @Autowired(required = false)
     private RedissonClient redissonClient;
 
     private static final Logger logger = LoggerFactory.getLogger(RedissonTests.class);

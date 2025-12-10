@@ -64,8 +64,8 @@ public class SingleScriptController {
     }
 
     @PostMapping(value = "/execute")
-    public @ResponseBody
-    Object ruleExecutor(@RequestBody ScriptRequest request) {
+    @ResponseBody
+    public Object ruleExecutor(@RequestBody ScriptRequest request) {
         if (request.getParamMap() == null) {
             return ruleParse(request.getExpression());
         } else {

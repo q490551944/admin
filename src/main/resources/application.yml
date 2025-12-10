@@ -6,6 +6,31 @@ spring:
       matching-strategy: ant_path_matcher
   kafka:
     bootstrap-servers: localhost:9092
+    admin:
+      security:
+        protocol:
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      security:
+        protocol: SASL_PLAINTEXT
+      properties:
+        sasl:
+          mechanism: PLAIN
+          jaas:
+            config: org.apache.kafka.common.security.plain.PlainLoginModule required username='admin' password='123456';
+    consumer:
+      group-id: test-consumer-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+      security:
+        protocol: SASL_PLAINTEXT
+      properties:
+        sasl:
+          mechanism: PLAIN
+          jaas:
+            config: org.apache.kafka.common.security.plain.PlainLoginModule required username='admin' password='123456';
   application:
     name: admin
   datasource:
@@ -17,9 +42,9 @@ spring:
     inetutils:
       ignored-interfaces:
         - .*VMware
-  elasticsearch:
-    uris:
-      [ "127.0.0.1:9200"]
+#  elasticsearch:
+#    uris:
+#      [ "127.0.0.1:9200"]
   data:
     redis:
       host: 127.0.0.1
@@ -45,3 +70,7 @@ knife4j:
 mybatis-plus:
   configuration:
     configuration-factory: java.lang.Object
+arthas:
+  tunnel-server: ws://localhost:7777/ws
+  app-name: ${spring.application.name}
+  telnet-port: 0

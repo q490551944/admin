@@ -1,5 +1,7 @@
 package com.hpj.admin;
 
+import com.hpj.admin.entity.ListNode;
+import org.apache.commons.lang3.RegExUtils;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -368,6 +370,156 @@ public class AlgorithmTests {
             }
         }
         return res;
+    }
+
+    @Test
+    public void testMergeTwoLists() {
+        ListNode l1 = new ListNode(1, new ListNode(2, new ListNode(4)));
+        ListNode l2 = new ListNode(1, new ListNode(3, new ListNode(4)));
+        ListNode listNode = mergeTwoLists(l1, l2);
+        while (listNode != null) {
+            System.out.println(listNode.val);
+            listNode = listNode.next;
+        }
+    }
+
+    public ListNode mergeTwoLists(ListNode list1, ListNode list2) {
+        ListNode res = new ListNode();
+        ListNode last = res;
+        while(list1 != null && list2 != null) {
+            if(list1.val < list2.val) {
+                last.next = list1;
+                list1 = list1.next;
+            } else {
+                last.next = list2;
+                list2 = list2.next;
+            }
+            last = last.next;
+        }
+        if(list1 != null) {
+            last.next = list1;
+        }
+        if(list2 != null) {
+            last.next = list2;
+        }
+        return res.next;
+    }
+
+    @Test
+    public void testDuplicateNumberXOR() {
+        int[] nums = {1,2,2,1};
+        int i = duplicateNumbersXOR(nums);
+        System.out.println(i);
+    }
+
+    public int duplicateNumbersXOR(int[] nums) {
+        Map<Integer, Integer> map = new HashMap<>();
+        int res = 0;
+        for(int num : nums) {
+            Integer count = map.getOrDefault(num, 0);
+            count++;
+            if(count == 2) {
+                if(res == 0) {
+                    res = num;
+                } else {
+                    res = res ^ num;
+                }
+            }
+            map.put(num, count);
+        }
+        return res;
+    }
+
+    @Test
+    public void testGetSmallestString() {
+        String s = "45320";
+        String smallestString = getSmallestString(s);
+        System.out.println(smallestString);
+    }
+
+    /**
+     * 3216. 交换后字典序最小的字符串
+     */
+    public String getSmallestString(String s) {
+        int n = s.length();
+        char[] chars = s.toCharArray();
+        for (int i = 0; i < n - 1;i++ ) {
+            if (chars[i] % 2 == chars[i + 1] % 2 && chars[i] > chars[i + 1]) {
+                char temp = chars[i + 1];
+                chars[i + 1] = chars[i];
+                chars[i] = temp;
+                break;
+            }
+        }
+        return new String(chars);
+    }
+
+    @Test
+    public void testMaxEnergyBoost() {
+        int[] a = {1, 3, 1};
+        int[] b = {3, 1, 1};
+        long res = maxEnergyBoost(a, b);
+        System.out.println(res);
+    }
+
+    public long maxEnergyBoost(int[] energyDrinkA, int[] energyDrinkB) {
+        int n = energyDrinkA.length;
+        long[][] d = new long[n + 1][2];
+        for (int i = 1; i <= n; i++) {
+            d[i][0] = d[i - 1][0] + energyDrinkA[i - 1];
+            d[i][1] = d[i - 1][1] + energyDrinkB[i - 1];
+            if (i >= 2) {
+                d[i][0] = Math.max(d[i][0], d[i - 2][1] + energyDrinkA[i - 1]);
+                d[i][1] = Math.max(d[i][1], d[i - 2][0] + energyDrinkB[i - 1]);
+            }
+        }
+        return Math.max(d[n][0], d[n][1]);
+    }
+
+    @Test
+    public void testMinimumSubarrayLength() {
+        int[] nums = new int[] {2, 1, 8};
+        int k = 10;
+        System.out.println(minimumSubarrayLength(nums, k));
+    }
+
+    public int minimumSubarrayLength(int[] nums, int k) {
+        int res = Integer.MAX_VALUE;
+        int[] bits = new int[30];
+        int left = 0;
+        int right = 0;
+        while(right < nums.length) {
+            for(int i = 0; i< 30; i++) {
+                bits[i] += (nums[right] >> i) &1;
+            }
+            while(left <= right && calc(bits) >= k) {
+                res = Math.min(res, right - left + 1);
+                for(int i = 0; i< 30; i++) {
+                    bits[i] -= (nums[left] >> i) & 1;
+                }
+                left++;
+            }
+            right++;
+        }
+        return res == Integer.MAX_VALUE ? -1 : res;
+    }
+
+    private int calc(int[] bits) {
+        int res = 0;
+        for(int i = 0; i< bits.length; i++) {
+            if (bits[i] > 0) {
+                res |= 1 << i;
+            }
+        }
+        return res;
+    }
+
+    @Test
+    public void testRegex() {
+        String pattern = "/^-?\\d+(\\.\\d+)?$/";
+        String s = "12.3.45";
+        String result = RegExUtils.replaceAll(s, pattern, "");
+        System.out.println(result);
     }
 }
 

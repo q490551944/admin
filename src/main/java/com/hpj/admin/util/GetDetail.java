@@ -5,14 +5,12 @@ import us.codecraft.webmagic.Page;
 import us.codecraft.webmagic.Request;
 import us.codecraft.webmagic.Site;
 import us.codecraft.webmagic.Spider;
-import us.codecraft.webmagic.pipeline.Pipeline;
 import us.codecraft.webmagic.processor.PageProcessor;
 import us.codecraft.webmagic.proxy.Proxy;
 import us.codecraft.webmagic.proxy.SimpleProxyProvider;
 import us.codecraft.webmagic.selector.Html;
 import us.codecraft.webmagic.selector.Selectable;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 

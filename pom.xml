@@ -26,7 +26,7 @@
         <dependency>
             <groupId>us.codecraft</groupId>
             <artifactId>webmagic-core</artifactId>
-            <version>0.10.0</version>
+            <version>1.0.3</version>
             <exclusions>
                 <exclusion>
                     <groupId>net.minidev</groupId>
@@ -37,7 +37,7 @@
         <dependency>
             <groupId>us.codecraft</groupId>
             <artifactId>webmagic-extension</artifactId>
-            <version>0.10.0</version>
+            <version>1.0.3</version>
         </dependency>
         <dependency>
             <groupId>com.alibaba</groupId>
@@ -245,14 +245,26 @@
             <artifactId>jts</artifactId>
             <version>1.13</version>
         </dependency>
-
         <!--    shp文件解析 结束    -->
-
-
         <dependency>
             <groupId>com.hankcs</groupId>
             <artifactId>hanlp</artifactId>
             <version>portable-1.8.4</version> <!-- 请根据最新版本调整版本号 -->
+        </dependency>
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+            <version>5.13.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.taobao.arthas</groupId>
+            <artifactId>arthas-spring-boot-starter</artifactId>
+            <version>4.0.4</version>
+        </dependency>
+        <dependency>
+            
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-freemarker</artifactId>
         </dependency>
     </dependencies>
 
