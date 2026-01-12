@@ -42,8 +42,15 @@ public class ExcelUtils {
         List<PerformanceInfo> arrayList = new ArrayList<>();
         arrayList.add(performanceInfo);
         Workbook workbook = ExcelExportUtil.exportExcel(params, PerformanceInfo.class, arrayList);
-        OutputStream os = new FileOutputStream("C:\\workerspace\\test\\test.xlsx");
-        workbook.write(os);
+        
+        // 使用try-with-resources确保资源正确关闭
+        try (OutputStream os = new FileOutputStream("C:\\workerspace\\test\\test.xlsx")) {
+            workbook.write(os);
+        } finally {
+            if (workbook != null) {
+                workbook.close();
+            }
+        }
     }
 
     @Test
@@ -58,7 +65,14 @@ public class ExcelUtils {
         ExportParams params = new ExportParams();
         params.setStyle(ExcelExportStatisticStyler.class);
         Workbook workbook = ExcelExportUtil.exportExcel(params, PerformanceInfo.class, list);
-        OutputStream os = new FileOutputStream("C:\\workerspace\\test\\translate.xlsx");
-        workbook.write(os);
+        
+        // 使用try-with-resources确保资源正确关闭
+        try (OutputStream os = new FileOutputStream("C:\\workerspace\\test\\translate.xlsx")) {
+            workbook.write(os);
+        } finally {
+            if (workbook != null) {
+                workbook.close();
+            }
+        }
     }
 }

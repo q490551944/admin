@@ -8,8 +8,8 @@ import com.hankcs.hanlp.HanLP;
 import com.hpj.admin.entity.Shp;
 import com.hpj.admin.entity.Translate;
 import com.hpj.admin.util.ExcelExportStatisticStyler;
-import com.vividsolutions.jts.geom.Coordinate;
-import com.vividsolutions.jts.geom.Point;
+import org.locationtech.jts.geom.Coordinate;
+import org.locationtech.jts.geom.Point;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
@@ -48,47 +48,56 @@ public class ShpTests {
 
     @Test
     public void test() throws IOException, URISyntaxException {
-        File shpFile = new File("C:\\workerspace\\test\\shp\\gis_osm_pois_free_1.shp");
+        File shpFile = new File("C:\\workerspace\\test\\shp1\\gis_osm_pois_free_1.shp");
         Map<String, Object> shpParams = new HashMap<>();
-//        FileDataStore dataStore = FileDataStoreFinder.getDataStore(shpFile);
 
         shpParams.put("url", shpFile.toURI().toURL());
         shpParams.put("charset", "UTF-8");
-        DataStore dataStore = DataStoreFinder.getDataStore(shpParams);
-        String typeName = dataStore.getTypeNames()[0];
-        SimpleFeatureSource featureSource = dataStore.getFeatureSource(typeName);
-        SimpleFeatureCollection features = featureSource.getFeatures();
-        SimpleFeatureIterator iterator = features.features();
-        Set<String> set = new HashSet<>();
-        List<Shp> list = new ArrayList<>();
-        Map<String, AtomicInteger> map = new HashMap<>();
-        while (iterator.hasNext()) {
-            SimpleFeature next = iterator.next();
-            Shp shp = new Shp();
-            String name = next.getAttribute("name").toString();
-            name = convert(name);
-            shp.setName(name);
-            String fclass = next.getAttribute("fclass").toString();
-            if (names.contains(fclass) && StringUtils.isNotBlank(name)) {
-                set.add(fclass);
-                shp.setFclass(fclass);
-                Coordinate[] theGeoms = ((Point) next.getAttribute("the_geom")).getCoordinates();
-                List<String> collect = Arrays.stream(theGeoms).map(c -> c.x + "," + c.y).collect(Collectors.toList());
-                shp.setPositions(collect);
-                list.add(shp);
-                AtomicInteger integer = map.getOrDefault(fclass, new AtomicInteger());
-                integer.getAndIncrement();
-                map.put(fclass, integer);
+        
+        DataStore dataStore = null;
+        SimpleFeatureIterator iterator = null;
+        try {
+            dataStore = DataStoreFinder.getDataStore(shpParams);
+            String typeName = dataStore.getTypeNames()[0];
+            SimpleFeatureSource featureSource = dataStore.getFeatureSource(typeName);
+            SimpleFeatureCollection features = featureSource.getFeatures();
+            
+            iterator = features.features();
+            Set<String> set = new HashSet<>();
+            List<Shp> list = new ArrayList<>();
+            Map<String, AtomicInteger> map = new HashMap<>();
+            while (iterator.hasNext()) {
+                SimpleFeature next = iterator.next();
+                Shp shp = new Shp();
+                String name = next.getAttribute("name").toString();
+                name = convert(name);
+                shp.setName(name);
+                String fclass = next.getAttribute("fclass").toString();
+                if (names.contains(fclass) && StringUtils.isNotBlank(name)) {
+                    set.add(fclass);
+                    shp.setFclass(fclass);
+                    Coordinate[] theGeoms = ((Point) next.getAttribute("the_geom")).getCoordinates();
+                    List<String> collect = Arrays.stream(theGeoms).map(c -> c.x + "," + c.y).collect(Collectors.toList());
+                    shp.setPositions(collect);
+                    list.add(shp);
+                    AtomicInteger integer = map.getOrDefault(fclass, new AtomicInteger());
+                    integer.getAndIncrement();
+                    map.put(fclass, integer);
+                }
             }
-//            if (list.size() > 100) {
-//                break;
-//            }
+            System.out.println(list.size());
+            System.out.println(JSONObject.toJSONString(list));
+            System.out.println(JSONObject.toJSONString(map));
+        } finally {
+            // 确保迭代器正确关闭
+            if (iterator != null) {
+                iterator.close();
+            }
+            // 确保DataStore正确关闭
+            if (dataStore != null) {
+                dataStore.dispose();
+            }
         }
-        System.out.println(list.size());
-        System.out.println(JSONObject.toJSONString(list));
-        System.out.println(JSONObject.toJSONString(map));
-//        System.out.println(list.size());
-//        translate(set);
     }
 
     private String convert(String source) {
@@ -105,8 +114,16 @@ public class ShpTests {
         ExportParams params = new ExportParams();
         params.setStyle(ExcelExportStatisticStyler.class);
         Workbook workbook = ExcelExportUtil.exportExcel(params, Translate.class, translates);
-        OutputStream os = new FileOutputStream("C:\\workerspace\\test\\translate.xlsx");
-        workbook.write(os);
+        
+        // 使用try-with-resources确保OutputStream和Workbook正确关闭
+        try (OutputStream os = new FileOutputStream("C:\\workerspace\\test\\translate.xlsx")) {
+            workbook.write(os);
+        } finally {
+            // 确保Workbook也被关闭
+            if (workbook != null) {
+                workbook.close();
+            }
+        }
     }
 
 
@@ -123,21 +140,25 @@ public class ShpTests {
         Integer salt = 123456;
         translate.setEn(en);
         String url = "https://fanyi-api.baidu.com/api/trans/vip/translate";
-        CloseableHttpClient client = HttpClients.createDefault();
-        URIBuilder uriBuilder = new URIBuilder(url);
-        uriBuilder.setParameter("from", "en");
-        uriBuilder.setParameter("to", "zh");
-        uriBuilder.setParameter("q", en);
-        uriBuilder.setParameter("appid", appid);
-        uriBuilder.setParameter("salt", salt + "");
-        String s = DigestUtils.md5DigestAsHex((appid + en + salt + "jpbdX2bg6WhLqGNyNIsd").getBytes(StandardCharsets.UTF_8));
-        uriBuilder.setParameter("sign", s);
-        HttpGet httpGet = new HttpGet(uriBuilder.build());
-        CloseableHttpResponse execute = client.execute(httpGet);
-        HttpEntity entity = execute.getEntity();
-        String string = EntityUtils.toString(entity);
-        String zh = JSONObject.parseObject(string).getJSONArray("trans_result").getJSONObject(0).getString("dst");
-        translate.setZh(zh);
+        
+        // 使用try-with-resources确保HTTP客户端和响应正确关闭
+        try (CloseableHttpClient client = HttpClients.createDefault();
+             CloseableHttpResponse execute = client.execute(new HttpGet(new URIBuilder(url)
+                     .setParameter("from", "en")
+                     .setParameter("to", "zh")
+                     .setParameter("q", en)
+                     .setParameter("appid", appid)
+                     .setParameter("salt", salt + "")
+                     .setParameter("sign", DigestUtils.md5DigestAsHex((appid + en + salt + "jpbdX2bg6WhLqGNyNIsd").getBytes(StandardCharsets.UTF_8)))
+                     .build()))) {
+            
+            HttpEntity entity = execute.getEntity();
+            if (entity != null) {
+                String string = EntityUtils.toString(entity);
+                String zh = JSONObject.parseObject(string).getJSONArray("trans_result").getJSONObject(0).getString("dst");
+                translate.setZh(zh);
+            }
+        }
         return translate;
     }
 
