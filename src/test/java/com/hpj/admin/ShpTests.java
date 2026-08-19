@@ -36,6 +36,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -165,5 +166,10 @@ public class ShpTests {
     @Test
     public void testMD5() {
         System.out.println(DigestUtils.md5DigestAsHex(("20240919002154092recycling clothes12345jpbdX2bg6WhLqGNyNIsd").getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    public void testArrayList() {
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
     }
 }

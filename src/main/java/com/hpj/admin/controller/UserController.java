@@ -48,6 +48,7 @@ public class UserController {
     public List<User> query(@RequestParam long current,
                             @RequestParam long size) {
         QueryWrapper<User> wrapper = new QueryWrapper<>();
+        wrapper.eq("status", true);
         Page<User> page = new Page<>(current, size);
         IPage<User> iPage = userMapper.selectPage(page, wrapper);
         return iPage.getRecords();
@@ -61,9 +62,6 @@ public class UserController {
 
     @PostMapping
     public User save(@RequestBody @Valid User user) {
-        QueryWrapper<User> wrapper = new QueryWrapper<>();
-
-        wrapper.having("username = {0}", user.getUsername());
         userService.save(user);
         return user;
     }
