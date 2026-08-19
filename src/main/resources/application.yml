@@ -1,6 +1,9 @@
 server:
   port: 8090
 spring:
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
   mvc:
     pathmatch:
       matching-strategy: ant_path_matcher
@@ -74,3 +77,12 @@ arthas:
   tunnel-server: ws://localhost:7777/ws
   app-name: ${spring.application.name}
   telnet-port: 0
+chat:
+  enabled: false
+  attachment:
+    endpoint: ${CHAT_ATTACHMENT_ENDPOINT:http://localhost:9000}
+    bucket: ${CHAT_ATTACHMENT_BUCKET:chat-attachments}
+    access-key: ${CHAT_ATTACHMENT_ACCESS_KEY:}
+    secret-key: ${CHAT_ATTACHMENT_SECRET_KEY:}
+    secure: ${CHAT_ATTACHMENT_SECURE:false}
+    unattached-retention: ${CHAT_ATTACHMENT_UNATTACHED_RETENTION:24h}
