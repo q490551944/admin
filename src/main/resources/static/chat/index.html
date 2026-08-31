@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f3ee">
+  <meta name="description" content="企业内部协作聊天室">
+  <title>汇聊 · 企业协作空间</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <svg class="icon-library" aria-hidden="true">
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7A8.38 8.38 0 0 1 4 11.5a8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 5h6l2 2h10v12H3z"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 .6 1 1.7 1.7 0 0 0 1.1.4h.1v4h-.09A1.7 1.7 0 0 0 19.4 15z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-compose" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4z"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07A19.5 19.5 0 0 1 5.18 12.8 19.8 19.8 0 0 1 2.1 4.18 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.69 2.8a2 2 0 0 1-.45 2.11L8.08 9.9a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.33 1.84.56 2.8.69A2 2 0 0 1 22 16.9z"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-3v10l-4-3z"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></symbol>
+    <symbol id="i-smile" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4zM22 2 11 13"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.5-2L20 9M4 15l2.4 2a7 7 0 0 0 11.5-2"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></symbol>
+  </svg>
+
+  <div class="app-shell" id="appShell">
+    <aside class="workspace-rail" aria-label="主导航">
+      <a class="brand-mark" href="./" aria-label="汇聊首页">汇</a>
+      <nav class="rail-nav">
+        <button class="rail-button" type="button" aria-label="工作台" data-tooltip="工作台"><svg><use href="#i-grid"/></svg></button>
+        <button class="rail-button active" type="button" aria-label="消息" data-tooltip="消息"><svg><use href="#i-chat"/></svg><span class="rail-dot"></span></button>
+        <button class="rail-button" type="button" aria-label="通讯录" data-tooltip="通讯录"><svg><use href="#i-users"/></svg></button>
+        <button class="rail-button" type="button" aria-label="文件" data-tooltip="文件"><svg><use href="#i-folder"/></svg></button>
+      </nav>
+      <div class="rail-bottom">
+        <button class="rail-button" type="button" aria-label="设置" data-tooltip="设置"><svg><use href="#i-settings"/></svg></button>
+        <button class="user-avatar avatar-sage" id="profileButton" type="button" aria-label="个人资料">林</button>
+      </div>
+    </aside>
+
+    <aside class="conversation-panel" id="conversationPanel" aria-label="会话列表">
+      <div class="conversation-heading">
+        <div>
+          <p class="eyebrow">WORKSPACE</p>
+          <h1>消息</h1>
+        </div>
+        <button class="icon-button elevated" id="newConversationButton" type="button" aria-label="发起新会话"><svg><use href="#i-compose"/></svg></button>
+      </div>
+
+      <label class="search-box" for="conversationSearch">
+        <svg><use href="#i-search"/></svg>
+        <input id="conversationSearch" type="search" placeholder="搜索会话或同事" autocomplete="off">
+        <kbd>⌘ K</kbd>
+      </label>
+
+      <div class="view-switch" role="tablist" aria-label="会话筛选">
+        <button class="active" type="button" role="tab" aria-selected="true" data-filter="all">全部</button>
+        <button type="button" role="tab" aria-selected="false" data-filter="PUBLIC_ROOM">群组</button>
+        <button type="button" role="tab" aria-selected="false" data-filter="DIRECT_MESSAGE">私信</button>
+      </div>
+
+      <div class="conversation-scroll" id="conversationScroll">
+        <section class="conversation-section" id="pinnedSection">
+          <div class="section-title"><span>置顶</span><span id="pinnedCount">0</span></div>
+          <div id="pinnedList"></div>
+        </section>
+        <section class="conversation-section">
+          <div class="section-title"><span>最近消息</span><span id="recentCount">0</span></div>
+          <div id="conversationList"></div>
+        </section>
+        <div class="empty-state hidden" id="conversationEmpty">
+          <div class="empty-icon"><svg><use href="#i-search"/></svg></div>
+          <strong>没有找到会话</strong>
+          <span>换个关键词试试</span>
+        </div>
+      </div>
+
+      <button class="create-room-card" id="createRoomButton" type="button">
+        <span class="create-room-icon"><svg><use href="#i-plus"/></svg></span>
+        <span><strong>创建讨论组</strong><small>围绕项目开启新话题</small></span>
+        <svg class="arrow"><use href="#i-chevron"/></svg>
+      </button>
+    </aside>
+
+    <main class="chat-panel" aria-live="polite">
+      <header class="chat-header">
+        <div class="header-leading">
+          <button class="icon-button mobile-only" id="openConversationButton" type="button" aria-label="打开会话列表"><svg><use href="#i-menu"/></svg></button>
+          <div class="conversation-avatar room-avatar" id="activeAvatar">设</div>
+          <div class="active-meta">
+            <div class="title-row"><h2 id="activeTitle">设计协作组</h2><span class="room-chip" id="activeType">公开群组</span></div>
+            <div class="presence-row"><span class="status-dot connected" id="connectionDot"></span><span id="activeSubtitle">12 位成员 · 3 人在线</span></div>
+          </div>
+        </div>
+        <div class="header-actions">
+          <div class="member-stack" id="memberStack" aria-label="会话成员"></div>
+          <button class="icon-button desktop-action" type="button" aria-label="语音通话"><svg><use href="#i-phone"/></svg></button>
+          <button class="icon-button desktop-action" type="button" aria-label="视频通话"><svg><use href="#i-video"/></svg></button>
+          <button class="icon-button" id="conversationInfoButton" type="button" aria-label="会话详情"><svg><use href="#i-info"/></svg></button>
+        </div>
+      </header>
+
+      <div class="environment-banner hidden" id="environmentBanner" role="status">
+        <span class="banner-indicator"></span>
+        <span><strong>演示模式</strong> · 聊天接口尚未开启，当前使用本地示例数据。</span>
+        <button id="retryLiveButton" type="button"><svg><use href="#i-refresh"/></svg>重新连接</button>
+      </div>
+
+      <section class="message-scroller" id="messageScroller" aria-label="消息记录">
+        <button class="load-history" id="loadHistoryButton" type="button">查看更早消息</button>
+        <div id="messageList"></div>
+        <div class="typing-indicator hidden" id="typingIndicator"><span></span><span></span><span></span><small>有人正在输入</small></div>
+      </section>
+
+      <footer class="composer-wrap">
+        <div class="reply-preview hidden" id="uploadPreview">
+          <img id="uploadPreviewImage" alt="待发送图片预览">
+          <div><strong id="uploadFileName"></strong><span id="uploadFileMeta"></span></div>
+          <button class="icon-button" id="clearUploadButton" type="button" aria-label="移除图片"><svg><use href="#i-close"/></svg></button>
+        </div>
+        <div class="composer" id="composer">
+          <textarea id="messageInput" rows="1" maxlength="5000" placeholder="发送消息给 #设计协作组"></textarea>
+          <div class="composer-tools">
+            <div class="composer-left">
+              <input class="visually-hidden" id="imageInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp">
+              <button class="composer-button" id="imageButton" type="button" aria-label="发送图片"><svg><use href="#i-image"/></svg></button>
+              <button class="composer-button" id="emojiButton" type="button" aria-label="选择表情"><svg><use href="#i-smile"/></svg></button>
+            </div>
+            <div class="send-area"><span id="characterCount">0 / 5000</span><span class="shortcut">Enter 发送</span><button id="sendButton" type="button" aria-label="发送消息"><svg><use href="#i-send"/></svg></button></div>
+          </div>
+        </div>
+        <div class="emoji-popover hidden" id="emojiPopover" role="dialog" aria-label="表情选择">
+          <div class="emoji-heading"><strong>常用表情</strong><button class="icon-button" id="closeEmojiButton" type="button" aria-label="关闭"><svg><use href="#i-close"/></svg></button></div>
+          <div class="emoji-grid" id="emojiGrid"></div>
+        </div>
+      </footer>
+    </main>
+
+    <aside class="details-panel" id="detailsPanel" aria-label="会话详情" aria-hidden="true">
+      <div class="details-heading"><div><p class="eyebrow">DETAILS</p><h2>会话详情</h2></div><button class="icon-button" id="closeDetailsButton" type="button" aria-label="关闭详情"><svg><use href="#i-close"/></svg></button></div>
+      <div class="details-hero"><div class="conversation-avatar room-avatar large" id="detailsAvatar">设</div><h3 id="detailsTitle">设计协作组</h3><p id="detailsDescription">让好想法在这里发生。</p></div>
+      <div class="details-stats"><div><strong id="detailsMemberCount">12</strong><span>成员</span></div><div><strong id="detailsImageCount">24</strong><span>图片</span></div><div><strong id="detailsFileCount">0</strong><span>文件</span></div></div>
+      <section class="details-section"><div class="section-title"><span>成员</span><button type="button" id="viewMembersButton">查看全部</button></div><div class="details-members" id="detailsMembers"></div></section>
+      <section class="details-section"><div class="section-title"><span>共享图片</span><button type="button">查看全部</button></div><div class="media-grid" id="mediaGrid"></div></section>
+      <button class="danger-button hidden" id="dissolveRoomButton" type="button"><svg><use href="#i-trash"/></svg>解散讨论组</button>
+    </aside>
+  </div>
+
+  <div class="scrim hidden" id="mobileScrim"></div>
+
+  <dialog class="modal" id="roomDialog">
+    <form method="dialog" id="roomForm">
+      <div class="modal-header"><div><p class="eyebrow">NEW SPACE</p><h2>创建讨论组</h2></div><button class="icon-button" value="cancel" aria-label="关闭"><svg><use href="#i-close"/></svg></button></div>
+      <p class="modal-copy">给项目、兴趣或临时事项一个清晰的讨论空间。</p>
+      <label class="field"><span>讨论组名称</span><input id="roomNameInput" name="roomName" minlength="2" maxlength="50" placeholder="例如：品牌焕新项目" required><small><span id="roomNameCount">0</span> / 50</small></label>
+      <p class="field-error hidden" id="roomFormError"></p>
+      <div class="modal-actions"><button class="secondary-button" value="cancel" type="button" data-close-dialog>取消</button><button class="primary-button" id="submitRoomButton" type="submit">创建并进入</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="directDialog">
+    <form method="dialog" id="directForm">
+      <div class="modal-header"><div><p class="eyebrow">DIRECT MESSAGE</p><h2>发起私信</h2></div><button class="icon-button" value="cancel" aria-label="关闭"><svg><use href="#i-close"/></svg></button></div>
+      <label class="search-box modal-search" for="peopleSearch"><svg><use href="#i-search"/></svg><input id="peopleSearch" type="search" placeholder="搜索姓名或账号" autocomplete="off"></label>
+      <div class="people-list" id="peopleList"></div>
+      <div class="modal-actions"><button class="secondary-button" value="cancel" type="button" data-close-dialog>取消</button><button class="primary-button" id="submitDirectButton" type="submit" disabled>开始对话</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal compact" id="confirmDialog">
+    <form method="dialog" id="confirmForm">
+      <div class="confirm-icon"><svg><use href="#i-trash"/></svg></div>
+      <h2>解散“<span id="confirmRoomName"></span>”？</h2>
+      <p>解散后成员将无法继续发送消息，历史内容仍会保留在后台。</p>
+      <div class="modal-actions"><button class="secondary-button" value="cancel" type="button" data-close-dialog>先不解散</button><button class="danger-solid" id="confirmDissolveButton" type="submit">确认解散</button></div>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="./config.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
