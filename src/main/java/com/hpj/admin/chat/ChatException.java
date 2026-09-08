@@ -1,5 +1,6 @@
 package com.hpj.admin.chat;
 
+/** 聊天业务异常，同时携带 HTTP 状态码和供 REST/STOMP 客户端识别的业务码。 */
 public class ChatException extends RuntimeException {
     private final int status;
     private final String code;

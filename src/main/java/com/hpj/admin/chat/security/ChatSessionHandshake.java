@@ -13,6 +13,7 @@ import org.springframework.web.socket.WebSocketHandler;
 import org.springframework.web.socket.server.HandshakeInterceptor;
 import java.util.Map;
 
+/** 将已认证 HTTP Session 绑定到 WebSocket，供后续帧处理及出站投递重新验证。 */
 public class ChatSessionHandshake implements HandshakeInterceptor {
     public static final String SESSION = "chat.httpSession";
     public static final String SESSION_ID = "chat.httpSessionId";
@@ -41,6 +42,7 @@ public class ChatSessionHandshake implements HandshakeInterceptor {
                 response.setStatusCode(HttpStatus.FORBIDDEN);
                 return false;
             }
+            // 同时保存会话引用和握手时的身份快照，以识别退出、Session ID 轮换及账号切换。
             attributes.put(SESSION, session);
             attributes.put(SESSION_ID, session.getId());
             attributes.put(USER_ID, principal.getUserId());
@@ -52,6 +54,7 @@ public class ChatSessionHandshake implements HandshakeInterceptor {
         }
     }
 
+    /** 从仍有效的 HTTP Session 读取认证信息，不复用握手时缓存的 Authentication。 */
     public static Authentication authenticatedSession(Map<String, Object> attributes) {
         try {
             if (attributes == null || !(attributes.get(SESSION) instanceof HttpSession session)) {
@@ -59,6 +62,7 @@ public class ChatSessionHandshake implements HandshakeInterceptor {
             }
             if (!session.getId().equals(attributes.get(SESSION_ID))) throw ChatException.unauthorized();
             int timeout = session.getMaxInactiveInterval();
+            // WebSocket 存活不代表 HTTP Session 仍有效，需显式核对其空闲超时。
             if (timeout > 0 && System.currentTimeMillis() - session.getLastAccessedTime() >= timeout * 1000L) {
                 throw ChatException.unauthorized();
             }
@@ -69,6 +73,7 @@ public class ChatSessionHandshake implements HandshakeInterceptor {
             if (!Long.valueOf(principal.getUserId()).equals(attributes.get(USER_ID))) throw ChatException.unauthorized();
             return authentication;
         } catch (IllegalStateException error) {
+            // 容器在 Session 销毁后访问其属性会抛此异常，统一转换为登录失效。
             throw ChatException.unauthorized();
         }
     }

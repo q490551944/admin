@@ -5,7 +5,7 @@ import org.springframework.web.socket.WebSocketSession;
 import java.io.IOException;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Checks outbound delivery too, so an expired idle connection cannot keep receiving messages. */
+/** 维护本机连接，供出站投递和定时巡检复核身份，防止失效的空闲连接继续接收消息。 */
 public class ChatSocketSessions {
     private final ConcurrentHashMap<String, WebSocketSession> sockets = new ConcurrentHashMap<>();
     private final ChatAccounts accounts;
@@ -14,6 +14,7 @@ public class ChatSocketSessions {
     public void add(WebSocketSession socket) { sockets.put(socket.getId(), socket); }
     public void remove(String id) { sockets.remove(id); }
 
+    /** 验证连接、Session 和账号；失败时以 1008 关闭连接并移出登记表。 */
     public boolean valid(String id) {
         WebSocketSession socket = id == null ? null : sockets.get(id);
         if (socket == null) return false;
@@ -28,5 +29,6 @@ public class ChatSocketSessions {
         }
     }
 
+    /** 定时清理没有入站或出站流量的失效连接。 */
     public void closeExpired() { sockets.keySet().forEach(this::valid); }
 }

@@ -9,6 +9,7 @@ import org.springframework.web.socket.messaging.StompSubProtocolErrorHandler;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
+/** 将消息处理异常转换为 STOMP ERROR 帧，向客户端提供状态码和可识别的业务码。 */
 public class ChatStompErrorHandler extends StompSubProtocolErrorHandler {
     private final ObjectMapper json;
 
@@ -17,6 +18,7 @@ public class ChatStompErrorHandler extends StompSubProtocolErrorHandler {
     @Override
     public Message<byte[]> handleClientMessageProcessingError(Message<byte[]> clientMessage, Throwable error) {
         ChatException business = null;
+        // 消息通道可能包装业务异常，沿原因链取出原始错误；未知异常只返回通用描述。
         for (Throwable cause = error; cause != null; cause = cause.getCause()) {
             if (cause instanceof ChatException chatError) { business = chatError; break; }
         }

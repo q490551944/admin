@@ -27,6 +27,7 @@ import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 
+/** 聊天 API 与 WebSocket 的专用安全链，优先于兼容旧接口的兜底安全链匹配。 */
 @Configuration
 @ConditionalOnProperty(prefix = "chat", name = "enabled", havingValue = "true")
 public class ChatSecurityConfiguration {
@@ -40,16 +41,19 @@ public class ChatSecurityConfiguration {
         DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
         provider.setUserDetailsService(accounts);
         provider.setPasswordEncoder(encoder);
+        // 编码器要求升级时，在认证成功后通过账号服务执行密码条件更新。
         provider.setUserDetailsPasswordService(accounts);
         return provider;
     }
 
+    /** 使用 Session Cookie 认证，写操作保留 CSRF 检查，登录/退出返回 API 状态而非页面跳转。 */
     @Bean
     @Order(1)
     public SecurityFilterChain chatSecurity(HttpSecurity http, DaoAuthenticationProvider provider,
                                             ChatAccounts accounts, ObjectMapper json) throws Exception {
         http.securityMatcher("/api/chat/**", "/ws/chat", "/ws/chat/**")
             .authenticationProvider(provider)
+            // 凭证存于 Session；匿名获取凭证和登录虽放行授权检查，写请求仍需通过 CSRF。
             .csrf(csrf -> csrf.csrfTokenRepository(new HttpSessionCsrfTokenRepository())
                     .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
             .authorizeHttpRequests(auth -> auth
@@ -81,12 +85,14 @@ public class ChatSecurityConfiguration {
                             new AntPathRequestMatcher("/api/chat/v1/sessions/current", "DELETE"))
                     .invalidateHttpSession(true).clearAuthentication(true).deleteCookies("JSESSIONID")
                     .logoutSuccessHandler((request, response, authentication) -> response.setStatus(204)))
+            // 登录成功后轮换 Session ID，避免沿用登录前由外部固定的会话标识。
             .sessionManagement(session -> session.sessionFixation(fixation -> fixation.changeSessionId()))
             .addFilterAfter(new OncePerRequestFilter() {
                 @Override
                 protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                                 FilterChain chain) throws ServletException, IOException {
                     var authentication = SecurityContextHolder.getContext().getAuthentication();
+                    // 已登录请求也重查员工状态，停用账号时销毁旧 Session 并清理当前安全上下文。
                     if (authentication != null && !(authentication instanceof AnonymousAuthenticationToken)) {
                         try {
                             accounts.requireEnabled(ChatIdentity.require(authentication));

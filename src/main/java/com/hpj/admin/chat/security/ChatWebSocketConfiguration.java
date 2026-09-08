@@ -20,6 +20,7 @@ import org.springframework.web.socket.config.annotation.*;
 import org.springframework.web.socket.handler.WebSocketHandlerDecorator;
 import java.time.Duration;
 
+/** 配置聊天 STOMP 端点、内存消息代理，以及连接收发两侧的 Session 校验。 */
 @Configuration
 @EnableWebSocketMessageBroker
 @ConditionalOnProperty(prefix = "chat", name = "enabled", havingValue = "true")
@@ -51,13 +52,13 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
     @Bean
     public SmartInitializingSingleton chatSessionExpiryMonitor(
             @Qualifier("chatWebSocketScheduler") ThreadPoolTaskScheduler scheduler) {
-        // Start only after Spring initializes the scheduler; initializing it inside @Bean
-        // would create a second executor during the bean lifecycle and leak the first one.
+        // 等待 Spring 完成调度器初始化后再启动巡检，避免手动初始化导致重复执行器泄漏。
         return () -> scheduler.scheduleWithFixedDelay(sockets::closeExpired, Duration.ofSeconds(5));
     }
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+        // 空列表沿用同源限制；显式配置只接受精确 HTTP(S) Origin，不开放通配来源。
         String[] origins = properties.getSecurity().getAllowedOrigins().stream()
                 .filter(origin -> origin != null && !origin.isBlank()).toArray(String[]::new);
         for (String origin : origins) {
@@ -72,6 +73,7 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry registry) {
+        // /app 交给应用处理，/topic 与 /queue 由当前进程的简单消息代理投递。
         registry.setApplicationDestinationPrefixes("/app");
         registry.enableSimpleBroker("/topic", "/queue")
                 .setHeartbeatValue(new long[]{10000, 10000}).setTaskScheduler(chatWebSocketScheduler());
@@ -80,6 +82,7 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
 
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
+        // 先从 Session 确认并写入用户，再由安全上下文拦截器向消息处理线程传播身份。
         registration.interceptors(new ChatInboundInterceptor(accounts, rooms, json),
                 new SecurityContextChannelInterceptor());
     }
@@ -89,7 +92,7 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
         registration.interceptors(new ChannelInterceptor() {
             @Override
             public Message<?> preSend(Message<?> message, MessageChannel channel) {
-                // ERROR/DISCONNECT must reach the client even after authentication expires.
+                // 只拦截业务消息；即使认证已失效，ERROR/DISCONNECT 仍需送达客户端。
                 if (SimpMessageHeaderAccessor.getMessageType(message.getHeaders()) == SimpMessageType.MESSAGE
                         && !sockets.valid(SimpMessageHeaderAccessor.getSessionId(message.getHeaders()))) return null;
                 return message;
@@ -99,6 +102,7 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
 
     @Override
     public void configureWebSocketTransport(WebSocketTransportRegistration registry) {
+        // 限制单条消息、待发送缓冲及发送耗时，避免慢连接无限占用资源。
         registry.setMessageSizeLimit(128 * 1024).setSendBufferSizeLimit(512 * 1024).setSendTimeLimit(15000);
         registry.addDecoratorFactory(handler -> new WebSocketHandlerDecorator(handler) {
             @Override

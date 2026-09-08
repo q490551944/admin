@@ -1,3 +1,8 @@
+/**
+ * 聊天页面入口：管理会话视图、REST 请求和原生 STOMP 连接。
+ * 当前后端已接入认证和房间管理；员工搜索、消息历史、消息 ACK 与附件接口仍为预留调用。
+ * 演示模式在浏览器内模拟数据和发送状态，不能用来判断后端功能是否已实现。
+ */
 const CONFIG = window.CHAT_CONFIG ?? {};
 const queryMode = new URLSearchParams(window.location.search).get("mode");
 const runtimeMode = ["auto", "live", "demo"].includes(queryMode) ? queryMode : (CONFIG.mode || "auto");
@@ -67,6 +72,7 @@ const demoMessages = {
   ]
 };
 
+// 消息及分页游标按会话缓存；authExpired 一旦置位，本次页面生命周期内不再接受正常响应。
 const state = {
   mode: runtimeMode,
   authExpired: false,
@@ -131,6 +137,7 @@ function uuid() {
   return `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/** 兼容直接响应以及历史接口的 result/data 包装，后续逻辑统一读取业务载荷。 */
 function unwrapResponse(payload) {
   if (payload == null) return payload;
   if (Object.hasOwn(payload, "result")) return payload.result;
@@ -147,6 +154,7 @@ class ApiError extends Error {
   }
 }
 
+/** 统一管理 Session Cookie、CSRF、请求超时和 HTTP 错误到页面异常的转换。 */
 class ChatApi {
   constructor(baseUrl) {
     this.baseUrl = String(baseUrl || "/api/chat/v1").replace(/\/$/, "");
@@ -173,7 +181,7 @@ class ChatApi {
       const contentType = response.headers.get("content-type") || "";
       const payload = response.status === 204 ? null
         : contentType.includes("json") ? await response.json() : await response.text();
-      // A concurrent request may have expired the session while this response was in flight.
+      // 其他并发请求可能已判定登录失效，不能再让迟到的成功响应恢复私有数据。
       if (state.authExpired) throw new ApiError("登录已失效，请重新登录", 401);
       if (!response.ok) {
         if (response.status === 401) requireLogin();
@@ -194,11 +202,13 @@ class ChatApi {
   getCurrentUser() { return this.request("/sessions/current"); }
   logout() { return this.request("/sessions/current", { method: "DELETE" }); }
   async loadSession() {
+    // 登录后页面重新获取当前 Session 的 CSRF Token，再读取可信身份。
     this.csrf = await this.request("/csrf-token");
     return this.getCurrentUser();
   }
   createRoom(name) { return this.request("/rooms", { method: "POST", body: JSON.stringify({ name }) }); }
   dissolveRoom(id) { return this.request(`/rooms/${encodeURIComponent(id)}`, { method: "DELETE" }); }
+  // 以下员工、私聊、历史消息及附件方法预留给后续后端功能，接口失败时向页面透传错误。
   searchUsers(query = "") { return this.request(`/users?query=${encodeURIComponent(query)}`); }
   createDirectConversation(peerUserId) { return this.request("/direct-conversations", { method: "POST", body: JSON.stringify({ peerUserId, peer_user_id: peerUserId }) }); }
   getMessages(id, parameters = {}) {
@@ -207,6 +217,7 @@ class ChatApi {
     return this.request(`/conversations/${encodeURIComponent(id)}/messages?${query}`);
   }
 
+  /** 先申请附件元数据；响应包含上传地址时，再向该地址发送文件内容。 */
   async uploadAttachment(conversationId, file) {
     const metadata = await this.request(`/conversations/${encodeURIComponent(conversationId)}/attachments`, {
       method: "POST",
@@ -230,6 +241,7 @@ class ChatApi {
   }
 }
 
+/** 基于原生 WebSocket 的轻量 STOMP 客户端，管理帧、心跳、订阅及有限次数重连。 */
 class NativeStompClient {
   constructor(endpoint, callbacks = {}) {
     this.endpoint = endpoint;
@@ -243,6 +255,7 @@ class NativeStompClient {
     this.activeConversationId = null;
     this.reconnectTimer = null;
     this.heartbeatTimer = null;
+    // 断开时递增，使旧连接或尚未完成的连接检查回调失效。
     this.generation = 0;
   }
 
@@ -257,8 +270,7 @@ class NativeStompClient {
     const generation = this.generation;
     this.callbacks.onState?.("connecting");
     try {
-      // A browser hides the HTTP status of a failed WebSocket handshake.
-      // Check Session before every connection so expired credentials never enter a retry loop.
+      // 浏览器不暴露握手失败的 HTTP 状态，先用 REST 检查 Session，避免失效凭证反复重连。
       await api.getCurrentUser();
       if (!this.shouldReconnect || generation !== this.generation) return;
       this.buffer = "";
@@ -280,13 +292,14 @@ class NativeStompClient {
     });
     this.socket.addEventListener("close", (event) => {
       if (generation !== this.generation) return;
-      // Both the application and Tomcat end authenticated sessions with policy code 1008.
+      // 将应用或容器返回的策略关闭码 1008 视为认证终止，停止重连并跳转登录。
       if (event.code === 1008) { this.disconnect(false); requireLogin(); return; }
       this.handleDisconnect();
     });
     this.socket.addEventListener("error", () => this.callbacks.onState?.("disconnected"));
   }
 
+  /** 忽略独立心跳，按 NUL 分割完整帧，并保留末尾未收齐的数据供下一次消费。 */
   consume(chunk) {
     if (chunk === "\n") return;
     this.buffer += chunk;
@@ -318,6 +331,7 @@ class NativeStompClient {
         if (this.socket?.readyState === WebSocket.OPEN) this.socket.send("\n");
       }, 10000);
       this.callbacks.onState?.("connected");
+      // 每次建立 STOMP 会话后恢复私人队列和当前会话订阅。
       this.subscribe("chat-acks", "/user/queue/chat.acks", (payload) => this.callbacks.onAck?.(payload));
       this.subscribe("chat-errors", "/user/queue/chat.errors", (payload) => this.callbacks.onError?.(payload));
       if (this.activeConversationId) this.subscribeToConversation(this.activeConversationId);
@@ -360,6 +374,7 @@ class NativeStompClient {
 
   subscribeToConversation(conversationId) {
     this.activeConversationId = conversationId;
+    // 当前只订阅正在查看的会话，切换时释放旧会话主题，保留私人队列。
     [...this.subscriptions.keys()].filter((id) => id.startsWith("conversation-")).forEach((id) => this.unsubscribe(id));
     const id = `conversation-${conversationId}`;
     this.subscribe(id, `/topic/chat/conversations/${conversationId}`, (payload) => this.callbacks.onMessage?.(payload));
@@ -367,6 +382,7 @@ class NativeStompClient {
 
   sendMessage(payload) {
     const body = JSON.stringify(payload);
+    // content-length 使用 UTF-8 字节数，不能使用包含中文或表情时的字符串长度。
     return this.connected && this.sendFrame("SEND", { destination: "/app/chat.messages.send", "content-type": "application/json", "content-length": new TextEncoder().encode(body).length }, body);
   }
 
@@ -383,11 +399,13 @@ class NativeStompClient {
       this.callbacks.onReconnectExhausted?.(error);
       return;
     }
+    // 指数退避上限为 16 秒，叠加随机延迟，减少多个客户端同时重新连接。
     const delay = Math.min(1000 * (2 ** this.reconnectCount), 16000) + Math.round(Math.random() * 300);
     this.reconnectCount += 1;
     this.reconnectTimer = window.setTimeout(() => { if (this.shouldReconnect) this.connect(); }, delay);
   }
 
+  /** 主动断开并取消定时任务；更新代次以阻止旧异步回调重建连接。 */
   disconnect(reconnect = false) {
     this.shouldReconnect = reconnect;
     this.generation += 1;
@@ -401,6 +419,7 @@ class NativeStompClient {
 
 const api = new ChatApi(CONFIG.apiBaseUrl);
 
+/** 幂等处理登录失效：先阻止后续请求并清理私有状态，再跳转到同源登录页。 */
 function requireLogin() {
   if (state.authExpired) return;
   state.authExpired = true;
@@ -419,11 +438,12 @@ function requireLogin() {
   byId("messageInput").value = "";
   byId("messageInput").disabled = true;
   byId("sendButton").disabled = true;
-  // Hide every private view (including open dialogs) until navigation completes.
+  // 导航完成前隐藏整个页面，也覆盖仍然打开的私有信息弹窗。
   document.body.hidden = true;
   window.location.assign(new URL("./login.html", window.location.href).href);
 }
 
+/** 将不同命名风格的接口字段映射到页面模型，会话标识保留为字符串。 */
 function normalizeConversation(raw) {
   const id = raw.id ?? raw.conversationId ?? raw.conversation_id;
   const type = raw.type || raw.conversationType || raw.conversation_type || "PUBLIC_ROOM";
@@ -483,6 +503,7 @@ function normalizeMessage(raw, conversationId) {
   };
 }
 
+/** 兼容数组或分页包装，消息按时间升序渲染，并保留向前/向后的游标字段。 */
 function normalizeMessagesResponse(payload, conversationId) {
   const source = payload || {};
   const list = Array.isArray(source) ? source : (source.items || source.messages || source.records || source.content || []);
@@ -494,6 +515,7 @@ function normalizeMessagesResponse(payload, conversationId) {
   };
 }
 
+/** 复制演示种子数据，避免页面操作修改原始样例，便于再次进入预览。 */
 function loadDemo() {
   state.usingDemo = true;
   state.conversations = clone(demoConversations);
@@ -519,6 +541,7 @@ async function initialize() {
       setupRealtime();
     } catch (error) {
       if (error.status === 401) return;
+      // 自动模式仅在接口不存在时允许演示回退，权限错误和网络故障不能伪装成演示成功。
       if (state.mode === "auto" && error.status === 404) {
         loadDemo();
         showDemoBanner();
@@ -643,6 +666,7 @@ function conversationElement(conversation) {
   return button;
 }
 
+/** 切换会话视图；首次访问时加载历史到缓存，随后更新当前会话订阅。 */
 async function activateConversation(id, options = {}) {
   const conversation = state.conversations.find((item) => item.id === String(id));
   if (!conversation) return;
@@ -748,6 +772,7 @@ function renderMessages(options = {}) {
       return;
     }
     const timestamp = parseDate(message.createdAt).getTime();
+    // 同一天内，同一发送者相隔不足五分钟的连续消息合并显示头像和时间信息。
     const grouped = lastSender === message.senderId && timestamp - lastTimestamp < 5 * 60 * 1000;
     nodes.push(messageElement(message, grouped));
     lastSender = message.senderId;
@@ -811,6 +836,7 @@ function messageElement(message, grouped) {
   } else {
     const bubble = document.createElement("div");
     bubble.className = `message-bubble${message.status === "FAILED" ? " failed" : ""}`;
+    // 用户正文只作为文本渲染，避免把消息内容解释为 HTML。
     bubble.textContent = message.body;
     block.append(bubble);
   }
@@ -856,6 +882,7 @@ async function loadEarlierMessages() {
       state.cursors.set(state.activeConversationId, result);
     }
     renderMessages({ scrollToBottom: false });
+    // 历史消息插到列表前部后按新增高度补偿滚动位置，避免直接跳到列表底部。
     requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight - beforeHeight; });
   } catch (error) {
     toast(error.message || "更早消息加载失败", "error");
@@ -865,6 +892,7 @@ async function loadEarlierMessages() {
   }
 }
 
+/** 分页合并时按消息 ID 去重；第二组覆盖同 ID 数据，最后按时间重新排序。 */
 function mergeMessages(first, second) {
   const result = new Map();
   [...first, ...second].forEach((message) => result.set(String(message.id), message));
@@ -903,6 +931,7 @@ async function sendCurrentMessage() {
   await dispatchMessage(message);
 }
 
+/** 先插入 SENDING 占位消息，后续通过 clientRequestId 将确认结果回填到该条消息。 */
 function createOptimisticMessage(data) {
   const message = normalizeMessage({
     id: `pending-${uuid()}`,
@@ -948,12 +977,14 @@ async function sendImageMessage(file, caption) {
   }
 }
 
+/** 演示模式本地模拟成功；实时模式只提交消息内容，最终状态等待 ACK 或广播回填。 */
 async function dispatchMessage(message) {
   if (state.usingDemo) {
     await sleep(420);
     updateMessageStatus(message.clientRequestId, "SENT", { id: `demo-${uuid()}` });
     return;
   }
+  // 不上传页面模型里的 senderId 等身份字段，由服务端根据 Session 决定发送者。
   const sent = state.socket?.sendMessage({
     clientRequestId: message.clientRequestId,
     conversationId: message.conversationId,
@@ -968,6 +999,7 @@ function retryMessage(id) {
   const message = (state.messages.get(state.activeConversationId) || []).find((item) => item.id === id);
   if (!message) return;
   message.status = "SENDING";
+  // 当前重试会生成新的请求标识，ACK 按本次标识关联；这不是复用原请求的幂等重放。
   message.clientRequestId = uuid();
   renderMessages();
   dispatchMessage(message);
@@ -983,6 +1015,7 @@ function updateMessageStatus(clientRequestId, status, patch = {}) {
   }
 }
 
+/** 接收私人确认队列载荷，兼容完整消息或仅消息 ID/时间的响应格式。 */
 function handleMessageAck(payload) {
   const clientRequestId = payload.clientRequestId || payload.client_request_id;
   const rawMessage = payload.message || payload.result;
@@ -1012,6 +1045,7 @@ function handleRealtimeMessage(payload) {
   const message = normalizeMessage(raw, raw.conversationId || raw.conversation_id || state.activeConversationId);
   const id = message.conversationId;
   const existing = state.messages.get(id) || [];
+  // 广播可能先于 ACK 到达：优先回填相同请求的占位消息，再按服务端消息 ID 去重。
   const optimisticIndex = existing.findIndex((item) => item.clientRequestId && item.clientRequestId === message.clientRequestId);
   if (optimisticIndex >= 0) existing[optimisticIndex] = { ...existing[optimisticIndex], ...message, status: "SENT" };
   else if (!existing.some((item) => item.id === message.id)) existing.push(message);
@@ -1055,6 +1089,7 @@ function selectImage(file) {
   updateSendButton();
 }
 
+/** 释放待发送预览的对象 URL，避免反复选择图片持续占用浏览器内存。 */
 function clearPendingFile(revoke = true) {
   if (revoke && state.pendingFile?.url) URL.revokeObjectURL(state.pendingFile.url);
   state.pendingFile = null;
@@ -1084,6 +1119,7 @@ function renderDetails(conversation) {
     image.loading = "lazy";
     return image;
   }));
+  // 按钮显隐仅控制交互入口，实际房主权限仍由后端解散接口校验。
   byId("dissolveRoomButton").classList.toggle("hidden", conversation.type !== "PUBLIC_ROOM" || String(conversation.ownerId) !== String(state.currentUser.id));
 }
 
@@ -1304,6 +1340,7 @@ function bindEvents() {
   byId("createRoomButton").addEventListener("click", openRoomDialog);
   byId("messageInput").addEventListener("input", updateComposer);
   byId("messageInput").addEventListener("keydown", (event) => {
+    // Enter 发送、Shift+Enter 换行；输入法组词期间的回车不触发发送。
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       sendCurrentMessage();
@@ -1365,6 +1402,7 @@ function bindEvents() {
   window.addEventListener("resize", () => { if (window.innerWidth >= 1280) byId("mobileScrim").classList.add("hidden"); });
 }
 
+/** 重新读取真实身份和会话，清空原有消息与游标缓存后重建实时连接。 */
 async function retryLiveConnection() {
   const button = byId("retryLiveButton");
   button.disabled = true;

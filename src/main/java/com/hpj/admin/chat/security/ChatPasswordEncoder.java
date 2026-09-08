@@ -6,6 +6,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 
+/** 新密码统一使用 BCrypt；仅在显式启用兼容开关时验证历史 DES 编码。 */
 public class ChatPasswordEncoder implements PasswordEncoder {
     private final BCryptPasswordEncoder bcrypt = new BCryptPasswordEncoder();
     private final boolean allowLegacyDes;
@@ -24,6 +25,7 @@ public class ChatPasswordEncoder implements PasswordEncoder {
                 encodedPassword.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** 标记旧编码或低强度 BCrypt，供认证提供器在成功登录后触发密码升级。 */
     @Override
     public boolean upgradeEncoding(String encodedPassword) {
         return !encodedPassword.startsWith("$2") || bcrypt.upgradeEncoding(encodedPassword);
