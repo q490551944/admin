@@ -263,15 +263,17 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .environment-banner button { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 4px 7px; border: 0; border-radius: 7px; color: #6b633d; background: rgba(255,255,255,.5); font-size: 9px; cursor: pointer; }
 .environment-banner button svg { width: 12px; height: 12px; }
 
-.message-scroller { min-height: 0; flex: 1; overflow-y: auto; scroll-behavior: smooth; padding: 20px clamp(24px, 5vw, 72px) 26px; scrollbar-width: thin; scrollbar-color: #d2d0ca transparent; }
+.message-scroller { min-height: 0; flex: 1; overflow-y: auto; padding: 20px clamp(24px, 5vw, 72px) 26px; scrollbar-width: thin; scrollbar-color: #d2d0ca transparent; }
 .load-history { display: block; margin: 0 auto 18px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: rgba(255,255,255,.7); font-size: 10px; cursor: pointer; }
 .load-history:disabled { opacity: .55; cursor: wait; }
 .date-divider { display: flex; align-items: center; gap: 12px; margin: 10px 0 22px; color: #a0a29b; font-size: 9px; font-weight: 600; letter-spacing: .08em; }
 .date-divider::before, .date-divider::after { content: ""; height: 1px; flex: 1; background: var(--line); }
-.message-row { display: flex; align-items: flex-end; gap: 10px; margin: 5px 0; animation: message-in .25s ease both; }
+.message-row { display: flex; align-items: flex-end; gap: 10px; margin: 5px 0; }
+.message-row.is-new { animation: message-in .25s ease both; }
 .message-row.own { flex-direction: row-reverse; }
 .message-row.grouped { margin-top: 2px; }
 .message-row .user-avatar { width: 30px; height: 30px; font-size: 9px; }
+.message-row.own .user-avatar { margin-bottom: 15px; }
 .message-row.grouped .user-avatar { visibility: hidden; }
 .message-block { display: flex; max-width: min(68%, 620px); flex-direction: column; align-items: flex-start; }
 .message-row.own .message-block { align-items: flex-end; }
@@ -281,7 +283,9 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .message-bubble { position: relative; padding: 10px 13px; border: 1px solid var(--line); border-radius: 5px 14px 14px 14px; color: #353834; background: #fff; box-shadow: 0 3px 12px rgba(47,51,45,.035); font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
 .message-row.own .message-bubble { border-color: #66786a; border-radius: 14px 5px 14px 14px; color: #f8faf7; background: #66786a; }
 .message-bubble.failed { border-color: #dda9a4; }
-.message-status { display: flex; align-items: center; gap: 4px; margin-top: 3px; color: #989b94; font-size: 8px; }
+/* 保留发送状态的空间，确认后气泡与头像的位置不跳动。 */
+.message-status { display: flex; align-items: center; gap: 4px; min-height: 12px; margin-top: 3px; color: #989b94; font-size: 8px; }
+.message-status.settled { visibility: hidden; }
 .message-status.failed { color: var(--danger); }
 .message-status button { padding: 0; border: 0; color: inherit; background: transparent; font-size: inherit; text-decoration: underline; cursor: pointer; }
 .image-message { overflow: hidden; width: min(280px, 48vw); padding: 4px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
