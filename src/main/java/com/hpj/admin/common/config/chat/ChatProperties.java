@@ -4,13 +4,25 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 @Data
 @ConfigurationProperties(prefix = "chat")
 public class ChatProperties {
 
     private boolean enabled;
+    private final Security security = new Security();
     private final Attachment attachment = new Attachment();
+
+    @Data
+    public static class Security {
+        // Empty means same-origin only. Wildcards are deliberately not supported.
+        private List<String> allowedOrigins = new ArrayList<>();
+        private boolean allowLegacyDesPasswords;
+        // Opt-in because the pre-existing endpoints did not require Spring Security roles.
+        private boolean protectLegacyEndpoints;
+    }
 
     @Data
     public static class Attachment {

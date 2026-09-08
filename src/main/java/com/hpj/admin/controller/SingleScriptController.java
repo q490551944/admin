@@ -2,6 +2,7 @@ package com.hpj.admin.controller;
 
 
 import com.hpj.admin.entity.ScriptRequest;
+import jakarta.validation.Valid;
 import groovy.lang.Binding;
 import groovy.lang.GroovyShell;
 import groovy.lang.Script;
@@ -13,7 +14,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 @RestController
-@RequestMapping("/groovy/single/script")
+@RequestMapping("/groovy/script-executions")
 public class SingleScriptController {
 
     private static final Object lock = new Object();
@@ -63,9 +64,8 @@ public class SingleScriptController {
         return script.run();
     }
 
-    @PostMapping(value = "/execute")
-    @ResponseBody
-    public Object ruleExecutor(@RequestBody ScriptRequest request) {
+    @PostMapping
+    public Object ruleExecutor(@RequestBody @Valid ScriptRequest request) {
         if (request.getParamMap() == null) {
             return ruleParse(request.getExpression());
         } else {

@@ -69,6 +69,7 @@ const demoMessages = {
 
 const state = {
   mode: runtimeMode,
+  authExpired: false,
   usingDemo: runtimeMode === "demo",
   conversations: [],
   activeConversationId: null,
@@ -149,23 +150,33 @@ class ApiError extends Error {
 class ChatApi {
   constructor(baseUrl) {
     this.baseUrl = String(baseUrl || "/api/chat/v1").replace(/\/$/, "");
+    this.csrf = null;
   }
 
   async request(path, options = {}) {
+    if (state.authExpired) throw new ApiError("登录已失效，请重新登录", 401);
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), CONFIG.requestTimeoutMs || 5000);
     const headers = new Headers(options.headers || {});
+    if (this.csrf && !["GET", "HEAD"].includes(options.method || "GET")) {
+      headers.set(this.csrf.headerName, this.csrf.token);
+    }
     if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
         credentials: "include",
+        cache: "no-store",
         ...options,
         headers,
         signal: controller.signal
       });
       const contentType = response.headers.get("content-type") || "";
-      const payload = contentType.includes("json") ? await response.json() : await response.text();
+      const payload = response.status === 204 ? null
+        : contentType.includes("json") ? await response.json() : await response.text();
+      // A concurrent request may have expired the session while this response was in flight.
+      if (state.authExpired) throw new ApiError("登录已失效，请重新登录", 401);
       if (!response.ok) {
+        if (response.status === 401) requireLogin();
         const message = payload?.message || payload?.error || `请求失败（${response.status}）`;
         throw new ApiError(message, response.status, payload);
       }
@@ -180,6 +191,12 @@ class ChatApi {
   }
 
   getConversations() { return this.request("/conversations"); }
+  getCurrentUser() { return this.request("/sessions/current"); }
+  logout() { return this.request("/sessions/current", { method: "DELETE" }); }
+  async loadSession() {
+    this.csrf = await this.request("/csrf-token");
+    return this.getCurrentUser();
+  }
   createRoom(name) { return this.request("/rooms", { method: "POST", body: JSON.stringify({ name }) }); }
   dissolveRoom(id) { return this.request(`/rooms/${encodeURIComponent(id)}`, { method: "DELETE" }); }
   searchUsers(query = "") { return this.request(`/users?query=${encodeURIComponent(query)}`); }
@@ -224,6 +241,9 @@ class NativeStompClient {
     this.shouldReconnect = true;
     this.subscriptions = new Map();
     this.activeConversationId = null;
+    this.reconnectTimer = null;
+    this.heartbeatTimer = null;
+    this.generation = 0;
   }
 
   socketUrl() {
@@ -232,18 +252,38 @@ class NativeStompClient {
     return url.toString();
   }
 
-  connect() {
-    this.shouldReconnect = true;
+  async connect() {
+    if (!this.shouldReconnect) return;
+    const generation = this.generation;
     this.callbacks.onState?.("connecting");
     try {
+      // A browser hides the HTTP status of a failed WebSocket handshake.
+      // Check Session before every connection so expired credentials never enter a retry loop.
+      await api.getCurrentUser();
+      if (!this.shouldReconnect || generation !== this.generation) return;
+      this.buffer = "";
       this.socket = new WebSocket(this.socketUrl());
     } catch (error) {
+      if (error.status === 401) { this.disconnect(false); return; }
       this.handleDisconnect(error);
       return;
     }
-    this.socket.addEventListener("open", () => this.sendFrame("CONNECT", { "accept-version": "1.2", host: window.location.host, "heart-beat": "10000,10000" }));
-    this.socket.addEventListener("message", (event) => this.consume(String(event.data)));
-    this.socket.addEventListener("close", () => this.handleDisconnect());
+    this.socket.addEventListener("open", () => {
+      if (generation !== this.generation || !this.shouldReconnect) return;
+      this.sendFrame("CONNECT", {
+      "accept-version": "1.2", host: window.location.host, "heart-beat": "10000,10000",
+      ...(api.csrf ? { [api.csrf.headerName]: api.csrf.token } : {})
+      });
+    });
+    this.socket.addEventListener("message", (event) => {
+      if (generation === this.generation && this.shouldReconnect) this.consume(String(event.data));
+    });
+    this.socket.addEventListener("close", (event) => {
+      if (generation !== this.generation) return;
+      // Both the application and Tomcat end authenticated sessions with policy code 1008.
+      if (event.code === 1008) { this.disconnect(false); requireLogin(); return; }
+      this.handleDisconnect();
+    });
     this.socket.addEventListener("error", () => this.callbacks.onState?.("disconnected"));
   }
 
@@ -273,6 +313,10 @@ class NativeStompClient {
     if (command === "CONNECTED") {
       this.connected = true;
       this.reconnectCount = 0;
+      window.clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = window.setInterval(() => {
+        if (this.socket?.readyState === WebSocket.OPEN) this.socket.send("\n");
+      }, 10000);
       this.callbacks.onState?.("connected");
       this.subscribe("chat-acks", "/user/queue/chat.acks", (payload) => this.callbacks.onAck?.(payload));
       this.subscribe("chat-errors", "/user/queue/chat.errors", (payload) => this.callbacks.onError?.(payload));
@@ -286,14 +330,19 @@ class NativeStompClient {
       return;
     }
     if (command === "ERROR") {
-      this.callbacks.onError?.({ message: body || headers.message || "实时连接错误" });
+      let error = { message: body || headers.message || "实时连接错误", status: Number(headers.status) };
+      try { error = { ...error, ...JSON.parse(body) }; } catch (_) { /* non-JSON protocol error */ }
       this.disconnect(false);
+      if (error.status === 401 || error.code === "SESSION_EXPIRED") requireLogin();
+      else this.callbacks.onError?.(error);
     }
   }
 
   sendFrame(command, headers = {}, body = "") {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false;
-    const escapedHeaders = Object.entries(headers).map(([key, value]) => `${key}:${String(value).replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/:/g, "\\c")}`).join("\n");
+    const escape = (value) => command === "CONNECT" ? String(value)
+      : String(value).replace(/\\/g, "\\\\").replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/:/g, "\\c");
+    const escapedHeaders = Object.entries(headers).map(([key, value]) => `${key}:${escape(value)}`).join("\n");
     this.socket.send(`${command}\n${escapedHeaders}\n\n${body}\0`);
     return true;
   }
@@ -322,6 +371,8 @@ class NativeStompClient {
   }
 
   handleDisconnect(error) {
+    window.clearInterval(this.heartbeatTimer);
+    window.clearTimeout(this.reconnectTimer);
     const wasConnected = this.connected;
     this.connected = false;
     this.callbacks.onState?.("disconnected");
@@ -334,11 +385,14 @@ class NativeStompClient {
     }
     const delay = Math.min(1000 * (2 ** this.reconnectCount), 16000) + Math.round(Math.random() * 300);
     this.reconnectCount += 1;
-    window.setTimeout(() => this.connect(), delay);
+    this.reconnectTimer = window.setTimeout(() => { if (this.shouldReconnect) this.connect(); }, delay);
   }
 
   disconnect(reconnect = false) {
     this.shouldReconnect = reconnect;
+    this.generation += 1;
+    window.clearTimeout(this.reconnectTimer);
+    window.clearInterval(this.heartbeatTimer);
     if (this.connected) this.sendFrame("DISCONNECT", { receipt: `disconnect-${Date.now()}` });
     this.socket?.close();
     this.connected = false;
@@ -346,6 +400,29 @@ class NativeStompClient {
 }
 
 const api = new ChatApi(CONFIG.apiBaseUrl);
+
+function requireLogin() {
+  if (state.authExpired) return;
+  state.authExpired = true;
+  state.socket?.disconnect(false);
+  state.usingDemo = false;
+  state.conversations = [];
+  state.messages.clear();
+  state.cursors.clear();
+  state.activeConversationId = null;
+  state.currentUser = {};
+  state.selectedPerson = null;
+  if (state.pendingFile?.url) URL.revokeObjectURL(state.pendingFile.url);
+  state.pendingFile = null;
+  api.csrf = null;
+  byId("messageList").replaceChildren();
+  byId("messageInput").value = "";
+  byId("messageInput").disabled = true;
+  byId("sendButton").disabled = true;
+  // Hide every private view (including open dialogs) until navigation completes.
+  document.body.hidden = true;
+  window.location.assign(new URL("./login.html", window.location.href).href);
+}
 
 function normalizeConversation(raw) {
   const id = raw.id ?? raw.conversationId ?? raw.conversation_id;
@@ -365,7 +442,7 @@ function normalizeConversation(raw) {
     time: raw.lastActivityAt || raw.last_activity_at ? formatRelativeTime(raw.lastActivityAt || raw.last_activity_at) : (raw.time || ""),
     unread: Number(raw.unreadCount ?? raw.unread_count ?? raw.unread ?? 0),
     pinned: Boolean(raw.pinned),
-    ownerId: Number(raw.ownerId ?? raw.owner_id ?? 0),
+    ownerId: String(raw.ownerId ?? raw.owner_id ?? ""),
     memberCount: Number(raw.memberCount ?? raw.member_count ?? members.length ?? (type === "DIRECT_MESSAGE" ? 2 : 0)),
     onlineCount: Number(raw.onlineCount ?? raw.online_count ?? 0),
     description: raw.description || (type === "PUBLIC_ROOM" ? "团队协作讨论组" : "一对一私信"),
@@ -385,7 +462,7 @@ function formatRelativeTime(value) {
 
 function normalizeMessage(raw, conversationId) {
   const sender = raw.sender || raw.senderUser || raw.sender_user || {};
-  const senderId = Number(raw.senderId ?? raw.sender_id ?? sender.id ?? 0);
+  const senderId = String(raw.senderId ?? raw.sender_id ?? sender.id ?? "");
   const attachmentId = raw.attachmentId ?? raw.attachment_id ?? raw.attachment?.id;
   return {
     ...raw,
@@ -393,7 +470,7 @@ function normalizeMessage(raw, conversationId) {
     clientRequestId: raw.clientRequestId ?? raw.client_request_id,
     conversationId: String(raw.conversationId ?? raw.conversation_id ?? conversationId),
     senderId,
-    senderName: raw.senderName || raw.sender_name || sender.name || sender.username || (senderId === Number(state.currentUser.id) ? state.currentUser.name : `用户 ${senderId}`),
+    senderName: raw.senderName || raw.sender_name || sender.name || sender.username || (senderId === String(state.currentUser.id) ? state.currentUser.name : `用户 ${senderId}`),
     senderAvatar: raw.senderAvatar || raw.sender_avatar || sender.avatar || initials(raw.senderName || sender.name || sender.username),
     palette: raw.palette || palette[hashIndex(senderId, palette.length)],
     type: raw.type || raw.messageType || raw.message_type || "TEXT",
@@ -432,6 +509,8 @@ async function initialize() {
     setConnectionState("connected");
   } else {
     try {
+      state.currentUser = await api.loadSession();
+      byId("profileButton").textContent = initials(state.currentUser.name);
       const payload = await api.getConversations();
       const list = Array.isArray(payload) ? payload : (payload?.items || payload?.records || payload?.conversations || []);
       state.conversations = list.map(normalizeConversation);
@@ -439,9 +518,16 @@ async function initialize() {
       hideDemoBanner();
       setupRealtime();
     } catch (error) {
-      loadDemo();
-      showDemoBanner(state.mode === "live" ? `实时接口暂不可用：${error.message}` : null);
-      setConnectionState(state.mode === "live" ? "disconnected" : "connected");
+      if (error.status === 401) return;
+      if (state.mode === "auto" && error.status === 404) {
+        loadDemo();
+        showDemoBanner();
+        setConnectionState("connected");
+      } else {
+        state.usingDemo = false;
+        showDemoBanner("聊天服务不可用，请确认后端 CHAT_ENABLED 已开启，或重新连接。");
+        setConnectionState("disconnected");
+      }
     }
   }
   state.activeConversationId = state.conversations[0]?.id || null;
@@ -450,6 +536,7 @@ async function initialize() {
   else renderNoConversation();
   renderPeople(demoPeople);
   bindEvents();
+  byId("sessionButton").classList.toggle("hidden", state.usingDemo);
 }
 
 function setupRealtime() {
@@ -683,7 +770,7 @@ function renderMessages(options = {}) {
 }
 
 function messageElement(message, grouped) {
-  const own = Number(message.senderId) === Number(state.currentUser.id);
+  const own = String(message.senderId) === String(state.currentUser.id);
   const row = document.createElement("article");
   row.className = `message-row${own ? " own" : ""}${grouped ? " grouped" : ""}`;
   row.dataset.messageId = message.id;
@@ -997,7 +1084,7 @@ function renderDetails(conversation) {
     image.loading = "lazy";
     return image;
   }));
-  byId("dissolveRoomButton").classList.toggle("hidden", conversation.type !== "PUBLIC_ROOM" || Number(conversation.ownerId) !== Number(state.currentUser.id));
+  byId("dissolveRoomButton").classList.toggle("hidden", conversation.type !== "PUBLIC_ROOM" || String(conversation.ownerId) !== String(state.currentUser.id));
 }
 
 function memberRow(member, index) {
@@ -1201,6 +1288,12 @@ function toast(message, type = "success") {
 }
 
 function bindEvents() {
+  byId("sessionButton").addEventListener("click", async () => {
+    try {
+      await api.logout();
+      requireLogin();
+    } catch (error) { toast(error.message || "退出失败，请重试", "error"); }
+  });
   byId("conversationSearch").addEventListener("input", (event) => { state.search = event.target.value; renderConversations(); });
   $$(".view-switch button").forEach((button) => button.addEventListener("click", () => {
     state.filter = button.dataset.filter;
@@ -1276,6 +1369,7 @@ async function retryLiveConnection() {
   const button = byId("retryLiveButton");
   button.disabled = true;
   try {
+    state.currentUser = await api.loadSession();
     const payload = await api.getConversations();
     const list = Array.isArray(payload) ? payload : (payload?.items || payload?.records || payload?.conversations || []);
     state.conversations = list.map(normalizeConversation);
@@ -1297,9 +1391,5 @@ async function retryLiveConnection() {
 
 initialize().catch((error) => {
   console.error(error);
-  loadDemo();
-  state.activeConversationId = state.conversations[0]?.id || null;
-  renderConversations();
-  if (state.activeConversationId) activateConversation(state.activeConversationId);
-  showDemoBanner("页面初始化遇到问题，已切换到演示模式");
+  if (error.status !== 401) toast("页面初始化失败，请刷新后重试", "error");
 });

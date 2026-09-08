@@ -4,9 +4,13 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
-import org.springframework.web.bind.annotation.GetMapping;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Duration;
@@ -20,11 +24,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * @date 2020/3/16
  */
 @RestController
-@RequestMapping("/kafka")
+@RequestMapping("/kafka/consumers")
 public class KafkaController {
 
-    @GetMapping
-    public String createConsumer(@RequestParam String topic) {
+    @PostMapping
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public void createConsumer(@RequestBody @Valid CreateConsumer request) {
+        startConsumer(request.topic());
+    }
+
+    public record CreateConsumer(@NotBlank String topic) {}
+
+    void startConsumer(String topic) {
         List<String> list = new ArrayList<>();
         list.add(topic);
         String bootStrapServers = "192.168.0.107";
@@ -40,8 +51,6 @@ public class KafkaController {
         KafkaConsumer<String, String> kafkaConsumer = new KafkaConsumer<>(props);
         kafkaConsumer.subscribe(list);
         AtomicBoolean flag = new AtomicBoolean(true);
-//        KafkaConsumers kafkaConsumers = new KafkaConsumers(list, "192.168.0.107", "test", StringDeserializer.class, StringDeserializer.class);
-//        kafkaConsumers.run();
         new Thread(() -> {
             while (flag.get()) {
                 ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofSeconds(1000));
@@ -55,7 +64,6 @@ public class KafkaController {
             }
             kafkaConsumer.close();
         }).start();
-        return null;
     }
 
 }

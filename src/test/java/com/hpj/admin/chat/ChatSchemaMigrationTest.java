@@ -36,7 +36,7 @@ class ChatSchemaMigrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertEquals(2, first.migrationsExecuted);
+        assertEquals(3, first.migrationsExecuted);
         assertEquals(0, second.migrationsExecuted);
         try (Connection connection = openConnection()) {
             for (String table : new String[]{

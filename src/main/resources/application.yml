@@ -1,5 +1,12 @@
 server:
   port: 8090
+  servlet:
+    session:
+      timeout: 30m
+      cookie:
+        http-only: true
+        same-site: lax
+        secure: ${CHAT_SESSION_COOKIE_SECURE:false}
 spring:
   flyway:
     enabled: true
@@ -45,9 +52,20 @@ spring:
     inetutils:
       ignored-interfaces:
         - .*VMware
-#  elasticsearch:
-#    uris:
-#      [ "127.0.0.1:9200"]
+  elasticsearch:
+    uris: ${ELASTICSEARCH_URIS:https://localhost:9200}
+    username: ${ELASTICSEARCH_USERNAME:elastic}
+    password: ${ELASTICSEARCH_PASSWORD:123456}
+    restclient:
+      ssl:
+        bundle: elasticsearch
+  ssl:
+    bundle:
+      pem:
+        elasticsearch:
+          truststore:
+            # Trust this ES instance's CA; override the location when deploying elsewhere.
+            certificate: ${ELASTICSEARCH_CA_CERT:file:C:/workerspace/elasticsearch-9.2.2/config/certs/http_ca.crt}
   data:
     redis:
       host: 127.0.0.1
@@ -78,7 +96,11 @@ arthas:
   app-name: ${spring.application.name}
   telnet-port: 0
 chat:
-  enabled: false
+  enabled: ${CHAT_ENABLED:true}
+  security:
+    allowed-origins: ${CHAT_ALLOWED_ORIGINS:}
+    allow-legacy-des-passwords: ${CHAT_ALLOW_LEGACY_DES_PASSWORDS:false}
+    protect-legacy-endpoints: ${CHAT_PROTECT_LEGACY_ENDPOINTS:false}
   attachment:
     endpoint: ${CHAT_ATTACHMENT_ENDPOINT:http://localhost:9000}
     bucket: ${CHAT_ATTACHMENT_BUCKET:chat-attachments}

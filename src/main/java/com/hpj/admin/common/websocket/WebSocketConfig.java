@@ -1,6 +1,7 @@
 package com.hpj.admin.common.websocket;
 
 import org.springframework.context.annotation.Bean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.MessageBrokerRegistry;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
@@ -14,6 +15,7 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
  * @date 2020/3/16
  */
 @Configuration
+@ConditionalOnProperty(prefix = "chat", name = "enabled", havingValue = "false", matchIfMissing = true)
 @EnableWebSocketMessageBroker
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
