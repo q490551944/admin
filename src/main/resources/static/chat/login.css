@@ -1,0 +1,8 @@
+.login-page { display: grid; place-items: center; overflow: auto; min-height: 100dvh; padding: 24px; }
+.login-card { width: min(100%, 410px); padding: 36px; border: 1px solid var(--line); border-radius: 22px; background: var(--paper); box-shadow: var(--shadow-soft); }
+.login-card .brand-mark { background: var(--sage-dark); margin-bottom: 28px; }
+.login-card h1 { margin: 8px 0; font-size: 26px; }
+.login-description { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+.login-card .field { margin-top: 18px; }
+.login-card .primary-button { width: 100%; margin-top: 20px; font-size: 13px; }
+.login-note { margin: 24px 0 0; color: var(--muted); font-size: 11px; line-height: 1.8; }

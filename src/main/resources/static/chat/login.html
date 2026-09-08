@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>登录 · 汇聊</title>
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./login.css">
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <div class="brand-mark">汇</div>
+    <p class="eyebrow">TEAM WORKSPACE</p>
+    <h1>登录汇聊</h1>
+    <p class="login-description">使用现有员工账号进入团队协作空间。</p>
+    <form id="loginForm">
+      <label class="field"><span>账号</span><input name="username" autocomplete="username" required maxlength="100"></label>
+      <label class="field"><span>密码</span><input name="password" type="password" autocomplete="current-password" required></label>
+      <p id="loginError" role="alert" class="field-error"></p>
+      <button class="primary-button" id="loginButton" type="submit">登录</button>
+    </form>
+    <p class="login-note">账号需已启用且密码已安全加密。如无法登录，请联系系统维护人员。</p>
+  </main>
+  <script src="./config.js"></script>
+  <script src="./login.js" defer></script>
+</body>
+</html>
