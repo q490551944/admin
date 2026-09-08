@@ -746,35 +746,57 @@ function renderNoConversation() {
 }
 
 function renderMessages(options = {}) {
-  const messages = state.messages.get(state.activeConversationId) || [];
+  const conversationId = state.activeConversationId;
+  const messages = state.messages.get(conversationId) || [];
   const list = byId("messageList");
+  const scroller = byId("messageScroller");
+  const wasAtBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 40;
+  const existing = new Map([...list.children].map((node) => [node.dataset.renderKey, node]));
+  const existingIds = new Map([...list.children].filter((node) => node.dataset.messageId)
+    .map((node) => [JSON.stringify([node.dataset.conversationId, node.dataset.messageId]), node]));
   const nodes = [];
   let lastDate = "";
   let lastSender = null;
   let lastTimestamp = 0;
   messages.forEach((message) => {
-    const dateLabel = formatDateLabel(message.createdAt);
-    if (dateLabel !== lastDate) {
-      const divider = document.createElement("div");
+    const date = parseDate(message.createdAt);
+    const dateKey = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+    if (dateKey !== lastDate) {
+      const key = JSON.stringify([conversationId, "date", dateKey]);
+      const divider = existing.get(key) || document.createElement("div");
+      divider.dataset.renderKey = key;
       divider.className = "date-divider";
-      divider.textContent = dateLabel;
+      setMessageText(divider, formatDateLabel(message.createdAt));
       nodes.push(divider);
-      lastDate = dateLabel;
+      lastDate = dateKey;
       lastSender = null;
     }
+    // 服务端确认会替换临时 ID；sender/request 在发送、ACK 和广播之间保持不变。
+    const key = JSON.stringify([conversationId, message.type, String(message.senderId),
+      message.clientRequestId ? "request" : "id", String(message.clientRequestId || message.id)]);
     if (message.type === "SYSTEM" || message.eventType) {
-      const system = document.createElement("div");
-      system.className = "system-message";
-      const text = document.createElement("span");
-      text.textContent = message.body || message.message || "会话状态已更新";
-      system.append(text);
+      const system = existing.get(key) || document.createElement("div");
+      if (!system.firstElementChild) {
+        system.className = "system-message";
+        system.append(document.createElement("span"));
+      }
+      system.dataset.renderKey = key;
+      setMessageText(system.firstElementChild, message.body || message.message || "会话状态已更新");
       nodes.push(system);
       return;
     }
     const timestamp = parseDate(message.createdAt).getTime();
     // 同一天内，同一发送者相隔不足五分钟的连续消息合并显示头像和时间信息。
     const grouped = lastSender === message.senderId && timestamp - lastTimestamp < 5 * 60 * 1000;
-    nodes.push(messageElement(message, grouped));
+    const previous = existing.get(key) || existingIds.get(JSON.stringify([conversationId, String(message.id)]));
+    const row = messageElement(message, grouped, previous);
+    row.dataset.conversationId = conversationId;
+    row.dataset.renderKey = key;
+    if (!previous && options.animate) {
+      row.classList.add("is-new");
+      row.addEventListener("animationend", () => row.classList.remove("is-new"), { once: true });
+    }
+    nodes.push(row);
     lastSender = message.senderId;
     lastTimestamp = timestamp;
   });
@@ -786,75 +808,109 @@ function renderMessages(options = {}) {
     empty.append(text);
     nodes.push(empty);
   }
-  list.replaceChildren(...nodes);
+  // 只插入、移动或移除真正变化的节点，保留旧消息、图片和正在进行的动画。
+  const retained = new Set(nodes);
+  [...list.children].forEach((node) => { if (!retained.has(node)) node.remove(); });
+  nodes.forEach((node, index) => {
+    if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
+  });
   const cursor = state.cursors.get(state.activeConversationId);
   byId("loadHistoryButton").classList.toggle("hidden", !cursor?.hasMore);
   byId("messageInput").disabled = false;
   updateSendButton();
-  if (options.scrollToBottom !== false) requestAnimationFrame(() => { byId("messageScroller").scrollTop = byId("messageScroller").scrollHeight; });
+  if (options.scrollToBottom === true || (options.scrollToBottom !== false && wasAtBottom)) {
+    requestAnimationFrame(() => {
+      if (state.activeConversationId === conversationId) scroller.scrollTop = scroller.scrollHeight;
+    });
+  }
 }
 
-function messageElement(message, grouped) {
-  const own = String(message.senderId) === String(state.currentUser.id);
-  const row = document.createElement("article");
-  row.className = `message-row${own ? " own" : ""}${grouped ? " grouped" : ""}`;
-  row.dataset.messageId = message.id;
-  row.append(avatarElement({ name: message.senderName, avatar: message.senderAvatar, palette: message.palette }));
+function setMessageText(element, text) {
+  const value = String(text ?? "");
+  if (element.textContent !== value) element.textContent = value;
+}
 
-  const block = document.createElement("div");
-  block.className = "message-block";
-  if (!grouped) {
+function messageElement(message, grouped, existing) {
+  const own = String(message.senderId) === String(state.currentUser.id);
+  const row = existing || document.createElement("article");
+  if (!existing) row.className = "message-row";
+  row.classList.toggle("own", own);
+  row.classList.toggle("grouped", grouped);
+  row.dataset.messageId = message.id;
+  if (!existing) row.append(avatarElement({ name: message.senderName, avatar: message.senderAvatar, palette: message.palette }));
+  const avatar = $(".user-avatar", row);
+  avatar.className = `user-avatar ${own ? "avatar-sage" : message.palette || "avatar-sage"}`;
+  avatar.title = message.senderName || "成员";
+  setMessageText(avatar, message.senderAvatar || initials(message.senderName));
+
+  const block = $(".message-block", row) || document.createElement("div");
+  if (!existing) {
+    block.className = "message-block";
     const sender = document.createElement("div");
     sender.className = "sender-line";
-    const name = document.createElement("strong");
-    name.textContent = own ? "你" : message.senderName;
-    const time = document.createElement("time");
-    time.dateTime = message.createdAt;
-    time.textContent = formatClock(message.createdAt);
-    sender.append(name, time);
+    sender.append(document.createElement("strong"), document.createElement("time"));
     block.append(sender);
+    row.append(block);
   }
+  const sender = $(".sender-line", block);
+  sender.classList.toggle("hidden", grouped);
+  setMessageText($("strong", sender), own ? "你" : message.senderName);
+  const time = $("time", sender);
+  time.dateTime = message.createdAt;
+  setMessageText(time, formatClock(message.createdAt));
 
-  if (message.type === "IMAGE") {
+  if (!existing && message.type === "IMAGE") {
     const imageWrap = document.createElement("div");
     imageWrap.className = "image-message";
     const image = document.createElement("img");
-    image.src = message.imageUrl || `${CONFIG.apiBaseUrl || "/api/chat/v1"}/attachments/${message.attachmentId}/thumbnail`;
-    image.alt = message.fileName ? `图片：${message.fileName}` : "聊天图片";
     image.loading = "lazy";
-    image.addEventListener("click", () => window.open(message.originalUrl || message.imageUrl || image.src, "_blank", "noopener,noreferrer"));
+    image.addEventListener("click", () => window.open(image.dataset.originalUrl || image.src, "_blank", "noopener,noreferrer"));
     image.addEventListener("error", () => { image.alt = "图片加载失败"; imageWrap.classList.add("failed"); });
     const caption = document.createElement("div");
     caption.className = "image-caption";
     const name = document.createElement("span");
-    name.textContent = message.fileName || "图片";
     const hint = document.createElement("span");
     hint.textContent = "点击查看";
     caption.append(name, hint);
     imageWrap.append(image, caption);
     block.append(imageWrap);
-  } else {
+  } else if (!existing) {
     const bubble = document.createElement("div");
-    bubble.className = `message-bubble${message.status === "FAILED" ? " failed" : ""}`;
-    // 用户正文只作为文本渲染，避免把消息内容解释为 HTML。
-    bubble.textContent = message.body;
+    bubble.className = "message-bubble";
     block.append(bubble);
   }
 
-  if (own && message.status !== "SENT") {
-    const status = document.createElement("div");
-    status.className = `message-status${message.status === "FAILED" ? " failed" : ""}`;
-    status.textContent = message.status === "FAILED" ? "发送失败 · " : "发送中…";
-    if (message.status === "FAILED") {
-      const retry = document.createElement("button");
-      retry.type = "button";
-      retry.textContent = "重试";
-      retry.addEventListener("click", () => retryMessage(message.id));
-      status.append(retry);
-    }
-    block.append(status);
+  if (message.type === "IMAGE") {
+    const image = $("img", block);
+    const source = message.imageUrl || `${CONFIG.apiBaseUrl || "/api/chat/v1"}/attachments/${message.attachmentId}/thumbnail`;
+    if (image.getAttribute("src") !== source) image.setAttribute("src", source);
+    image.dataset.originalUrl = message.originalUrl || message.imageUrl || "";
+    image.alt = message.fileName ? `图片：${message.fileName}` : "聊天图片";
+    setMessageText($(".image-caption", block).firstElementChild, message.fileName || "图片");
+  } else {
+    const bubble = $(".message-bubble", block);
+    bubble.classList.toggle("failed", message.status === "FAILED");
+    // 用户正文只作为文本渲染，避免把消息内容解释为 HTML。
+    setMessageText(bubble, message.body);
   }
-  row.append(block);
+
+  if (own) {
+    const status = $(".message-status", block) || document.createElement("div");
+    if (!status.parentElement) block.append(status);
+    status.className = `message-status${message.status === "FAILED" ? " failed" : ""}`;
+    status.classList.toggle("settled", message.status === "SENT");
+    if (status.dataset.status !== message.status) {
+      status.dataset.status = message.status;
+      status.textContent = message.status === "FAILED" ? "发送失败 · " : message.status === "SENT" ? "" : "发送中…";
+      if (message.status === "FAILED") {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "重试";
+        retry.addEventListener("click", () => retryMessage(row.dataset.messageId));
+        status.append(retry);
+      }
+    }
+  }
   return row;
 }
 
@@ -862,6 +918,7 @@ async function loadEarlierMessages() {
   const button = byId("loadHistoryButton");
   const scroller = byId("messageScroller");
   const beforeHeight = scroller.scrollHeight;
+  const beforeTop = scroller.scrollTop;
   button.disabled = true;
   button.textContent = "正在加载…";
   try {
@@ -883,7 +940,7 @@ async function loadEarlierMessages() {
     }
     renderMessages({ scrollToBottom: false });
     // 历史消息插到列表前部后按新增高度补偿滚动位置，避免直接跳到列表底部。
-    requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight - beforeHeight; });
+    scroller.scrollTop = beforeTop + scroller.scrollHeight - beforeHeight;
   } catch (error) {
     toast(error.message || "更早消息加载失败", "error");
   } finally {
@@ -948,7 +1005,7 @@ function createOptimisticMessage(data) {
   const messages = state.messages.get(state.activeConversationId) || [];
   state.messages.set(state.activeConversationId, [...messages, message]);
   updateConversationPreview(message);
-  renderMessages();
+  renderMessages({ animate: true, scrollToBottom: true });
   renderConversations();
   return message;
 }
@@ -1054,7 +1111,7 @@ function handleRealtimeMessage(payload) {
   const conversation = state.conversations.find((item) => item.id === id);
   if (conversation && id !== state.activeConversationId) conversation.unread += 1;
   renderConversations();
-  if (id === state.activeConversationId) renderMessages();
+  if (id === state.activeConversationId) renderMessages({ animate: true });
 }
 
 function updateConversationPreview(message) {
