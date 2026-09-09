@@ -86,7 +86,7 @@ function harness() {
     document, URL, URLSearchParams, Headers, FormData, AbortController, TextEncoder, WebSocket: Socket,
     console, requestAnimationFrame: callback => callback(), fetch: (...args) => fetchHandler(...args)
   });
-  vm.runInContext(source + "\nglobalThis.subject = { api, state, ApiError, NativeStompClient, requireLogin, initialize, handleRealtimeMessage, handleMessageAck, handleSocketError, retryMessage, dispatchMessage, loadEarlierMessages, createOptimisticMessage, renderMessages };", context);
+  vm.runInContext(source + "\nglobalThis.subject = { api, state, ApiError, NativeStompClient, requireLogin, initialize, mergeMessages, handleRealtimeMessage, handleMessageAck, handleSocketError, retryMessage, dispatchMessage, syncConversation, loadEarlierMessages, ackTimers, setupRealtime, createOptimisticMessage, openDirectDialog, searchPeople, createDirectConversation, renderPeople, renderMessages };", context);
   return { ...context.subject, document, nodes, timers, redirects, Socket,
     fetch: handler => { fetchHandler = handler; },
     flush: () => new Promise(resolve => setImmediate(resolve))
@@ -97,6 +97,78 @@ function response(status, value) {
   return { ok: status >= 200 && status < 300, status, headers: new Headers({ "content-type": "application/json" }),
     json: async () => value };
 }
+
+test("opening the direct dialog loads actual employees and does not offer demo people", async () => {
+  const h = harness();
+  const calls = [];
+  h.fetch(async url => { calls.push(url); return response(200, [{ userId: "9007199254740993", name: "bob", avatar: null }]); });
+  h.openDirectDialog();
+  await h.flush();
+  assert.deepEqual(calls, ["/api/chat/v1/users?query="]);
+  const buttons = h.nodes.get("peopleList").children;
+  assert.equal(buttons.length, 1);
+  assert.equal(buttons[0].dataset.personId, "9007199254740993");
+  buttons[0].click();
+  assert.equal(h.state.selectedPerson.name, "bob");
+  assert.equal(h.nodes.get("submitDirectButton").disabled, false);
+});
+
+test("stale employee searches cannot overwrite a newer result or restore expired session data", async () => {
+  const h = harness();
+  let firstResolve;
+  h.fetch(url => url.endsWith("query=old") ? new Promise(resolve => { firstResolve = resolve; })
+    : response(200, [{ userId: "3", name: "carol" }]));
+  const first = h.searchPeople("old");
+  await h.searchPeople("new");
+  firstResolve(response(200, [{ userId: "2", name: "bob" }]));
+  await first;
+  assert.equal(h.nodes.get("peopleList").children[0].dataset.personId, "3");
+  const expired = h.searchPeople("old");
+  h.requireLogin();
+  firstResolve(response(200, [{ userId: "2", name: "bob" }]));
+  await expired;
+  assert.equal(h.nodes.get("peopleList").children.length, 0);
+});
+
+test("large employee IDs remain distinct when selecting colleagues", () => {
+  const h = harness();
+  const people = [{ id: "9007199254740992", name: "first" }, { id: "9007199254740993", name: "second" }];
+  h.state.selectedPerson = people[1];
+  h.renderPeople(people);
+  assert.equal(h.nodes.get("peopleList").children[0].className, "person-option");
+  assert.equal(h.nodes.get("peopleList").children[1].className, "person-option selected");
+});
+
+test("direct creation uses the canonical peer field, session CSRF and string ID", async () => {
+  const h = harness();
+  h.api.csrf = { headerName: "X-CSRF-TOKEN", token: "session-token" };
+  const calls = [];
+  h.fetch(async (url, options) => { calls.push({ url, options }); return response(200, { id: "10" }); });
+  await h.api.createDirectConversation("9007199254740993");
+  assert.equal(calls[0].url, "/api/chat/v1/direct-conversations");
+  assert.deepEqual(JSON.parse(calls[0].options.body), { peer_user_id: "9007199254740993" });
+  assert.equal(calls[0].options.headers.get("X-CSRF-TOKEN"), "session-token");
+});
+
+test("reopening a direct conversation keeps one entry and retrieves saved history", async () => {
+  const h = harness();
+  const calls = [];
+  h.state.currentUser = { id: "1", name: "alice" };
+  h.api.csrf = { headerName: "X-CSRF-TOKEN", token: "session-token" };
+  h.fetch(async (url) => {
+    calls.push(url);
+    if (url.endsWith("/direct-conversations")) return response(200, { id: "10", type: "DIRECT_MESSAGE", name: "bob", peerUserId: "2" });
+    return response(200, { items: [], afterCursor: "baseline", hasMore: false });
+  });
+  await h.createDirectConversation({ id: "2", name: "bob" });
+  await h.createDirectConversation({ id: "2", name: "bob" });
+  assert.equal(h.state.conversations.length, 1);
+  assert.equal(h.state.activeConversationId, "10");
+  assert.equal(calls.filter(url => url.includes("/messages")).length, 2);
+  assert.equal(h.state.cursors.get("10").afterCursor, "baseline");
+  assert.deepEqual(Array.from(h.state.conversations[0].members, member => member.name), ["alice", "bob"]);
+  assert.equal(h.nodes.get("detailsMembers").children.length, 2);
+});
 
 test("REST mutations carry the session CSRF token and never a client owner", async () => {
   const h = harness();
@@ -264,6 +336,20 @@ function message(id, request = id, sender = "1", time = "2026-09-08T10:00:00.123
     conversationId: "10", type: "TEXT", body: "hello <script> 😀", status: "SENT", createdAt: time };
 }
 
+test("ACK, broadcast and history reconcile one request without merging different senders", () => {
+  const h = harness(); messageFixture(h);
+  h.state.messages.set("10", [{ ...message("pending", "same"), status: "SENDING" }]);
+  h.handleRealtimeMessage({ eventType: "MESSAGE_CREATED", message: message("20", "same", "2") });
+  h.handleRealtimeMessage({ eventType: "MESSAGE_CREATED", message: message("21", "same") });
+  h.handleMessageAck({ eventType: "MESSAGE_ACK", clientRequestId: "same", message: message("21", "same") });
+  const merged = h.mergeMessages(h.state.messages.get("10"), [message("21", "same"), message("20", "same", "2")]);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(Array.from(merged, item => item.id), ["20", "21"]);
+  assert.ok(merged.every(item => item.status === "SENT"));
+  h.handleSocketError({ clientRequestId: "same", message: "late error" });
+  assert.equal(h.state.messages.get("10").find(item => item.id === "21").status, "SENT");
+});
+
 for (const firstEvent of ["ack", "broadcast"]) {
   test(`${firstEvent} first updates the existing bubble without replaying old messages or replacing images`, () => {
     const h = harness(); messageFixture(h);
@@ -353,4 +439,128 @@ test("prepending history preserves existing nodes and recomputes sender grouping
   assert.equal(row.querySelector(".sender-line").classList.contains("hidden"), true);
   assert.equal(list.querySelectorAll(".is-new").length, 0);
   assert.equal(scroller.scrollTop, 275);
+});
+
+test("retry keeps the request ID and missing ACK becomes retryable without a duplicate", async () => {
+  const h = harness(); messageFixture(h);
+  const pending = { ...message("pending", "stable"), status: "FAILED" };
+  h.state.messages.set("10", [pending]);
+  const sent = [];
+  h.state.socket = { readyConversationId: "10", sendMessage: payload => { sent.push(payload); return true; } };
+  h.retryMessage("pending");
+  assert.equal(sent[0].clientRequestId, "stable");
+  assert.equal(sent[0].senderId, undefined);
+  h.timers.get(h.ackTimers.get("stable")).callback();
+  assert.equal(pending.status, "FAILED");
+  h.retryMessage("pending");
+  h.handleMessageAck({ clientRequestId: "stable", message: message("30", "stable") });
+  assert.deepEqual(sent.map(item => item.clientRequestId), ["stable", "stable"]);
+  assert.equal(h.state.messages.get("10").length, 1);
+  assert.equal(h.state.messages.get("10")[0].id, "30");
+  assert.equal(h.ackTimers.size, 0);
+});
+
+test("sending waits for actual broker receipts for both private queues and conversation", async () => {
+  const h = harness(); messageFixture(h);
+  h.fetch(async () => response(200, { id: "1" }));
+  const ready = [];
+  const client = new h.NativeStompClient("/ws/chat", { onReady: id => ready.push(id) });
+  client.subscribeToConversation("10");
+  await client.connect();
+  client.handleFrame("CONNECTED", {}, "");
+  const payload = { conversationId: "10", clientRequestId: "stable", type: "TEXT", body: "世界 😀" };
+  assert.equal(client.sendMessage(payload), false);
+  for (const id of ["chat-acks", "chat-errors"]) {
+    client.handleFrame("RECEIPT", { "receipt-id": client.subscriptions.get(id).receipt }, "");
+    assert.equal(client.sendMessage(payload), false);
+  }
+  client.handleFrame("RECEIPT", { "receipt-id": client.subscriptions.get("conversation-10").receipt }, "");
+  assert.deepEqual(ready, ["10"]);
+  assert.equal(client.sendMessage(payload), true);
+  assert.match(client.socket.sent.at(-1), new RegExp(`content-length:${Buffer.byteLength(JSON.stringify(payload))}`));
+  client.subscribeToConversation("11");
+  assert.equal(client.sendMessage(payload), false);
+});
+
+test("catch-up keeps its REST watermark while live messages arrive and pages until caught up", async () => {
+  const h = harness(); messageFixture(h);
+  h.state.cursors.set("10", { beforeCursor: "oldest", afterCursor: "cursor-10", hasMore: true });
+  let firstResponse;
+  const urls = [];
+  h.fetch((url) => {
+    urls.push(url);
+    if (urls.length === 1) return new Promise(resolve => { firstResponse = resolve; });
+    return Promise.resolve(response(200, { items: [message("12")], afterCursor: "cursor-12", hasMore: false }));
+  });
+  const recovery = h.syncConversation("10");
+  h.handleRealtimeMessage({ message: message("12") });
+  firstResponse(response(200, { items: [message("11")], afterCursor: "cursor-11", hasMore: true }));
+  await recovery;
+  assert.equal(urls.length, 2);
+  assert.match(urls[0], /after=cursor-10/);
+  assert.match(urls[1], /after=cursor-11/);
+  assert.deepEqual(Array.from(h.state.messages.get("10"), item => item.id), ["11", "12"]);
+  assert.equal(h.state.cursors.get("10").beforeCursor, "oldest");
+  assert.equal(h.state.cursors.get("10").hasMore, true);
+  assert.equal(h.state.cursors.get("10").afterCursor, "cursor-12");
+});
+
+test("first history response preserves broadcasts received while request is in flight", async () => {
+  const h = harness(); messageFixture(h);
+  let complete;
+  h.fetch(() => new Promise(resolve => { complete = resolve; }));
+  const loading = h.syncConversation("10");
+  h.handleRealtimeMessage({ message: message("12") });
+  complete(response(200, { items: [message("11")], afterCursor: "cursor-11", hasMore: false }));
+  await loading;
+  assert.deepEqual(Array.from(h.state.messages.get("10"), item => item.id), ["11", "12"]);
+  assert.equal(h.state.cursors.get("10").afterCursor, "cursor-11");
+});
+
+test("late history for a previous conversation never populates the new conversation", async () => {
+  const h = harness(); messageFixture(h);
+  h.state.cursors.set("10", { beforeCursor: "older", afterCursor: "latest", hasMore: true });
+  let complete;
+  h.fetch(() => new Promise(resolve => { complete = resolve; }));
+  const loading = h.loadEarlierMessages();
+  h.state.activeConversationId = "11";
+  complete(response(200, { items: [message("5")], beforeCursor: "first", afterCursor: "cursor-5", hasMore: false }));
+  await loading;
+  assert.equal(h.state.messages.get("10")[0].id, "5");
+  assert.equal(h.state.messages.has("11"), false);
+  assert.equal(h.state.cursors.get("10").afterCursor, "latest");
+});
+
+test("message ordering preserves microseconds and IDs above Number safe integer", () => {
+  const h = harness();
+  const ordered = h.mergeMessages([], [
+    message("9007199254740994", "b"), message("9007199254740993", "a"),
+    message("9007199254740995", "c", "2", "2026-09-08T10:00:00.123455")
+  ]);
+  assert.deepEqual(Array.from(ordered, item => item.id), ["9007199254740995", "9007199254740993", "9007199254740994"]);
+});
+
+test("browser clock ahead cannot suppress acknowledged or newer server summaries", () => {
+  const h = harness(); messageFixture(h);
+  const pending = h.createOptimisticMessage({ type: "TEXT", body: "pending", createdAt: "2035-01-01T00:00:00" });
+  h.handleMessageAck({ clientRequestId: pending.clientRequestId, message: message("20", pending.clientRequestId) });
+  h.handleRealtimeMessage({ message: { ...message("21", "next", "2"), body: "next server message" } });
+  assert.equal(h.state.conversations[0].latestMessage.id, "21");
+  assert.match(h.state.conversations[0].preview, /next server message/);
+});
+
+test("subscription failures do not reset the finite reconnect budget on CONNECTED alone", () => {
+  const h = harness();
+  const client = new h.NativeStompClient("/ws/chat");
+  client.socket = new h.Socket("ws://localhost/ws/chat");
+  client.reconnectCount = 4;
+  client.handleFrame("CONNECTED", {}, "");
+  assert.equal(client.reconnectCount, 4);
+  client.handleDisconnect();
+  assert.equal(client.reconnectCount, 5);
+  client.socket = new h.Socket("ws://localhost/ws/chat");
+  client.handleFrame("CONNECTED", {}, "");
+  client.handleDisconnect();
+  assert.equal(client.reconnectCount, 5);
+  assert.equal(h.timers.has(client.reconnectTimer), false);
 });

@@ -7,6 +7,7 @@ import jakarta.servlet.http.HttpSessionEvent;
 import jakarta.servlet.http.HttpSessionListener;
 import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -18,6 +19,10 @@ import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.messaging.simp.SimpMessageType;
 import org.springframework.messaging.simp.broker.SimpleBrokerMessageHandler;
 import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.ExecutorSubscribableChannel;
+import org.springframework.messaging.support.ChannelInterceptor;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -40,8 +45,10 @@ class ChatWebSocketIntegrationTest {
     @Autowired ObjectMapper json;
     @Autowired JdbcTemplate jdbc;
     @Autowired ChatRoomService rooms;
+    @Autowired ChatMessagingService messages;
     @Autowired PlatformTransactionManager transactions;
     @Autowired SimpleBrokerMessageHandler broker;
+    @Autowired @Qualifier("brokerChannel") ExecutorSubscribableChannel brokerChannel;
     @Autowired SessionProbe probe;
     private final List<Wire> connections = new ArrayList<>();
 
@@ -139,6 +146,152 @@ class ChatWebSocketIntegrationTest {
         await().atMost(Duration.ofSeconds(3)).until(() -> !broker.getSubscriptionRegistry().findSubscriptions(message).isEmpty());
     }
 
+    void confirmedSubscription(Wire wire, String id, String destination) throws Exception {
+        wire.send("SUBSCRIBE\nid:" + id + "\ndestination:" + destination + "\nreceipt:ready-" + id + "\nack:auto\n\n");
+        assertThat(wire.frame()).startsWith("RECEIPT\n").contains("receipt-id:ready-" + id);
+    }
+
+    void sendText(Wire wire, long conversation, String requestId, String body) throws Exception {
+        wire.send("SEND\ndestination:/app/chat.messages.send\ncontent-type:application/json\n\n"
+                + json.writeValueAsString(Map.of("conversationId", String.valueOf(conversation),
+                        "clientRequestId", requestId, "type", "TEXT", "body", body)));
+    }
+
+    @Test void privateQueueReceiptWaitsForResolvedBrokerSubscription() throws Exception {
+        Wire alice = connect(login("alice"));
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        ChannelInterceptor gate = new ChannelInterceptor() {
+            @Override public Message<?> preSend(Message<?> message, MessageChannel channel) {
+                var headers = SimpMessageHeaderAccessor.wrap(message);
+                if (headers.getMessageType() == SimpMessageType.SUBSCRIBE
+                        && headers.getDestination().startsWith("/queue/chat.acks")) {
+                    entered.countDown();
+                    try { if (!release.await(5, TimeUnit.SECONDS)) throw new AssertionError("test gate timed out"); }
+                    catch (InterruptedException error) { throw new AssertionError(error); }
+                }
+                return message;
+            }
+        };
+        brokerChannel.addInterceptor(gate);
+        try {
+            alice.send("SUBSCRIBE\nid:acks\ndestination:/user/queue/chat.acks\nreceipt:registered\n\n");
+            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
+            assertThat(alice.frames.poll(200, TimeUnit.MILLISECONDS)).isNull();
+            release.countDown();
+            assertThat(alice.frame()).startsWith("RECEIPT\n").contains("receipt-id:registered");
+        } finally { release.countDown(); brokerChannel.removeInterceptor(gate); }
+    }
+
+    @Test void textIsBroadcastAcknowledgedPersistedAndRetryDoesNotBroadcastTwice() throws Exception {
+        long room = rooms.create(1, "Text delivery").getId();
+        Browser aliceBrowser = login("alice");
+        Wire alice = connect(aliceBrowser);
+        Wire bob = connect(login("bob"));
+        confirmedSubscription(alice, "acks", "/user/queue/chat.acks");
+        confirmedSubscription(alice, "room", topic(room));
+        confirmedSubscription(bob, "room", topic(room));
+        sendText(alice, room, "request-1", "  hello 😀 世界  ");
+        JsonNode received = payload(bob.frame());
+        assertThat(received.path("eventType").asText()).isEqualTo("MESSAGE_CREATED");
+        JsonNode message = received.path("message");
+        assertThat(message.path("senderId").asText()).isEqualTo("1");
+        assertThat(message.path("body").asText()).isEqualTo("hello 😀 世界");
+        assertThat(message.path("id").isTextual()).isTrue();
+        List<JsonNode> senderFrames = List.of(payload(alice.frame()), payload(alice.frame()));
+        assertThat(senderFrames).extracting(frame -> frame.path("eventType").asText())
+                .containsExactlyInAnyOrder("MESSAGE_CREATED", "MESSAGE_ACK");
+        assertThat(senderFrames.stream().filter(frame -> frame.path("eventType").asText().equals("MESSAGE_ACK"))
+                .findFirst().orElseThrow().path("message")).isEqualTo(message);
+        var history = aliceBrowser.request("GET", "/api/chat/v1/conversations/" + room + "/messages", null, null);
+        assertThat(history.statusCode()).isEqualTo(200);
+        assertThat(json.readTree(history.body()).path("items").get(0)).isEqualTo(message);
+        sendText(alice, room, "request-1", "hello 😀 世界");
+        JsonNode replay = payload(alice.frame());
+        assertThat(replay.path("eventType").asText()).isEqualTo("MESSAGE_ACK");
+        assertThat(replay.path("message")).isEqualTo(message);
+        assertThat(bob.frames.poll(200, TimeUnit.MILLISECONDS)).isNull();
+        assertThat(alice.frames.poll(200, TimeUnit.MILLISECONDS)).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM chat_message", Integer.class)).isEqualTo(1);
+    }
+
+    @Test void businessRejectionIsPrivateAndConnectionCanSendAgain() throws Exception {
+        long room = rooms.create(1, "Rejected delivery").getId();
+        Wire alice = connect(login("alice"));
+        Wire bob = connect(login("bob"));
+        confirmedSubscription(alice, "acks", "/user/queue/chat.acks");
+        confirmedSubscription(alice, "errors", "/user/queue/chat.errors");
+        confirmedSubscription(bob, "errors", "/user/queue/chat.errors");
+        confirmedSubscription(bob, "room", topic(room));
+        sendText(alice, room, "empty", "   ");
+        String errorFrame = alice.frame();
+        assertThat(errorFrame).startsWith("MESSAGE\n").contains("subscription:errors");
+        JsonNode rejection = payload(errorFrame);
+        assertThat(rejection.path("eventType").asText()).isEqualTo("MESSAGE_REJECTED");
+        assertThat(rejection.path("clientRequestId").asText()).isEqualTo("empty");
+        assertThat(rejection.path("code").asText()).isEqualTo("EMPTY_MESSAGE");
+        assertThat(bob.frames.poll(200, TimeUnit.MILLISECONDS)).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM chat_message", Integer.class)).isZero();
+        sendText(alice, room, "valid", "works after rejection");
+        assertThat(payload(alice.frame()).path("eventType").asText()).isEqualTo("MESSAGE_ACK");
+        assertThat(payload(bob.frame()).path("message").path("body").asText()).isEqualTo("works after rejection");
+        sendText(alice, room, "valid", "changed");
+        assertThat(payload(alice.frame()).path("code").asText()).isEqualTo("MESSAGE_REQUEST_CONFLICT");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM chat_message", Integer.class)).isEqualTo(1);
+    }
+
+    @Test void privateTextAndHistoryStayBetweenParticipantsAndAckTargetsSendingSession() throws Exception {
+        Browser aliceBrowser = login("alice");
+        var created = aliceBrowser.request("POST", "/api/chat/v1/direct-conversations", "{\"peer_user_id\":2}", "application/json");
+        assertThat(created.statusCode()).isEqualTo(200);
+        long id = json.readTree(created.body()).path("id").asLong();
+        Wire alice = connect(aliceBrowser);
+        Wire otherAlice = connect(login("alice"));
+        Browser bobBrowser = login("bob");
+        var reopened = bobBrowser.request("POST", "/api/chat/v1/direct-conversations", "{\"peer_user_id\":1}", "application/json");
+        assertThat(json.readTree(reopened.body()).path("id").asLong()).isEqualTo(id);
+        Wire bob = connect(bobBrowser);
+        Browser carolBrowser = login("carol");
+        Wire carol = connect(carolBrowser);
+        confirmedSubscription(alice, "acks", "/user/queue/chat.acks");
+        confirmedSubscription(otherAlice, "acks", "/user/queue/chat.acks");
+        confirmedSubscription(carol, "acks", "/user/queue/chat.acks");
+        confirmedSubscription(bob, "private", topic(id));
+        sendText(alice, id, "private-send", "for bob");
+        assertThat(payload(alice.frame()).path("eventType").asText()).isEqualTo("MESSAGE_ACK");
+        assertThat(payload(bob.frame()).path("message").path("body").asText()).isEqualTo("for bob");
+        assertThat(otherAlice.frames.poll(150, TimeUnit.MILLISECONDS)).isNull();
+        assertThat(carol.frames.poll(150, TimeUnit.MILLISECONDS)).isNull();
+        String path = "/api/chat/v1/conversations/" + id + "/messages";
+        assertThat(bobBrowser.request("GET", path, null, null).statusCode()).isEqualTo(200);
+        assertThat(carolBrowser.request("GET", path, null, null).statusCode()).isEqualTo(403);
+    }
+
+    @Test void noMessageBroadcastOrAckBeforeCommitOrAfterRollback() throws Exception {
+        long room = rooms.create(1, "Message transaction").getId();
+        Wire alice = connect(login("alice"));
+        Wire bob = connect(login("bob"));
+        confirmedSubscription(alice, "acks", "/user/queue/chat.acks");
+        confirmedSubscription(bob, "room", topic(room));
+        for (boolean rollback : List.of(true, false)) {
+            new TransactionTemplate(transactions).executeWithoutResult(status -> {
+                messages.send(1, new TextMessageRequest(room, "transaction", "committed only"), "alice", null);
+                try {
+                    assertThat(alice.frames.poll(150, TimeUnit.MILLISECONDS)).isNull();
+                    assertThat(bob.frames.poll(150, TimeUnit.MILLISECONDS)).isNull();
+                } catch (InterruptedException error) { throw new AssertionError(error); }
+                if (rollback) status.setRollbackOnly();
+            });
+            if (rollback) {
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM chat_message", Integer.class)).isZero();
+                assertThat(alice.frames.poll(150, TimeUnit.MILLISECONDS)).isNull();
+                assertThat(bob.frames.poll(150, TimeUnit.MILLISECONDS)).isNull();
+            }
+        }
+        assertThat(payload(alice.frame()).path("eventType").asText()).isEqualTo("MESSAGE_ACK");
+        assertThat(payload(bob.frame()).path("eventType").asText()).isEqualTo("MESSAGE_CREATED");
+    }
+
     JsonNode payload(String frame) throws Exception { return json.readTree(frame.substring(frame.indexOf("\n\n") + 2)); }
 
     void assertError(Wire wire, int status, String code) throws Exception {
@@ -170,6 +323,7 @@ class ChatWebSocketIntegrationTest {
         forbiddenSend.send("SEND\ndestination:/app/chat.messages.send\ncontent-type:application/json\n\n"
                 + "{\"conversationId\":\"101\",\"body\":\"intrusion\"}");
         assertError(forbiddenSend, 403, "ACCESS_DENIED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM chat_audit_event WHERE event_type='AUTH_DENIED' AND actor_user_id=3 AND conversation_id=101", Integer.class)).isEqualTo(2);
         Wire forgery = connect(alice);
         forgery.send("SEND\ndestination:/app/chat.messages.send\ncontent-type:application/json\n\n"
                 + "{\"conversationId\":\"101\",\"senderId\":\"2\",\"body\":\"forged\"}");
