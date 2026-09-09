@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Implementation Notes — Issue #0003</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #FAF9F6;
+      color: #1a1a1a;
+      padding: 2.5rem 2rem;
+      line-height: 1.7;
+    }
+    .container { max-width: 800px; margin: 0 auto; }
+    h1 { font-size: 1.375rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .meta { color: #8B8680; font-size: 0.8125rem; margin-bottom: 2rem; }
+    h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-top: 2rem;
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.375rem;
+      border-bottom: 1px solid #E8E4DE;
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+    }
+    .dot.design { background: #5B8A72; }
+    .dot.deviation { background: #D97757; }
+    .dot.tradeoff { background: #4A6FA5; }
+    .dot.question { background: #D4A843; }
+    .item {
+      background: #FFFFFF;
+      border: 1px solid #E8E4DE;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+    }
+    .item h3 { font-size: 0.875rem; font-weight: 600; margin-bottom: 0.375rem; }
+    .item p { font-size: 0.8125rem; color: #4A4540; margin-bottom: 0.375rem; }
+    .label {
+      display: inline-block;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      padding: 0.125rem 0.5rem;
+      border-radius: 4px;
+      margin-right: 0.375rem;
+    }
+    .label-design { background: #F5F8F6; color: #5B8A72; border: 1px solid #5B8A72; }
+    .label-deviation { background: #FFF5F0; color: #D97757; border: 1px solid #D97757; }
+    .label-tradeoff { background: #F0F4F8; color: #4A6FA5; border: 1px solid #4A6FA5; }
+    .label-question { background: #FDF8F0; color: #D4A843; border: 1px solid #D4A843; }
+    .none { color: #B0AAA4; font-style: italic; font-size: 0.8125rem; }
+    .footer {
+      text-align: center; margin-top: 2.5rem; color: #B0AAA4;
+      font-size: 0.6875rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Implementation Notes</h1>
+    <p class="meta">Issue <a href="https://github.com/q490551944/admin/issues/3">#3</a> &mdash; 搭建聊天模块基础设施与数据库迁移 &mdash; 2026-08-19</p>
+
+    <h2><span class="dot design"></span> Design Decisions</h2>
+    <div class="item">
+      <h3><span class="label label-design">Decision</span> 使用单一会话表承载公共房间与一对一私聊</h3>
+      <p><strong>Ambiguity:</strong> SPEC 给出了两类会话及各自唯一键，但没有规定应拆表还是共用表。</p>
+      <p><strong>Choice:</strong> 通过 <code>type</code> 区分 <code>PUBLIC_ROOM</code> 与 <code>DIRECT_MESSAGE</code>，并使用形态检查约束确保只有对应类型的字段可被填写。</p>
+      <p><strong>Rationale:</strong> 共用 ID 空间和最近消息字段可以简化后续会话列表、消息关联与统一鉴权，同时数据库约束能防止不完整状态进入系统。</p>
+    </div>
+    <div class="item">
+      <h3><span class="label label-design">Decision</span> 将并发不变量下沉到数据库唯一约束</h3>
+      <p><strong>Ambiguity:</strong> Issue 要求房间名、私聊和消息请求保持唯一，但未指定仅由服务层判断还是由数据库兜底。</p>
+      <p><strong>Choice:</strong> 为归一化房间名、私聊 <code>direct_key</code>、参与者关系、附件对象名和 <code>(sender_id, client_request_id)</code> 创建唯一约束。</p>
+      <p><strong>Rationale:</strong> 服务层的先查后写无法独立阻止并发竞态，数据库约束是所有写入路径共享的最终一致性边界。</p>
+    </div>
+    <div class="item">
+      <h3><span class="label label-design">Decision</span> 默认关闭聊天功能并通过环境变量提供存储凭据</h3>
+      <p><strong>Ambiguity:</strong> SPEC 建议分阶段发布，但没有给出特性开关默认值和凭据配置方式。</p>
+      <p><strong>Choice:</strong> <code>chat.enabled</code> 默认设为 <code>false</code>，Service 实现仅在开关启用时注册；MinIO 端点、桶和凭据通过 <code>CHAT_ATTACHMENT_*</code> 环境变量覆盖。</p>
+      <p><strong>Rationale:</strong> 后续接口尚未完成时不会意外暴露半成品功能，同时避免把真实密钥提交到仓库。</p>
+    </div>
+
+    <h2><span class="dot deviation"></span> Deviations</h2>
+    <div class="item">
+      <h3><span class="label label-deviation">Deviation</span> 迁移集成测试使用 H2 MySQL 模式</h3>
+      <p><strong>Spec:</strong> SPEC 第 14 节提出使用 MySQL 验证数据库约束。</p>
+      <p><strong>Implementation:</strong> 自动化测试使用内存 H2，并启用 <code>MODE=MySQL</code>；生产依赖和运行配置仍使用 MySQL 与 <code>flyway-mysql</code>。</p>
+      <p><strong>Reason:</strong> 当前仓库没有可复用的容器化 MySQL 测试设施。H2 可以稳定验证空库迁移、重复执行和关键唯一约束，但正式发布前仍需在目标 MySQL 版本上做一次迁移演练。</p>
+    </div>
+
+    <h2><span class="dot tradeoff"></span> Tradeoffs</h2>
+    <div class="item">
+      <h3><span class="label label-tradeoff">Tradeoff</span> 数据库默认值与应用层自动填充</h3>
+      <p><strong>Alternatives:</strong> 可以完全依赖 MyBatis-Plus 的时间字段填充，也可以由数据库为创建时间和状态提供默认值。</p>
+      <p><strong>Choice:</strong> 迁移脚本为创建时间、版本和初始状态定义数据库默认值，实体保留相应字段供后续业务读取和更新。</p>
+      <p><strong>Why:</strong> 数据库默认值能够覆盖批处理或未来非 ORM 写入路径；代价是后续更新 <code>updated_at</code> 时仍需服务层或 MyBatis 填充器明确维护。</p>
+    </div>
+    <div class="item">
+      <h3><span class="label label-tradeoff">Tradeoff</span> 当前只交付 Service CRUD 骨架</h3>
+      <p><strong>Alternatives:</strong> 可以在基础设施 Issue 中同时实现房间、消息和附件业务规则，或将其保留给后续独立 Issues。</p>
+      <p><strong>Choice:</strong> 本次只建立实体、Mapper、条件化 Service 实现和持久化约束。</p>
+      <p><strong>Why:</strong> 保持 Issue #3 独立可交付，并避免提前固化 #4–#11 的鉴权、事务和状态机设计；代价是开启特性开关本身不会产生可用的聊天 API。</p>
+    </div>
+
+    <h2><span class="dot question"></span> Open Questions</h2>
+    <div class="item">
+      <h3><span class="label label-question">Question</span> 旧环境是否已有未被 Flyway 管理的业务表？</h3>
+      <p><strong>Assumption:</strong> 新部署可从空库执行现有用户迁移和聊天迁移。</p>
+      <p><strong>Verify:</strong> 上线前确认每个目标环境是否已经存在 <code>user</code> 表但没有 <code>flyway_schema_history</code>；若存在，需要制定并演练基线版本策略，不能直接依赖默认迁移行为。</p>
+    </div>
+    <div class="item">
+      <h3><span class="label label-question">Question</span> 正式 MinIO 与备份参数尚未确定</h3>
+      <p><strong>Assumption:</strong> 默认桶名为 <code>chat-attachments</code>，未关联附件保留 24 小时，TLS 和凭据由部署环境提供。</p>
+      <p><strong>Verify:</strong> 确认正式端点、桶名、TLS、访问策略、容量、备份和恢复要求，并决定是否需要按租户或环境拆分桶。</p>
+    </div>
+    <div class="item">
+      <h3><span class="label label-question">Question</span> 需要补充真实 MySQL 迁移门禁</h3>
+      <p><strong>Assumption:</strong> H2 MySQL 模式已覆盖本 Issue 的快速回归需求。</p>
+      <p><strong>Verify:</strong> 在 CI 可提供容器运行能力后，确认是否以 Testcontainers MySQL 替换或补充 H2 测试，重点验证检查约束、循环外键和索引定义。</p>
+    </div>
+
+    <p class="footer">Generated by goal-workflow /note-it</p>
+  </div>
+</body>
+</html>

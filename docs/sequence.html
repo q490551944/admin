@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>企业聊天室发送消息时序图</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Inter,"Microsoft YaHei",sans-serif; background:#FAF9F6; min-height:100vh; padding:2.5rem 2rem; color:#1a1a1a; }
+    .container { max-width:1200px; margin:0 auto; }
+    .header { margin-bottom:2rem; }
+    .eyebrow { font-size:.6875rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:#8B8680; margin-bottom:.375rem; }
+    h1 { font-size:1.55rem; font-weight:700; letter-spacing:-.02em; }
+    .subtitle { color:#8B8680; font-size:.8125rem; margin-top:.375rem; }
+    .diagram-desc { color:#B0AAA4; font-size:.6875rem; margin-top:.5rem; line-height:1.5; font-style:italic; }
+    .diagram-container { background:#fff; border:1px solid #E8E4DE; border-radius:12px; padding:1.5rem; overflow-x:auto; box-shadow:0 1px 3px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.02); }
+    svg { width:100%; min-width:980px; display:block; }
+    .cards { display:grid; grid-template-columns:repeat(2,minmax(280px,1fr)); gap:1rem; margin-top:1.5rem; }
+    .card { background:#fff; border:1px solid #E8E4DE; border-radius:10px; padding:1.125rem 1.25rem; }
+    .card-eyebrow { color:#B0AAA4; font-size:.625rem; font-weight:600; letter-spacing:.14em; margin-bottom:.5rem; }
+    .card-header { display:flex; align-items:center; gap:.5rem; margin-bottom:.5rem; }
+    .card-dot { width:7px; height:7px; border-radius:50%; }
+    .sage { background:#5B8A72; } .terracotta { background:#D97757; } .plum { background:#8B6F8A; } .rose { background:#C96464; }
+    .card h3 { font-size:.8125rem; font-weight:600; }
+    .card ul { list-style:none; color:#6B6560; font-size:.75rem; line-height:1.65; }
+    .footer { text-align:center; margin-top:1.5rem; color:#B0AAA4; font-size:.6875rem; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <p class="eyebrow">SEQUENCE DIAGRAM</p>
+    <h1>企业聊天室发送消息时序</h1>
+    <p class="subtitle">STOMP SEND → 会话鉴权 → 幂等落库 → 事务提交 → 实时广播 → 私有 ACK</p>
+    <p class="diagram-desc"><b>序列图</b> — 依据聊天室 SPEC 描述目标交互契约；当前仓库只完成持久化基础，图中 Handler、拦截器与 after-commit 广播仍属于待实现能力。</p>
+  </div>
+
+  <div class="diagram-container">
+    <svg viewBox="0 0 1080 930" role="img" aria-label="企业聊天室发送消息时序图">
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#6B7280"/></marker>
+        <marker id="arrow-sage" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#5B8A72"/></marker>
+        <marker id="arrow-plum" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#8B6F8A"/></marker>
+        <marker id="arrow-rose" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#C96464"/></marker>
+        <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".8" fill="#E0DCD6"/></pattern>
+      </defs>
+      <rect width="1080" height="930" fill="#FAF9F6"/>
+      <rect width="1080" height="930" fill="url(#dots)" opacity=".75"/>
+
+      <!-- Lifelines -->
+      <line x1="80" y1="64" x2="80" y2="855" stroke="#D2CEC8" stroke-width="1" stroke-dasharray="4,4"/>
+      <line x1="250" y1="64" x2="250" y2="855" stroke="#D2CEC8" stroke-width="1" stroke-dasharray="4,4"/>
+      <line x1="420" y1="64" x2="420" y2="855" stroke="#D2CEC8" stroke-width="1" stroke-dasharray="4,4"/>
+      <line x1="590" y1="64" x2="590" y2="855" stroke="#D2CEC8" stroke-width="1" stroke-dasharray="4,4"/>
+      <line x1="760" y1="64" x2="760" y2="855" stroke="#D2CEC8" stroke-width="1" stroke-dasharray="4,4"/>
+      <line x1="950" y1="64" x2="950" y2="855" stroke="#D2CEC8" stroke-width="1" stroke-dasharray="4,4"/>
+
+      <!-- Activation bars -->
+      <rect x="76" y="94" width="8" height="750" fill="#F7F6F4" stroke="#6B7280" stroke-width=".8"/>
+      <rect x="246" y="94" width="8" height="716" fill="#F1F4F2" stroke="#5B8A72" stroke-width=".8"/>
+      <rect x="416" y="174" width="8" height="596" fill="#F6F2F6" stroke="#8B6F8A" stroke-width=".8"/>
+      <rect x="586" y="214" width="8" height="516" fill="#F1F4F2" stroke="#5B8A72" stroke-width=".8"/>
+      <rect x="756" y="294" width="8" height="250" fill="#F6F2F6" stroke="#8B6F8A" stroke-width=".8"/>
+      <rect x="946" y="574" width="8" height="86" fill="#FFF5F0" stroke="#D97757" stroke-width=".8"/>
+
+      <!-- Main message flow: arrows first -->
+      <line x1="84" y1="104" x2="246" y2="104" stroke="#5B8A72" stroke-width="1.2" marker-end="url(#arrow-sage)"/>
+      <rect x="118" y="86" width="92" height="15" rx="2" fill="#FAF9F6"/><text x="164" y="98" fill="#5B8A72" font-size="8" text-anchor="middle">SEND + Session Cookie</text>
+
+      <path d="M254 128 H276 V148 H254" fill="none" stroke="#5B8A72" stroke-width="1" marker-end="url(#arrow-sage)"/>
+      <rect x="282" y="128" width="110" height="15" rx="2" fill="#FAF9F6"/><text x="337" y="140" fill="#5B8A72" font-size="8">认证 Session / Principal</text>
+
+      <line x1="254" y1="184" x2="416" y2="184" stroke="#8B6F8A" stroke-width="1.2" marker-end="url(#arrow-plum)"/>
+      <rect x="278" y="166" width="114" height="15" rx="2" fill="#FAF9F6"/><text x="335" y="178" fill="#8B6F8A" font-size="8" text-anchor="middle">转发已认证 SendCommand</text>
+
+      <line x1="424" y1="224" x2="586" y2="224" stroke="#5B8A72" stroke-width="1.2" marker-end="url(#arrow-sage)"/>
+      <rect x="452" y="206" width="106" height="15" rx="2" fill="#FAF9F6"/><text x="505" y="218" fill="#5B8A72" font-size="8" text-anchor="middle">send(command, userId)</text>
+
+      <path d="M594 248 H616 V268 H594" fill="none" stroke="#5B8A72" stroke-width="1" marker-end="url(#arrow-sage)"/>
+      <rect x="622" y="248" width="122" height="15" rx="2" fill="#FAF9F6"/><text x="683" y="260" fill="#5B8A72" font-size="8">校验消息格式与长度 ≤ 5000</text>
+
+      <line x1="594" y1="304" x2="756" y2="304" stroke="#8B6F8A" stroke-width="1.2" marker-end="url(#arrow-plum)"/>
+      <rect x="622" y="286" width="106" height="15" rx="2" fill="#FAF9F6"/><text x="675" y="298" fill="#8B6F8A" font-size="8" text-anchor="middle">查询会话、成员与状态</text>
+      <line x1="756" y1="334" x2="594" y2="334" stroke="#8B6F8A" stroke-width="1" stroke-dasharray="5,4"/>
+      <rect x="630" y="338" width="90" height="15" rx="2" fill="#FAF9F6"/><text x="675" y="350" fill="#8B6F8A" font-size="8" text-anchor="middle">可见 / 可发送</text>
+
+      <line x1="594" y1="384" x2="756" y2="384" stroke="#8B6F8A" stroke-width="1.2" marker-end="url(#arrow-plum)"/>
+      <rect x="612" y="366" width="126" height="15" rx="2" fill="#FAF9F6"/><text x="675" y="378" fill="#8B6F8A" font-size="8" text-anchor="middle">按 sender + requestId 查重</text>
+
+      <!-- Duplicate branch -->
+      <rect x="565" y="358" width="220" height="92" rx="5" fill="none" stroke="#D97757" stroke-width="1" stroke-dasharray="5,4"/>
+      <text x="574" y="374" fill="#D97757" font-size="7" font-weight="600">ALT · 已存在</text>
+      <line x1="756" y1="424" x2="594" y2="424" stroke="#D97757" stroke-width="1" stroke-dasharray="5,4"/>
+      <rect x="634" y="408" width="82" height="14" rx="2" fill="#FAF9F6"/><text x="675" y="419" fill="#D97757" font-size="8" text-anchor="middle">返回既有 Message</text>
+
+      <!-- New message branch -->
+      <rect x="565" y="466" width="220" height="78" rx="5" fill="none" stroke="#5B8A72" stroke-width="1" stroke-dasharray="5,4"/>
+      <text x="574" y="482" fill="#5B8A72" font-size="7" font-weight="600">ELSE · 新消息</text>
+      <line x1="594" y1="494" x2="756" y2="494" stroke="#5B8A72" stroke-width="1.2" marker-end="url(#arrow-sage)"/>
+      <rect x="622" y="476" width="106" height="15" rx="2" fill="#FAF9F6"/><text x="675" y="488" fill="#5B8A72" font-size="8" text-anchor="middle">INSERT chat_message</text>
+      <line x1="756" y1="534" x2="594" y2="534" stroke="#5B8A72" stroke-width="1" stroke-dasharray="5,4"/>
+      <rect x="637" y="518" width="76" height="14" rx="2" fill="#FAF9F6"/><text x="675" y="529" fill="#5B8A72" font-size="8" text-anchor="middle">COMMIT + Message</text>
+
+      <!-- After commit broadcast -->
+      <line x1="594" y1="584" x2="946" y2="584" stroke="#D97757" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="700" y="566" width="140" height="15" rx="2" fill="#FAF9F6"/><text x="770" y="578" fill="#D97757" font-size="8" text-anchor="middle">afterCommit: MESSAGE_CREATED</text>
+      <line x1="954" y1="624" x2="84" y2="624" stroke="#D97757" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="430" y="606" width="174" height="15" rx="2" fill="#FAF9F6"/><text x="517" y="618" fill="#D97757" font-size="8" text-anchor="middle">/topic/chat/conversations/{id}</text>
+
+      <!-- Broadcast failure branch -->
+      <rect x="555" y="552" width="420" height="125" rx="5" fill="none" stroke="#C96464" stroke-width="1" stroke-dasharray="5,4"/>
+      <text x="564" y="568" fill="#C96464" font-size="7" font-weight="600">ALT · 广播失败（消息仍已提交）</text>
+      <line x1="946" y1="654" x2="594" y2="654" stroke="#C96464" stroke-width="1" stroke-dasharray="5,4"/>
+      <rect x="712" y="638" width="116" height="14" rx="2" fill="#FAF9F6"/><text x="770" y="649" fill="#C96464" font-size="8" text-anchor="middle">broadcast failed</text>
+      <line x1="594" y1="672" x2="756" y2="672" stroke="#C96464" stroke-width="1" marker-end="url(#arrow-rose)"/>
+      <rect x="619" y="654" width="112" height="14" rx="2" fill="#FAF9F6"/><text x="675" y="665" fill="#C96464" font-size="8" text-anchor="middle">INSERT audit / alert</text>
+
+      <!-- ACK path -->
+      <line x1="586" y1="720" x2="424" y2="720" stroke="#5B8A72" stroke-width="1" stroke-dasharray="5,4"/>
+      <rect x="460" y="704" width="90" height="14" rx="2" fill="#FAF9F6"/><text x="505" y="715" fill="#5B8A72" font-size="8" text-anchor="middle">Message / existing</text>
+      <line x1="416" y1="760" x2="84" y2="760" stroke="#5B8A72" stroke-width="1.2" marker-end="url(#arrow-sage)"/>
+      <rect x="194" y="742" width="108" height="15" rx="2" fill="#FAF9F6"/><text x="248" y="754" fill="#5B8A72" font-size="8" text-anchor="middle">/user/queue/chat.acks</text>
+
+      <!-- Error path -->
+      <rect x="35" y="785" width="400" height="58" rx="5" fill="#FFF5F5" stroke="#C96464" stroke-width="1" stroke-dasharray="5,4"/>
+      <text x="45" y="801" fill="#C96464" font-size="7" font-weight="600">ALT · 未登录 / 无权限 / 参数无效 / 并发冲突</text>
+      <line x1="246" y1="824" x2="84" y2="824" stroke="#C96464" stroke-width="1.2" marker-end="url(#arrow-rose)"/>
+      <rect x="105" y="806" width="116" height="15" rx="2" fill="#FFF5F5"/><text x="163" y="818" fill="#C96464" font-size="8" text-anchor="middle">/user/queue/chat.errors</text>
+
+      <!-- Actor headers painted after messages -->
+      <rect x="30" y="24" width="100" height="40" rx="7" fill="#fff" stroke="#5B8A72" stroke-width="1.2"/>
+      <text x="80" y="49" fill="#1a1a1a" font-size="11" font-weight="600" text-anchor="middle">聊天客户端</text>
+      <rect x="185" y="24" width="130" height="40" rx="7" fill="#F5F8F6" stroke="#5B8A72" stroke-width="1.2"/>
+      <text x="250" y="42" fill="#1a1a1a" font-size="10" font-weight="600" text-anchor="middle">STOMP 拦截器</text>
+      <text x="250" y="55" fill="#8B8680" font-size="7" text-anchor="middle">认证 / 目的地鉴权</text>
+      <rect x="360" y="24" width="120" height="40" rx="7" fill="#F5F3F8" stroke="#8B6F8A" stroke-width="1.2"/>
+      <text x="420" y="42" fill="#1a1a1a" font-size="10" font-weight="600" text-anchor="middle">消息 Handler</text>
+      <text x="420" y="55" fill="#8B8680" font-size="7" text-anchor="middle">/app/chat.messages.send</text>
+      <rect x="530" y="24" width="120" height="40" rx="7" fill="#F5F8F6" stroke="#5B8A72" stroke-width="1.2"/>
+      <text x="590" y="42" fill="#1a1a1a" font-size="10" font-weight="600" text-anchor="middle">Chat Service</text>
+      <text x="590" y="55" fill="#8B8680" font-size="7" text-anchor="middle">规则 / 事务 / 幂等</text>
+      <rect x="700" y="24" width="120" height="40" rx="7" fill="#F5F3F8" stroke="#8B6F8A" stroke-width="1.2"/>
+      <text x="760" y="42" fill="#1a1a1a" font-size="10" font-weight="600" text-anchor="middle">MySQL</text>
+      <text x="760" y="55" fill="#8B8680" font-size="7" text-anchor="middle">conversation / message / audit</text>
+      <rect x="885" y="24" width="130" height="40" rx="7" fill="#FFF5F0" stroke="#D97757" stroke-width="1.2"/>
+      <text x="950" y="42" fill="#1a1a1a" font-size="10" font-weight="600" text-anchor="middle">STOMP Broker</text>
+      <text x="950" y="55" fill="#8B8680" font-size="7" text-anchor="middle">Topic / User Queue</text>
+
+      <!-- Stage labels -->
+      <text x="18" y="108" fill="#B0AAA4" font-size="7">接入</text>
+      <text x="18" y="188" fill="#B0AAA4" font-size="7">鉴权</text>
+      <text x="18" y="228" fill="#B0AAA4" font-size="7">服务</text>
+      <text x="18" y="308" fill="#B0AAA4" font-size="7">权限</text>
+      <text x="18" y="388" fill="#B0AAA4" font-size="7">幂等</text>
+      <text x="18" y="498" fill="#B0AAA4" font-size="7">事务</text>
+      <text x="18" y="588" fill="#B0AAA4" font-size="7">广播</text>
+      <text x="18" y="764" fill="#B0AAA4" font-size="7">确认</text>
+
+      <!-- Legend -->
+      <line x1="30" y1="872" x2="1040" y2="872" stroke="#E0DCD6" stroke-width="1"/>
+      <text x="30" y="900" fill="#6B6560" font-size="8" font-weight="600">图例</text>
+      <line x1="86" y1="896" x2="112" y2="896" stroke="#5B8A72" marker-end="url(#arrow-sage)"/><text x="120" y="900" fill="#6B6560" font-size="8">正常调用</text>
+      <line x1="210" y1="896" x2="236" y2="896" stroke="#8B6F8A" marker-end="url(#arrow-plum)"/><text x="244" y="900" fill="#6B6560" font-size="8">数据访问</text>
+      <line x1="334" y1="896" x2="360" y2="896" stroke="#6B7280" stroke-dasharray="5,4"/><text x="368" y="900" fill="#6B6560" font-size="8">返回</text>
+      <line x1="438" y1="896" x2="464" y2="896" stroke="#C96464" marker-end="url(#arrow-rose)"/><text x="472" y="900" fill="#6B6560" font-size="8">错误 / 补偿</text>
+      <rect x="580" y="889" width="8" height="14" rx="2" fill="#F1F4F2" stroke="#5B8A72"/><text x="598" y="900" fill="#6B6560" font-size="8">激活期</text>
+    </svg>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <p class="card-eyebrow">SECURITY</p>
+      <div class="card-header"><div class="card-dot sage"></div><h3>认证与会话权限</h3></div>
+      <ul><li>• 使用 Session Cookie，不使用消息 Token</li><li>• CONNECT / SUBSCRIBE / SEND 均由拦截器校验</li><li>• 私聊仅双方可见，解散会话禁止继续发送</li><li>• 失败通过 `/user/queue/chat.errors` 返回</li></ul>
+    </div>
+    <div class="card">
+      <p class="card-eyebrow">IDEMPOTENCY</p>
+      <div class="card-header"><div class="card-dot plum"></div><h3>幂等与事务</h3></div>
+      <ul><li>• `clientRequestId` 为必填字段</li><li>• 唯一键：`(sender_id, client_request_id)`</li><li>• 重复发送返回已有消息，不重复落库</li><li>• 消息先提交数据库，再进入广播阶段</li></ul>
+    </div>
+    <div class="card">
+      <p class="card-eyebrow">DELIVERY</p>
+      <div class="card-header"><div class="card-dot terracotta"></div><h3>广播与确认</h3></div>
+      <ul><li>• after-commit 发布 `MESSAGE_CREATED`</li><li>• 会话成员订阅隔离的 conversation Topic</li><li>• 发送方通过私有 ACK 队列获得确认</li><li>• 图片消息只广播受保护的附件引用</li></ul>
+    </div>
+    <div class="card">
+      <p class="card-eyebrow">RECOVERY</p>
+      <div class="card-header"><div class="card-dot rose"></div><h3>失败与补偿</h3></div>
+      <ul><li>• 广播失败不回滚已持久化消息</li><li>• 写入审计事件并触发可观测告警</li><li>• 客户端可通过历史消息 REST 接口补拉</li><li>• 错误语义与 REST 的 401/403/409 等保持一致</li></ul>
+    </div>
+  </div>
+  <p class="footer">admin · 企业聊天室 · 目标发送消息契约 · 来源：tasks/spec-enterprise-chat-room.md</p>
+</div>
+</body>
+</html>
