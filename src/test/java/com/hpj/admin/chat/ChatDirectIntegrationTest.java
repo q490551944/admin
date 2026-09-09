@@ -30,7 +30,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         properties = {"spring.config.location=classpath:/chat-test.yml",
                 "spring.datasource.url=jdbc:h2:mem:chat_direct;MODE=MySQL;DATABASE_TO_LOWER=TRUE;NON_KEYWORDS=USER;DB_CLOSE_DELAY=-1"})
 @AutoConfigureMockMvc
-@Import(ChatDirectIntegrationTest.AttachmentProbe.class)
 class ChatDirectIntegrationTest {
     @Autowired ChatDirectService direct;
     @Autowired ChatRoomService rooms;
@@ -40,12 +39,7 @@ class ChatDirectIntegrationTest {
     @Autowired ObjectMapper json;
     @Autowired PlatformTransactionManager transactions;
     @SpyBean ChatParticipantMapper participants;
-
-    // 测试专用内容处理器，证明权限检查发生在图片读取之前；不代表已实现图片存储。
-    @RestController static class AttachmentProbe {
-        @GetMapping({"/api/chat/v1/attachments/{id}/content", "/api/chat/v1/attachments/{id}/thumbnail"})
-        String read(@PathVariable long id) { return "test-only-image-bytes"; }
-    }
+    @org.springframework.boot.test.mock.mockito.MockBean ChatObjectStorage storage;
 
     @BeforeEach void seed() {
         ChatIntegrationTest.clean(jdbc);
@@ -189,7 +183,9 @@ class ChatDirectIntegrationTest {
 
     @Test void attachmentContentAndThumbnailCheckActualConversationBeforeReading() throws Exception {
         long id = direct.open(1, 2).getId();
-        jdbc.update("INSERT INTO chat_attachment(id,conversation_id,uploader_id,storage_bucket,storage_object_key,orig_filename,content_type,size_bytes,sha256,status) VALUES(501,?,1,'private','object','test.png','image/png',10,?,'READY')", id, "0".repeat(64));
+        jdbc.update("INSERT INTO chat_attachment(id,conversation_id,uploader_id,storage_bucket,storage_object_key,orig_filename,content_type,size_bytes,sha256,status) VALUES(501,?,1,'private','object','test.png','image/png',10,?,'ATTACHED')", id, "0".repeat(64));
+        org.mockito.Mockito.when(storage.read(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn("test-only-image-bytes".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         for (String kind : List.of("content", "thumbnail")) {
             String path = "/api/chat/v1/attachments/501/" + kind;
             for (long participant : List.of(1L, 2L)) mvc.perform(get(path).with(as(participant)))

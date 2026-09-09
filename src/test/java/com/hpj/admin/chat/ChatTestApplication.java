@@ -27,11 +27,14 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
         ChatAccounts.class, ChatRoomService.class, RoomEventPublisher.class, ChatSessionController.class,
         ChatRoomController.class, ChatExceptionAdvice.class, ChatPageConfiguration.class, MyExceptionHandler.class,
         ChatMessagingService.class, ChatMessagePublisher.class, ChatMessageController.class, ChatSubscriptionReceipts.class,
-        ChatDirectService.class, ChatDirectController.class, ChatAccessAudit.class, ChatAttachmentAccessConfiguration.class})
+        ChatDirectService.class, ChatDirectController.class, ChatAccessAudit.class, ChatAttachmentAccessConfiguration.class,
+        ChatAttachmentService.class, ChatAttachmentController.class, ChatImageValidator.class, MinioChatObjectStorage.class, ChatMetrics.class})
 @ImportAutoConfiguration({DataSourceAutoConfiguration.class, JdbcTemplateAutoConfiguration.class,
         DataSourceTransactionManagerAutoConfiguration.class, FlywayAutoConfiguration.class,
         MybatisPlusAutoConfiguration.class, JacksonAutoConfiguration.class,
         ServletWebServerFactoryAutoConfiguration.class, DispatcherServletAutoConfiguration.class,
         WebMvcAutoConfiguration.class, ErrorMvcAutoConfiguration.class, WebSocketServletAutoConfiguration.class,
-        SecurityAutoConfiguration.class, SecurityFilterAutoConfiguration.class})
+        SecurityAutoConfiguration.class, SecurityFilterAutoConfiguration.class,
+        org.springframework.boot.actuate.autoconfigure.metrics.MetricsAutoConfiguration.class,
+        org.springframework.boot.actuate.autoconfigure.metrics.export.simple.SimpleMetricsExportAutoConfiguration.class})
 public class ChatTestApplication {}

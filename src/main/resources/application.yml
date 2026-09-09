@@ -95,6 +95,14 @@ arthas:
   tunnel-server: ws://localhost:7777/ws
   app-name: ${spring.application.name}
   telnet-port: 0
+management:
+  server:
+    port: ${CHAT_METRICS_PORT:9091}
+    address: 127.0.0.1
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
 chat:
   enabled: ${CHAT_ENABLED:true}
   security:
@@ -104,7 +112,7 @@ chat:
   attachment:
     endpoint: ${CHAT_ATTACHMENT_ENDPOINT:http://localhost:9000}
     bucket: ${CHAT_ATTACHMENT_BUCKET:chat-attachments}
-    access-key: ${CHAT_ATTACHMENT_ACCESS_KEY:}
-    secret-key: ${CHAT_ATTACHMENT_SECRET_KEY:}
+    access-key: ${CHAT_ATTACHMENT_ACCESS_KEY:minioadmin}
+    secret-key: ${CHAT_ATTACHMENT_SECRET_KEY:minioadmin}
     secure: ${CHAT_ATTACHMENT_SECURE:false}
     unattached-retention: ${CHAT_ATTACHMENT_UNATTACHED_RETENTION:24h}

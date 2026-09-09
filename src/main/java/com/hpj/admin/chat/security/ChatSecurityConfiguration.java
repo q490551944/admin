@@ -21,6 +21,9 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.AnonymousAuthenticationFilter;
+import org.springframework.security.web.authentication.logout.CookieClearingLogoutHandler;
+import org.springframework.security.web.context.SecurityContextHolderFilter;
+import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
@@ -31,6 +34,13 @@ import java.io.IOException;
 @Configuration
 @ConditionalOnProperty(prefix = "chat", name = "enabled", havingValue = "true")
 public class ChatSecurityConfiguration {
+    @Bean
+    public ChatWindowSessions chatWindowSessions(org.springframework.core.env.Environment environment) {
+        var server = org.springframework.boot.context.properties.bind.Binder.get(environment)
+                .bind("server", ServerProperties.class).orElseGet(ServerProperties::new);
+        return new ChatWindowSessions(server.getServlet().getSession().getTimeout());
+    }
+
     @Bean
     public PasswordEncoder chatPasswordEncoder(ChatProperties properties) {
         return new ChatPasswordEncoder(properties.getSecurity().isAllowLegacyDesPasswords());
@@ -46,12 +56,13 @@ public class ChatSecurityConfiguration {
         return provider;
     }
 
-    /** 使用 Session Cookie 认证，写操作保留 CSRF 检查，登录/退出返回 API 状态而非页面跳转。 */
+    /** 页面按 Session Header 隔离；兼容 Cookie 客户端，写操作仍校验 CSRF。 */
     @Bean
     @Order(1)
     public SecurityFilterChain chatSecurity(HttpSecurity http, DaoAuthenticationProvider provider,
-                                            ChatAccounts accounts, ObjectMapper json) throws Exception {
+                                            ChatAccounts accounts, ObjectMapper json, ChatWindowSessions windows) throws Exception {
         http.securityMatcher("/api/chat/**", "/ws/chat", "/ws/chat/**")
+            .addFilterBefore(windows.filter(), SecurityContextHolderFilter.class)
             .authenticationProvider(provider)
             // 凭证存于 Session；匿名获取凭证和登录虽放行授权检查，写请求仍需通过 CSRF。
             .csrf(csrf -> csrf.csrfTokenRepository(new HttpSessionCsrfTokenRepository())
@@ -83,7 +94,11 @@ public class ChatSecurityConfiguration {
                             new ChatException(401, "INVALID_CREDENTIALS", "用户名或密码错误，或账号已停用"))))
             .logout(logout -> logout.logoutRequestMatcher(
                             new AntPathRequestMatcher("/api/chat/v1/sessions/current", "DELETE"))
-                    .invalidateHttpSession(true).clearAuthentication(true).deleteCookies("JSESSIONID")
+                    .invalidateHttpSession(true).clearAuthentication(true)
+                    .addLogoutHandler((request, response, authentication) -> {
+                        if (request.getAttribute(ChatWindowSessions.ATTRIBUTE) == null)
+                            new CookieClearingLogoutHandler("JSESSIONID").logout(request, response, authentication);
+                    })
                     .logoutSuccessHandler((request, response, authentication) -> response.setStatus(204)))
             // 登录成功后轮换 Session ID，避免沿用登录前由外部固定的会话标识。
             .sessionManagement(session -> session.sessionFixation(fixation -> fixation.changeSessionId()))

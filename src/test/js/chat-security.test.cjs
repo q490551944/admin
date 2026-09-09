@@ -5,15 +5,22 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "../../main/resources/static/chat/app.js"), "utf8");
+const sessionSource = fs.readFileSync(path.join(__dirname, "../../main/resources/static/chat/session.js"), "utf8");
+function storage() {
+  const values = new Map();
+  return { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
+}
 
 function harness() {
   const nodes = new Map();
+  const observers = [];
   const element = (tag = "div") => {
     let text = "";
     const attributes = new Map();
     const node = {
       tagName: tag.toUpperCase(), className: "", value: "", disabled: false, hidden: false,
       children: [], parentElement: null, style: {}, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 400,
+      get isConnected() { return this === document.body || [...nodes.values()].includes(this) || Boolean(this.parentElement?.isConnected); },
       get textContent() { return text + this.children.map(child => child.textContent).join(""); },
       set textContent(value) { this.replaceChildren(); text = String(value); },
       get firstElementChild() { return this.children[0] || null; },
@@ -41,6 +48,7 @@ function harness() {
       },
       querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
       addEventListener(name, callback) { this[name] = callback; },
+      removeEventListener(name, callback) { if (this[name] === callback) delete this[name]; },
       setAttribute(name, value) { attributes.set(name, String(value)); }, getAttribute(name) { return attributes.get(name) ?? null; },
       focus() {}, showModal() {}, close() {}, scrollTo() {}
     };
@@ -67,9 +75,10 @@ function harness() {
   let nextTimer = 0;
   const schedule = (callback, delay) => { timers.set(++nextTimer, { callback, delay }); return nextTimer; };
   const redirects = [];
+  const windowEvents = {};
   const location = {
     href: "http://localhost:8090/chat/?mode=auto", search: "?mode=auto",
-    protocol: "http:", host: "localhost:8090", assign: url => redirects.push(url)
+    protocol: "http:", host: "localhost:8090", origin: "http://localhost:8090", assign: url => redirects.push(url)
   };
   class Socket {
     static OPEN = 1;
@@ -81,15 +90,18 @@ function harness() {
   }
   let fetchHandler = () => new Promise(() => {}); // Keep automatic startup pending; test methods remain real.
   const context = vm.createContext({
-    window: { CHAT_CONFIG: { mode: "auto" }, location, setTimeout: schedule, setInterval: schedule,
-      clearTimeout: id => timers.delete(id), clearInterval: id => timers.delete(id), addEventListener() {} },
+    window: { CHAT_CONFIG: { mode: "auto" }, location, sessionStorage: storage(), setTimeout: schedule, setInterval: schedule,
+      clearTimeout: id => timers.delete(id), clearInterval: id => timers.delete(id),
+      navigator: { onLine: true }, addEventListener(name, callback) { windowEvents[name] = callback; } },
     document, URL, URLSearchParams, Headers, FormData, AbortController, TextEncoder, WebSocket: Socket,
+    MutationObserver: class { constructor(callback) { observers.push(callback); } observe() {} },
     console, requestAnimationFrame: callback => callback(), fetch: (...args) => fetchHandler(...args)
   });
-  vm.runInContext(source + "\nglobalThis.subject = { api, state, ApiError, NativeStompClient, requireLogin, initialize, mergeMessages, handleRealtimeMessage, handleMessageAck, handleSocketError, retryMessage, dispatchMessage, syncConversation, loadEarlierMessages, ackTimers, setupRealtime, createOptimisticMessage, openDirectDialog, searchPeople, createDirectConversation, renderPeople, renderMessages };", context);
-  return { ...context.subject, document, nodes, timers, redirects, Socket,
+  vm.runInContext(sessionSource, context);
+  vm.runInContext(source + "\nglobalThis.subject = { api, state, ApiError, NativeStompClient, requireLogin, initialize, mergeMessages, handleRealtimeMessage, handleMessageAck, handleSocketError, retryMessage, dispatchMessage, syncConversation, loadEarlierMessages, ackTimers, setupRealtime, createOptimisticMessage, openDirectDialog, searchPeople, createDirectConversation, renderPeople, renderMessages, renderDetails, sendImageMessage, normalizeMessage, bindEvents, privateImageUrl, releaseMediaUrl, mediaUrls, mediaBlobs, loadPrivateImage, openOriginalImage };", context);
+  return { ...context.subject, document, nodes, timers, redirects, Socket, window: context.window, windowEvents,
     fetch: handler => { fetchHandler = handler; },
-    flush: () => new Promise(resolve => setImmediate(resolve))
+    flush: () => new Promise(resolve => setImmediate(() => { observers.forEach(callback => callback()); resolve(); }))
   };
 }
 
@@ -97,6 +109,176 @@ function response(status, value) {
   return { ok: status >= 200 && status < 300, status, headers: new Headers({ "content-type": "application/json" }),
     json: async () => value };
 }
+
+test("window sessions send independent IDs without cookies and clearing one leaves the other intact", async () => {
+  const alice = harness(), bob = harness();
+  for (const [h, id] of [[alice, "alice-session"], [bob, "bob-session"]]) {
+    h.window.sessionStorage.setItem("chat.sessionId", id);
+    h.fetch(async (url, options) => {
+      assert.equal(options.headers.get("X-Chat-Session"), id);
+      assert.equal(options.credentials, "omit");
+      return response(200, { id });
+    });
+    assert.equal((await h.api.getCurrentUser()).id, id);
+  }
+  alice.requireLogin();
+  assert.equal(alice.window.sessionStorage.getItem("chat.sessionId"), null);
+  assert.equal((await bob.api.getCurrentUser()).id, "bob-session");
+});
+
+test("late session headers cannot restore a cleared session or undo an ID rotation", async () => {
+  const h = harness();
+  h.window.sessionStorage.setItem("chat.sessionId", "old");
+  const pending = [];
+  h.fetch(() => new Promise(resolve => pending.push(resolve)));
+  const first = h.window.ChatSession.fetch("/api/chat/v1/sessions/current");
+  const second = h.window.ChatSession.fetch("/api/chat/v1/sessions/current");
+  const rotated = response(200, {}); rotated.headers.set("X-Chat-Session", "rotated");
+  pending[0](rotated); await first;
+  const stale = response(200, {}); stale.headers.set("X-Chat-Session", "old");
+  pending[1](stale); await second;
+  assert.equal(h.window.sessionStorage.getItem("chat.sessionId"), "rotated");
+  const third = h.window.ChatSession.fetch("/api/chat/v1/sessions/current");
+  h.window.ChatSession.clear();
+  pending[2](rotated); await third;
+  assert.equal(h.window.sessionStorage.getItem("chat.sessionId"), null);
+});
+
+test("session headers never leave the same-origin chat API and private images use that session", async () => {
+  const h = harness();
+  let calls = 0;
+  h.window.sessionStorage.setItem("chat.sessionId", "private-session");
+  h.fetch(async (url, options) => {
+    calls++;
+    assert.equal(options.headers.get("X-Chat-Session"), "private-session");
+    assert.equal(options.credentials, "omit");
+    return { ...response(200, {}), blob: async () => new Blob(["bytes"], { type: "image/png" }) };
+  });
+  await assert.rejects(h.window.ChatSession.fetch("https://external.invalid/api/chat/v1/sessions/current"));
+  await assert.rejects(h.window.ChatSession.fetch("/sys/users"));
+  await assert.rejects(h.api.imageBlob("https://external.invalid/api/chat/v1/attachments/1/content"));
+  assert.equal(calls, 0);
+  assert.equal((await h.api.imageBlob("/api/chat/v1/attachments/1/thumbnail")).type, "image/png");
+  assert.equal(calls, 1);
+});
+
+test("shared media thumbnails use the window session and never a cookie image request", async () => {
+  const h = harness();
+  h.window.sessionStorage.setItem("chat.sessionId", "private-session");
+  h.state.messages.set("1", [{ type: "IMAGE", imageUrl: "/api/chat/v1/attachments/2/thumbnail" }]);
+  let calls = 0;
+  h.fetch(async (url, options) => {
+    calls++;
+    assert.equal(url, "/api/chat/v1/attachments/2/thumbnail");
+    assert.equal(options.headers.get("X-Chat-Session"), "private-session");
+    assert.equal(options.credentials, "omit");
+    return { ...response(200, {}), blob: async () => new Blob(["bytes"], { type: "image/png" }) };
+  });
+  h.renderDetails({ id: "1", type: "DIRECT_MESSAGE", name: "Bob" });
+  const image = h.nodes.get("mediaGrid").children[0];
+  assert.equal(image.getAttribute("src"), null);
+  await h.flush();
+  assert.equal(calls, 1);
+  assert.match(image.getAttribute("src"), /^blob:/);
+  h.requireLogin();
+});
+
+test("WebSocket obtains a CSRF protected single-use ticket instead of putting the session ID in its URL", async () => {
+  const h = harness();
+  h.window.sessionStorage.setItem("chat.sessionId", "long-lived-session");
+  h.api.csrf = { headerName: "X-CSRF-TOKEN", token: "csrf" };
+  h.fetch(async (url, options) => {
+    assert.equal(url, "/api/chat/v1/websocket-tickets");
+    assert.equal(options.method, "POST");
+    assert.equal(options.headers.get("X-CSRF-TOKEN"), "csrf");
+    return response(201, { ticket: "one-time-ticket" });
+  });
+  const client = new h.NativeStompClient("/ws/chat");
+  await client.connect();
+  assert.equal(h.Socket.created[0].url, "ws://localhost:8090/ws/chat?ticket=one-time-ticket");
+});
+
+test("thumbnail eviction leaves in-flight consumers working and image load releases each URL", async () => {
+  const h = harness();
+  h.fetch(async () => ({ ...response(200, {}), blob: async () => new Blob(["image"]) }));
+  const images = Array.from({ length: 35 }, (_, index) => {
+    const image = h.document.createElement("img");
+    h.document.body.append(image);
+    h.loadPrivateImage(image, `/api/chat/v1/attachments/${index + 1}/thumbnail`);
+    return image;
+  });
+  await h.flush();
+  assert.equal(h.mediaBlobs.size, 32);
+  for (const image of images) {
+    const url = image.getAttribute("src");
+    assert.equal(await (await fetch(url)).text(), "image");
+    const source = image.dataset.source;
+    image.load();
+    assert.equal(image.dataset.source, source);
+    await assert.rejects(fetch(url));
+  }
+  assert.equal(h.mediaUrls.size, 0);
+  h.requireLogin();
+});
+
+test("original image windows release uncached content when closed", async () => {
+  const h = harness();
+  h.fetch(async () => ({ ...response(200, {}), blob: async () => new Blob(["original"]) }));
+  let openedUrl;
+  const preview = { closed: false, location: { replace(url) { openedUrl = url; } }, close() { this.closed = true; } };
+  h.window.open = () => preview;
+  await h.openOriginalImage("/api/chat/v1/attachments/1/content");
+  assert.equal(h.mediaBlobs.size, 0);
+  assert.equal(await (await fetch(openedUrl)).text(), "original");
+  preview.closed = true;
+  for (const timer of [...h.timers.values()]) if (timer.delay === 1000) timer.callback();
+  await assert.rejects(fetch(openedUrl));
+  assert.equal(h.mediaUrls.size, 0);
+  h.requireLogin();
+});
+
+test("removing a lazy image releases its URL and discards an unfinished response", async () => {
+  for (const pending of [true, false]) {
+    const h = harness();
+    let complete;
+    h.fetch(() => new Promise(resolve => { complete = resolve; }));
+    const image = h.document.createElement("img");
+    image.loading = "lazy";
+    h.document.body.append(image);
+    h.loadPrivateImage(image, "/api/chat/v1/attachments/1/thumbnail");
+    const success = { ...response(200, {}), blob: async () => new Blob(["image"]) };
+    if (!pending) { complete(success); await h.flush(); }
+    const url = image.getAttribute("src");
+    image.remove();
+    await h.flush();
+    if (pending) { complete(success); await h.flush(); }
+    assert.equal(h.mediaUrls.size, 0);
+    assert.equal(image.dataset.source, undefined);
+    if (pending) assert.equal(image.getAttribute("src"), null);
+    else await assert.rejects(fetch(url));
+    h.requireLogin();
+  }
+});
+
+test("replacing an image source cancels its old response without cancelling the new load", async () => {
+  const h = harness();
+  const pending = [];
+  h.fetch(() => new Promise(resolve => pending.push(resolve)));
+  const image = h.document.createElement("img");
+  h.document.body.append(image);
+  h.loadPrivateImage(image, "/api/chat/v1/attachments/1/thumbnail");
+  h.loadPrivateImage(image, "/api/chat/v1/attachments/2/thumbnail");
+  const success = { ...response(200, {}), blob: async () => new Blob(["image"]) };
+  pending[1](success); await h.flush();
+  const url = image.getAttribute("src");
+  pending[0](success); await h.flush();
+  assert.equal(image.getAttribute("src"), url);
+  assert.equal(h.mediaUrls.size, 1);
+  assert.equal(await (await fetch(url)).text(), "image");
+  image.load();
+  assert.equal(h.mediaUrls.size, 0);
+  h.requireLogin();
+});
 
 test("opening the direct dialog loads actual employees and does not offer demo people", async () => {
   const h = harness();
@@ -180,7 +362,7 @@ test("REST mutations carry the session CSRF token and never a client owner", asy
   assert.equal(calls[0].options.method, "POST");
   assert.equal(calls[0].options.headers.get("X-CSRF-TOKEN"), "session-token");
   assert.deepEqual(JSON.parse(calls[0].options.body), { name: "Team" });
-  assert.equal(calls[0].options.credentials, "include");
+  assert.equal(calls[0].options.credentials, "omit");
   assert.equal(calls[0].options.cache, "no-store");
 });
 
@@ -204,10 +386,10 @@ test("session reads use resource URLs and DELETE accepts an empty 204 response",
   ]);
   assert.equal(calls[2].options.method, "DELETE");
   assert.equal(calls[2].options.headers.get("X-CSRF-TOKEN"), "fresh-token");
-  assert.equal(calls[2].options.credentials, "include");
+  assert.equal(calls[2].options.credentials, "omit");
 });
 
-test("login creates a session using POST with the fetched CSRF token", async () => {
+test("login creates a fresh window session and sends its ID with the fetched CSRF token", async () => {
   const loginSource = fs.readFileSync(path.join(__dirname, "../../main/resources/static/chat/login.js"), "utf8");
   let submit;
   const form = { addEventListener: (name, callback) => { submit = callback; }, reset() {} };
@@ -217,22 +399,30 @@ test("login creates a session using POST with the fetched CSRF token", async () 
   const redirects = [];
   const context = vm.createContext({
     document: { getElementById: id => ({ loginForm: form, loginButton: button, loginError: error })[id] },
-    window: { CHAT_CONFIG: { apiBaseUrl: "/api/chat/v1/" }, location: { replace: url => redirects.push(url) } },
-    URLSearchParams,
+    window: { CHAT_CONFIG: { apiBaseUrl: "/api/chat/v1/" }, sessionStorage: storage(), location: {
+      href: "http://localhost:8090/chat/login.html", origin: "http://localhost:8090", replace: url => redirects.push(url) } },
+    URLSearchParams, URL, Headers,
     FormData: class { *[Symbol.iterator]() { yield ["username", "alice"]; yield ["password", "secret"]; } },
     fetch: async (url, options) => {
       calls.push({ url, options });
-      return url.endsWith("/csrf-token") ? response(200, { headerName: "X-CSRF-TOKEN", token: "login-token" })
+      const result = url.endsWith("/csrf-token") ? response(200, { headerName: "X-CSRF-TOKEN", token: "login-token" })
         : response(201, { id: "1" });
+      result.headers.set("X-Chat-Session", url.endsWith("/csrf-token") ? "anonymous-session" : "authenticated-session");
+      return result;
     }
   });
+  vm.runInContext(sessionSource, context);
+  context.window.sessionStorage.setItem("chat.sessionId", "copied-from-another-window");
   vm.runInContext(loginSource, context);
   await submit({ preventDefault() {} });
   assert.deepEqual(calls.map(call => call.url), ["/api/chat/v1/csrf-token", "/api/chat/v1/sessions"]);
   assert.equal(calls[1].options.method, "POST");
-  assert.equal(calls[1].options.headers["X-CSRF-TOKEN"], "login-token");
+  assert.equal(calls[1].options.headers.get("X-CSRF-TOKEN"), "login-token");
   assert.equal(calls[1].options.body.get("username"), "alice");
-  assert.equal(calls[1].options.credentials, "include");
+  assert.equal(calls[1].options.credentials, "omit");
+  assert.equal(calls[0].options.headers.get("X-Chat-Session"), "new");
+  assert.equal(calls[1].options.headers.get("X-Chat-Session"), "anonymous-session");
+  assert.equal(context.window.sessionStorage.getItem("chat.sessionId"), "authenticated-session");
   assert.equal(error.textContent, "");
   assert.equal(button.disabled, false);
   assert.deepEqual(redirects, ["./index.html?mode=live"]);
@@ -336,6 +526,124 @@ function message(id, request = id, sender = "1", time = "2026-09-08T10:00:00.123
     conversationId: "10", type: "TEXT", body: "hello <script> 😀", status: "SENT", createdAt: time };
 }
 
+test("image upload uses same-origin authenticated CSRF requests and waits for READY", async () => {
+  const h = harness();
+  h.api.csrf = { headerName: "X-CSRF-TOKEN", token: "token" };
+  const file = new Blob(["image bytes"], { type: "image/png" });
+  file.name = "sample.png";
+  const calls = [];
+  h.fetch(async (url, options) => {
+    calls.push({ url, options });
+    return response(200, calls.length === 1 ? { id: "55", uploadUrl: "https://untrusted.invalid/upload" }
+      : { id: "55", status: "READY", contentUrl: "/api/chat/v1/attachments/55/content" });
+  });
+  const result = await h.api.uploadAttachment("10", file);
+  assert.equal(result.status, "READY");
+  assert.deepEqual(calls.map(call => call.url), ["/api/chat/v1/conversations/10/attachments", "/api/chat/v1/attachments/55/upload"]);
+  for (const { options } of calls) {
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.headers.get("X-CSRF-TOKEN"), "token");
+  }
+  assert.equal(calls[1].options.body, file);
+});
+
+test("offline closes the socket immediately without spending retries and online resumes it", async () => {
+  const h = harness(); messageFixture(h);
+  const states = [];
+  const client = new h.NativeStompClient("/ws/chat", { onState: state => states.push(state) });
+  client.socket = new h.Socket("ws://localhost/ws/chat"); client.connected = true;
+  h.state.socket = client;
+  h.bindEvents();
+  h.window.navigator.onLine = false;
+  h.windowEvents.offline();
+  assert.equal(client.connected, false);
+  assert.equal(client.reconnectCount, 0);
+  assert.equal(states.at(-1), "disconnected");
+  h.fetch(async () => response(200, { id: "1", name: "alice" }));
+  h.window.navigator.onLine = true;
+  h.windowEvents.online();
+  await h.flush();
+  assert.equal(h.Socket.created.length, 2);
+  h.requireLogin();
+  h.windowEvents.online();
+  await h.flush();
+  assert.equal(h.Socket.created.length, 2);
+});
+
+test("scrolling to the top requests earlier history with the existing before cursor", async () => {
+  const h = harness(); messageFixture(h); h.bindEvents();
+  h.state.cursors.set("10", { beforeCursor: "before-30", afterCursor: "after-59", hasMore: true });
+  const requested = [];
+  h.api.getMessages = async (id, parameters) => { requested.push({ id, before: parameters.before });
+    return { items: [message("29")], beforeCursor: "before-29", afterCursor: "after-29", hasMore: false }; };
+  const scroller = h.nodes.get("messageScroller"); scroller.scrollTop = 0;
+  scroller.scroll({ currentTarget: scroller });
+  await h.flush();
+  assert.deepEqual(requested, [{ id: "10", before: "before-30" }]);
+  assert.equal(h.state.cursors.get("10").afterCursor, "after-59");
+});
+
+test("switching conversations during image upload cannot move the outgoing message", async () => {
+  const h = harness(); messageFixture(h);
+  let completeUpload;
+  const sent = [];
+  const client = new h.NativeStompClient("/ws/chat");
+  client.connected = true;
+  client.readyConversationId = "10";
+  client.subscriptions.set("chat-acks", { ready: true });
+  client.subscriptions.set("chat-errors", { ready: true });
+  client.subscriptions.set("chat-messages", { ready: true });
+  client.sendFrame = (command, headers, body) => { sent.push(JSON.parse(body)); return true; };
+  h.state.socket = client;
+  h.api.uploadAttachment = () => new Promise(resolve => { completeUpload = resolve; });
+  const file = new Blob(["png"], { type: "image/png" }); file.name = "test.png";
+  const pending = h.sendImageMessage(file, "");
+  assert.equal(h.state.messages.get("10")[0].uploading, true);
+  h.state.conversations.push({ id: "11", name: "Another", type: "PUBLIC_ROOM" });
+  h.state.activeConversationId = "11";
+  client.readyConversationId = "11";
+  h.state.messages.set("11", []);
+  completeUpload({ id: "55", contentUrl: "/api/chat/v1/attachments/55/content" });
+  await pending;
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].conversationId, "10");
+  assert.equal(sent[0].attachmentId, "55");
+  assert.equal(h.state.messages.get("11").length, 0);
+  URL.revokeObjectURL(h.state.messages.get("10")[0].imageUrl);
+});
+
+test("failed image upload retries the file and preserves the original message request ID", async () => {
+  const h = harness(); messageFixture(h);
+  const sent = [];
+  h.state.socket = { sendMessage: request => { sent.push(request); return true; } };
+  let attempts = 0;
+  h.api.uploadAttachment = async () => { if (++attempts === 1) throw new Error("upload failed"); return { id: "55" }; };
+  const file = new Blob(["png"], { type: "image/png" }); file.name = "test.png";
+  await h.sendImageMessage(file, "");
+  const message = h.state.messages.get("10")[0];
+  const requestId = message.clientRequestId;
+  assert.equal(message.status, "FAILED");
+  assert.equal(sent.length, 0);
+  h.retryMessage(message.id);
+  await h.flush();
+  assert.equal(attempts, 2);
+  assert.equal(sent[0].clientRequestId, requestId);
+  assert.equal(h.state.messages.get("10").length, 1);
+  URL.revokeObjectURL(message.imageUrl);
+});
+
+test("restored image messages use separate protected thumbnail and original URLs", () => {
+  const h = harness(); messageFixture(h);
+  const image = h.normalizeMessage({ ...message("42"), type: "IMAGE", body: null, attachmentId: "55",
+    attachment: { id: "55", origFilename: "sample.png", thumbnailUrl: "/api/chat/v1/attachments/55/thumbnail",
+      contentUrl: "/api/chat/v1/attachments/55/content" } }, "10");
+  assert.equal(image.imageUrl, "/api/chat/v1/attachments/55/thumbnail");
+  assert.equal(image.originalUrl, "/api/chat/v1/attachments/55/content");
+  h.state.messages.set("10", [image]); h.renderMessages();
+  const rendered = h.nodes.get("messageList").querySelector("img");
+  assert.equal(rendered.dataset.originalUrl, image.originalUrl);
+});
+
 test("ACK, broadcast and history reconcile one request without merging different senders", () => {
   const h = harness(); messageFixture(h);
   h.state.messages.set("10", [{ ...message("pending", "same"), status: "SENDING" }]);
@@ -436,7 +744,7 @@ test("prepending history preserves existing nodes and recomputes sender grouping
   assert.equal(list.children.at(-1), row);
   assert.equal(row.querySelector(".message-bubble"), bubble);
   assert.equal(row.classList.contains("grouped"), true);
-  assert.equal(row.querySelector(".sender-line").classList.contains("hidden"), true);
+  assert.equal(row.querySelector(".sender-line").classList.contains("hidden"), false);
   assert.equal(list.querySelectorAll(".is-new").length, 0);
   assert.equal(scroller.scrollTop, 275);
 });
@@ -460,7 +768,7 @@ test("retry keeps the request ID and missing ACK becomes retryable without a dup
   assert.equal(h.ackTimers.size, 0);
 });
 
-test("sending waits for actual broker receipts for both private queues and conversation", async () => {
+test("sending waits for actual broker receipts for all private queues and conversation", async () => {
   const h = harness(); messageFixture(h);
   h.fetch(async () => response(200, { id: "1" }));
   const ready = [];
@@ -470,7 +778,7 @@ test("sending waits for actual broker receipts for both private queues and conve
   client.handleFrame("CONNECTED", {}, "");
   const payload = { conversationId: "10", clientRequestId: "stable", type: "TEXT", body: "世界 😀" };
   assert.equal(client.sendMessage(payload), false);
-  for (const id of ["chat-acks", "chat-errors"]) {
+  for (const id of ["chat-acks", "chat-errors", "chat-messages"]) {
     client.handleFrame("RECEIPT", { "receipt-id": client.subscriptions.get(id).receipt }, "");
     assert.equal(client.sendMessage(payload), false);
   }
@@ -480,6 +788,83 @@ test("sending waits for actual broker receipts for both private queues and conve
   assert.match(client.socket.sent.at(-1), new RegExp(`content-length:${Buffer.byteLength(JSON.stringify(payload))}`));
   client.subscribeToConversation("11");
   assert.equal(client.sendMessage(payload), false);
+});
+
+test("the inbox discovers new direct conversations without changing the active view or duplicating unread messages", async () => {
+  const h = harness(); messageFixture(h);
+  const client = new h.NativeStompClient("/ws/chat", { onMessage: h.handleRealtimeMessage });
+  client.socket = new h.Socket("ws://localhost/ws/chat");
+  client.handleFrame("CONNECTED", {}, "");
+  assert.equal(client.subscriptions.get("chat-messages").destination, "/user/queue/chat.messages");
+  const event = { eventType: "MESSAGE_CREATED", message: { ...message("30", "first", "2"), conversationId: "20" },
+    conversation: { id: "20", type: "DIRECT_MESSAGE", name: "bob", peerUserId: "2" } };
+  client.handleFrame("MESSAGE", { subscription: "chat-messages" }, JSON.stringify(event));
+  assert.equal(h.state.activeConversationId, "10");
+  const direct = h.state.conversations.find(item => item.id === "20");
+  assert.equal(direct.name, "bob");
+  assert.equal(direct.peerId, "2");
+  assert.equal(direct.unread, 1);
+  assert.match(direct.preview, /hello/);
+  // A topic frame and repeated inbox delivery must merge with the original message.
+  h.handleRealtimeMessage({ message: event.message });
+  client.handleFrame("MESSAGE", { subscription: "chat-messages" }, JSON.stringify(event));
+  assert.equal(direct.unread, 1);
+  assert.equal(h.state.messages.get("20").length, 1);
+  h.handleRealtimeMessage({ ...event, message: { ...event.message, id: "31", clientRequestId: "second" } });
+  assert.equal(direct.unread, 2);
+  h.handleRealtimeMessage({ ...event, message: { ...event.message, id: "32", clientRequestId: "own", senderId: "1" } });
+  assert.equal(direct.unread, 2);
+  client.subscribeToConversation("10");
+  client.subscribeToConversation("20");
+  assert.ok(client.subscriptions.has("chat-messages"));
+  h.requireLogin();
+  h.handleRealtimeMessage(event);
+  assert.equal(h.state.conversations.length, 0);
+  assert.equal(h.state.messages.size, 0);
+});
+
+test("an empty conversation list receives the first direct message through the inbox", () => {
+  const h = harness();
+  h.state.currentUser = { id: "2", name: "bob" };
+  h.handleRealtimeMessage({ message: message("30"),
+    conversation: { id: "10", type: "DIRECT_MESSAGE", name: "alice", peerUserId: "1" } });
+  assert.equal(h.state.conversations.length, 1);
+  assert.equal(h.state.conversations[0].unread, 1);
+  assert.equal(h.document.getElementById("conversationEmpty").classList.contains("hidden"), true);
+  assert.equal(h.state.messages.get("10").length, 1);
+});
+
+test("inbox receipts refresh conversations after connection and reconnect without overwriting newer live messages", async () => {
+  const h = harness(); messageFixture(h);
+  const pending = [];
+  h.fetch(url => url.endsWith("/conversations") ? new Promise(resolve => pending.push(resolve))
+    : response(201, { ticket: "test-ticket" }));
+  h.setupRealtime(); await h.flush();
+  const client = h.state.socket;
+  const readyInbox = () => {
+    client.handleFrame("CONNECTED", {}, "");
+    client.handleFrame("RECEIPT", { "receipt-id": client.subscriptions.get("chat-messages").receipt }, "");
+  };
+  readyInbox();
+  const conversation = { id: "20", type: "DIRECT_MESSAGE", name: "bob", peerUserId: "2", lastMessageId: "29",
+    lastActivityAt: "2026-09-08T09:00:00", lastMessagePreview: "stale" };
+  h.handleRealtimeMessage({ message: { ...message("30", "live", "2"), conversationId: "20" }, conversation });
+  pending.shift()(response(200, [conversation, { ...conversation, id: "21" }]));
+  await h.flush();
+  assert.equal(h.state.conversations.filter(item => item.id === "20").length, 1);
+  assert.equal(h.state.conversations.find(item => item.id === "20").unread, 1);
+  assert.match(h.state.conversations.find(item => item.id === "20").preview, /hello/);
+  assert.ok(h.state.conversations.some(item => item.id === "21"));
+  client.handleDisconnect();
+  await client.connect(); readyInbox();
+  pending.shift()(response(200, [{ ...conversation, id: "22" }]));
+  await h.flush();
+  assert.ok(h.state.conversations.some(item => item.id === "22"));
+  assert.equal(h.state.activeConversationId, "10");
+  readyInbox(); h.requireLogin();
+  pending.shift()(response(200, [conversation]));
+  await h.flush();
+  assert.equal(h.state.conversations.length, 0);
 });
 
 test("catch-up keeps its REST watermark while live messages arrive and pages until caught up", async () => {

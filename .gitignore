@@ -1,5 +1,8 @@
 HELP.md
 target/
+node_modules/
+playwright-report/
+test-results/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**
 !**/src/test/**

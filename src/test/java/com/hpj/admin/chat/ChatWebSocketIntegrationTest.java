@@ -6,6 +6,8 @@ import jakarta.servlet.http.HttpSession;
 import jakarta.servlet.http.HttpSessionEvent;
 import jakarta.servlet.http.HttpSessionListener;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -45,6 +47,7 @@ class ChatWebSocketIntegrationTest {
     @Autowired ObjectMapper json;
     @Autowired JdbcTemplate jdbc;
     @Autowired ChatRoomService rooms;
+    @Autowired ChatDirectService directs;
     @Autowired ChatMessagingService messages;
     @Autowired PlatformTransactionManager transactions;
     @Autowired SimpleBrokerMessageHandler broker;
@@ -84,15 +87,25 @@ class ChatWebSocketIntegrationTest {
     String topic(long id) { return "/topic/chat/conversations/" + id; }
 
     class Browser {
-        final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
-        final HttpClient client = HttpClient.newBuilder().cookieHandler(cookies).build();
+        final CookieManager cookies;
+        final HttpClient client;
+        String sessionId;
+        String lastTicket;
+        Browser() { this(new CookieManager(null, CookiePolicy.ACCEPT_ALL)); }
+        Browser(CookieManager cookies) {
+            this.cookies = cookies;
+            this.client = HttpClient.newBuilder().cookieHandler(cookies).build();
+        }
         String csrf;
         HttpResponse<String> request(String method, String path, String body, String contentType) throws Exception {
             var builder = HttpRequest.newBuilder(URI.create(origin() + path)).timeout(Duration.ofSeconds(8));
             if (csrf != null) builder.header("X-CSRF-TOKEN", csrf);
+            if (sessionId != null) builder.header("X-Chat-Session", sessionId);
             if (contentType != null) builder.header("Content-Type", contentType);
-            return client.send(builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody()
+            var response = client.send(builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody()
                     : HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+            response.headers().firstValue("X-Chat-Session").ifPresent(id -> sessionId = id);
+            return response;
         }
         void refreshCsrf() throws Exception {
             var response = request("GET", "/api/chat/v1/csrf-token", null, null);
@@ -116,9 +129,16 @@ class ChatWebSocketIntegrationTest {
 
     Wire open(Browser browser, String allowedOrigin, String csrf, boolean expectConnected) throws Exception {
         Wire wire = new Wire();
+        String suffix = "";
+        if (browser.sessionId != null) {
+            var ticket = browser.request("POST", "/api/chat/v1/websocket-tickets", null, null);
+            assertThat(ticket.statusCode()).isEqualTo(201);
+            browser.lastTicket = json.readTree(ticket.body()).path("ticket").asText();
+            suffix = "?ticket=" + browser.lastTicket;
+        }
         wire.socket = browser.client.newWebSocketBuilder().header("Origin", allowedOrigin)
                 .subprotocols("v12.stomp").connectTimeout(Duration.ofSeconds(5))
-                .buildAsync(URI.create("ws://localhost:" + port + "/ws/chat"), wire).get(8, TimeUnit.SECONDS);
+                .buildAsync(URI.create("ws://localhost:" + port + "/ws/chat" + suffix), wire).get(8, TimeUnit.SECONDS);
         connections.add(wire);
         wire.send("CONNECT\naccept-version:1.2\nhost:localhost\nheart-beat:0,0\n"
                 + (csrf == null ? "" : "X-CSRF-TOKEN:" + csrf + "\n")
@@ -155,6 +175,78 @@ class ChatWebSocketIntegrationTest {
         wire.send("SEND\ndestination:/app/chat.messages.send\ncontent-type:application/json\n\n"
                 + json.writeValueAsString(Map.of("conversationId", String.valueOf(conversation),
                         "clientRequestId", requestId, "type", "TEXT", "body", body)));
+    }
+
+    Browser loginWindow(CookieManager sharedCookies, String username) throws Exception {
+        Browser browser = new Browser(sharedCookies);
+        browser.sessionId = "new";
+        browser.refreshCsrf();
+        String anonymousId = browser.sessionId;
+        assertThat(anonymousId).isNotBlank().isNotEqualTo("new");
+        var response = browser.request("POST", "/api/chat/v1/sessions",
+                "username=" + username + "&password=" + ChatIntegrationTest.PASSWORD, "application/x-www-form-urlencoded");
+        assertThat(response.statusCode()).isEqualTo(201);
+        assertThat(response.headers().allValues("Set-Cookie")).isEmpty();
+        assertThat(browser.sessionId).isNotEqualTo(anonymousId);
+        var stale = HttpRequest.newBuilder(URI.create(origin() + "/api/chat/v1/sessions/current"))
+                .header("X-Chat-Session", anonymousId).GET().build();
+        assertThat(browser.client.send(stale, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(401);
+        browser.refreshCsrf();
+        return browser;
+    }
+
+    @Test void windowsWithTheSameCookiesKeepIndependentHttpAndSocketSessions() throws Exception {
+        Browser cookieAccount = login("carol");
+        Browser alice = loginWindow(cookieAccount.cookies, "alice");
+        Wire aliceSocket = connect(alice);
+        Browser bob = loginWindow(cookieAccount.cookies, "bob");
+        Wire bobSocket = connect(bob);
+        assertThat(alice.sessionId).isNotEqualTo(bob.sessionId);
+        assertThat(json.readTree(alice.request("GET", "/api/chat/v1/sessions/current", null, null).body())
+                .path("username").asText()).isEqualTo("alice");
+        assertThat(json.readTree(cookieAccount.request("GET", "/api/chat/v1/sessions/current", null, null).body())
+                .path("username").asText()).isEqualTo("carol");
+        String bobCsrf = bob.csrf;
+        bob.csrf = alice.csrf;
+        assertThat(bob.request("DELETE", "/api/chat/v1/sessions/current", null, null).statusCode()).isEqualTo(403);
+        bob.csrf = bobCsrf;
+        var room = alice.request("POST", "/api/chat/v1/rooms", "{\"name\":\"Independent windows\"}", "application/json");
+        assertThat(room.statusCode()).isEqualTo(201);
+        long id = json.readTree(room.body()).path("id").asLong();
+        assertThat(json.readTree(room.body()).path("ownerId").asText()).isEqualTo("1");
+        confirmedSubscription(bobSocket, "room", topic(id));
+        sendText(aliceSocket, id, "window-alice", "hello from alice");
+        assertThat(bobSocket.frame()).contains("hello from alice", "\"senderId\":\"1\"");
+        String oldAliceId = alice.sessionId;
+        var logout = alice.request("DELETE", "/api/chat/v1/sessions/current", null, null);
+        assertThat(logout.statusCode()).isEqualTo(204);
+        assertThat(logout.headers().allValues("Set-Cookie")).isEmpty();
+        assertThat(aliceSocket.closed.get(8, TimeUnit.SECONDS)).startsWith("1008:");
+        alice.sessionId = oldAliceId;
+        assertThat(alice.request("GET", "/api/chat/v1/sessions/current", null, null).statusCode()).isEqualTo(401);
+        assertThat(json.readTree(bob.request("GET", "/api/chat/v1/sessions/current", null, null).body())
+                .path("username").asText()).isEqualTo("bob");
+        sendText(bobSocket, id, "window-bob", "bob stays online");
+        assertThat(bobSocket.frame()).contains("bob stays online", "\"senderId\":\"2\"");
+        assertThat(cookieAccount.request("GET", "/api/chat/v1/sessions/current", null, null).statusCode()).isEqualTo(200);
+    }
+
+    @Test void websocketTicketsAreSingleUseAndNeverFallBackToSharedCookies() throws Exception {
+        Browser legacy = login("carol");
+        Browser alice = loginWindow(legacy.cookies, "alice");
+        connect(alice);
+        assertThatThrownBy(() -> alice.client.newWebSocketBuilder().header("Origin", origin())
+                .buildAsync(URI.create("ws://localhost:" + port + "/ws/chat?ticket=" + alice.lastTicket), new Wire())
+                .get(8, TimeUnit.SECONDS))
+                .hasCauseInstanceOf(WebSocketHandshakeException.class)
+                .satisfies(error -> assertThat(((WebSocketHandshakeException) error.getCause()).getResponse().statusCode()).isEqualTo(401));
+        var ticket = alice.request("POST", "/api/chat/v1/websocket-tickets", null, null);
+        String unused = json.readTree(ticket.body()).path("ticket").asText();
+        assertThat(alice.request("DELETE", "/api/chat/v1/sessions/current", null, null).statusCode()).isEqualTo(204);
+        assertThatThrownBy(() -> alice.client.newWebSocketBuilder().header("Origin", origin())
+                .buildAsync(URI.create("ws://localhost:" + port + "/ws/chat?ticket=" + unused), new Wire())
+                .get(8, TimeUnit.SECONDS)).hasCauseInstanceOf(WebSocketHandshakeException.class)
+                .satisfies(error -> assertThat(((WebSocketHandshakeException) error.getCause()).getResponse().statusCode()).isEqualTo(401));
     }
 
     @Test void privateQueueReceiptWaitsForResolvedBrokerSubscription() throws Exception {
@@ -198,6 +290,8 @@ class ChatWebSocketIntegrationTest {
         assertThat(message.path("senderId").asText()).isEqualTo("1");
         assertThat(message.path("body").asText()).isEqualTo("hello 😀 世界");
         assertThat(message.path("id").isTextual()).isTrue();
+        assertThat(message.path("createdAt").isTextual()).isTrue();
+        assertThat(java.time.LocalDateTime.parse(message.path("createdAt").asText())).isNotNull();
         List<JsonNode> senderFrames = List.of(payload(alice.frame()), payload(alice.frame()));
         assertThat(senderFrames).extracting(frame -> frame.path("eventType").asText())
                 .containsExactlyInAnyOrder("MESSAGE_CREATED", "MESSAGE_ACK");
@@ -267,12 +361,56 @@ class ChatWebSocketIntegrationTest {
         assertThat(carolBrowser.request("GET", path, null, null).statusCode()).isEqualTo(403);
     }
 
-    @Test void noMessageBroadcastOrAckBeforeCommitOrAfterRollback() throws Exception {
-        long room = rooms.create(1, "Message transaction").getId();
+    @Test void newlyCreatedDirectMessagesReachAllParticipantWindowsWithoutConversationSubscriptions() throws Exception {
+        Browser aliceBrowser = login("alice");
+        Wire alice = connect(aliceBrowser);
+        Wire otherAlice = connect(login("alice"));
+        Wire bob = connect(login("bob"));
+        Wire otherBob = connect(login("bob"));
+        Wire carol = connect(login("carol"));
+        confirmedSubscription(alice, "acks", "/user/queue/chat.acks");
+        for (Wire wire : List.of(otherAlice, bob, otherBob, carol))
+            confirmedSubscription(wire, "inbox", "/user/queue/chat.messages");
+
+        var created = aliceBrowser.request("POST", "/api/chat/v1/direct-conversations",
+                "{\"peer_user_id\":2}", "application/json");
+        assertThat(created.statusCode()).isEqualTo(200);
+        long id = json.readTree(created.body()).path("id").asLong();
+        sendText(alice, id, "new-direct", "first message without refresh");
+        JsonNode ack = payload(alice.frame());
+        assertThat(ack.path("eventType").asText()).isEqualTo("MESSAGE_ACK");
+        for (Wire wire : List.of(bob, otherBob, otherAlice)) {
+            JsonNode event = payload(wire.frame());
+            assertThat(event.path("eventType").asText()).isEqualTo("MESSAGE_CREATED");
+            assertThat(event.path("message")).isEqualTo(ack.path("message"));
+            assertThat(event.path("conversation").path("id").asText()).isEqualTo(String.valueOf(id));
+            assertThat(event.path("conversation").path("name").asText()).isEqualTo(wire == otherAlice ? "bob" : "alice");
+            assertThat(event.path("conversation").path("peerUserId").asText()).isEqualTo(wire == otherAlice ? "2" : "1");
+            assertThat(event.path("conversation").path("lastMessagePreview").asText()).isEqualTo("first message without refresh");
+        }
+        assertThat(carol.frames.poll(150, TimeUnit.MILLISECONDS)).isNull();
+
+        sendText(alice, id, "new-direct", "first message without refresh");
+        assertThat(payload(alice.frame())).isEqualTo(ack);
+        for (Wire wire : List.of(otherAlice, bob, otherBob, carol))
+            assertThat(wire.frames.poll(150, TimeUnit.MILLISECONDS)).isNull();
+
+        jdbc.update("UPDATE chat_participant SET deleted_at = CURRENT_TIMESTAMP WHERE conversation_id = ? AND user_id = 2", id);
+        sendText(alice, id, "removed-peer", "participant removed");
+        assertThat(payload(alice.frame()).path("eventType").asText()).isEqualTo("MESSAGE_ACK");
+        assertThat(payload(otherAlice.frame()).path("message").path("body").asText()).isEqualTo("participant removed");
+        for (Wire wire : List.of(bob, otherBob, carol))
+            assertThat(wire.frames.poll(150, TimeUnit.MILLISECONDS)).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void noMessageBroadcastOrAckBeforeCommitOrAfterRollback(boolean direct) throws Exception {
+        long room = direct ? directs.open(1, 2).getId() : rooms.create(1, "Message transaction").getId();
         Wire alice = connect(login("alice"));
         Wire bob = connect(login("bob"));
         confirmedSubscription(alice, "acks", "/user/queue/chat.acks");
-        confirmedSubscription(bob, "room", topic(room));
+        confirmedSubscription(bob, "messages", direct ? "/user/queue/chat.messages" : topic(room));
         for (boolean rollback : List.of(true, false)) {
             new TransactionTemplate(transactions).executeWithoutResult(status -> {
                 messages.send(1, new TextMessageRequest(room, "transaction", "committed only"), "alice", null);

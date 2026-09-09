@@ -20,8 +20,13 @@ public class ChatSessionHandshake implements HandshakeInterceptor {
     public static final String USER_ID = "chat.userId";
     public static final String CSRF = "chat.csrf";
     private final ChatAccounts accounts;
+    private final ChatWindowSessions windows;
 
-    public ChatSessionHandshake(ChatAccounts accounts) { this.accounts = accounts; }
+    public ChatSessionHandshake(ChatAccounts accounts) { this(accounts, null); }
+    public ChatSessionHandshake(ChatAccounts accounts, ChatWindowSessions windows) {
+        this.accounts = accounts;
+        this.windows = windows;
+    }
 
     @Override
     public boolean beforeHandshake(ServerHttpRequest request, ServerHttpResponse response,
@@ -47,6 +52,8 @@ public class ChatSessionHandshake implements HandshakeInterceptor {
             attributes.put(SESSION_ID, session.getId());
             attributes.put(USER_ID, principal.getUserId());
             attributes.put(CSRF, csrf);
+            if (http.getAttribute(ChatWindowSessions.ATTRIBUTE) != null)
+                attributes.put(ChatWindowSessions.ATTRIBUTE, windows);
             return true;
         } catch (ChatException | IllegalStateException error) {
             response.setStatusCode(HttpStatus.UNAUTHORIZED);
@@ -57,6 +64,9 @@ public class ChatSessionHandshake implements HandshakeInterceptor {
     /** 从仍有效的 HTTP Session 读取认证信息，不复用握手时缓存的 Authentication。 */
     public static Authentication authenticatedSession(Map<String, Object> attributes) {
         try {
+            if (attributes != null && attributes.get(ChatWindowSessions.ATTRIBUTE) instanceof ChatWindowSessions windows) {
+                return windows.authentication((String) attributes.get(SESSION_ID), (Long) attributes.get(USER_ID));
+            }
             if (attributes == null || !(attributes.get(SESSION) instanceof HttpSession session)) {
                 throw ChatException.unauthorized();
             }

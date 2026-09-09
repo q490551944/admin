@@ -7,7 +7,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
-/** chat 配置绑定：功能开关、认证兼容选项及预留的附件存储参数。 */
+/** chat 配置绑定：功能开关、认证兼容选项及附件存储参数。 */
 @Data
 @ConfigurationProperties(prefix = "chat")
 public class ChatProperties {
@@ -26,7 +26,7 @@ public class ChatProperties {
         private boolean protectLegacyEndpoints;
     }
 
-    /** 附件模块的配置预留，配置存在本身不代表已实现上传或清理任务。 */
+    /** 图片保存在私有桶中；应用账号仅需该桶的对象读写和删除权限。 */
     @Data
     public static class Attachment {
         private String endpoint = "http://localhost:9000";
@@ -34,7 +34,7 @@ public class ChatProperties {
         private String accessKey = "";
         private String secretKey = "";
         private boolean secure;
-        /** 尚未关联消息的附件保留时长，供后续清理流程使用。 */
+        /** 尚未关联消息的附件保留时长。 */
         private Duration unattachedRetention = Duration.ofHours(24);
     }
 }

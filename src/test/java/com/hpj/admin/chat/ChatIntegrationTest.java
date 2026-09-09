@@ -49,7 +49,7 @@ class ChatIntegrationTest {
 
     static void clean(JdbcTemplate jdbc) {
         jdbc.update("UPDATE chat_conversation SET last_message_id = NULL");
-        jdbc.update("UPDATE chat_message SET attachment_id = NULL");
+        jdbc.update("UPDATE chat_message SET attachment_id = NULL, message_type = 'TEXT', body = '' WHERE attachment_id IS NOT NULL");
         jdbc.update("DELETE FROM chat_audit_event");
         jdbc.update("DELETE FROM chat_attachment");
         jdbc.update("DELETE FROM chat_message");

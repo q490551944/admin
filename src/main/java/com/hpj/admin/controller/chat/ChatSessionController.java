@@ -1,6 +1,8 @@
 package com.hpj.admin.controller.chat;
 
 import com.hpj.admin.chat.security.ChatIdentity;
+import com.hpj.admin.chat.security.ChatWindowSessions;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.web.csrf.CsrfToken;
@@ -12,6 +14,16 @@ import java.util.Map;
 @RequestMapping("/api/chat/v1")
 @ConditionalOnProperty(prefix = "chat", name = "enabled", havingValue = "true")
 public class ChatSessionController {
+    private final ChatWindowSessions windows;
+
+    public ChatSessionController(ChatWindowSessions windows) { this.windows = windows; }
+
+    @PostMapping("/websocket-tickets")
+    @ResponseStatus(org.springframework.http.HttpStatus.CREATED)
+    public Map<String, String> ticket(HttpServletRequest request) {
+        return Map.of("ticket", windows.ticket(request));
+    }
+
     /** 获取绑定当前 Session 的凭证，供 HTTP 写请求和 STOMP CONNECT 使用。 */
     @GetMapping("/csrf-token")
     public Map<String, String> csrf(CsrfToken csrf) {

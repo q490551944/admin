@@ -21,7 +21,8 @@ import java.util.regex.Pattern;
  */
 public class ChatInboundInterceptor implements ChannelInterceptor {
     private static final Pattern CONVERSATION = Pattern.compile("^/topic/chat/conversations/([1-9][0-9]{0,18})$");
-    private static final Set<String> PRIVATE_QUEUES = Set.of("/user/queue/chat.acks", "/user/queue/chat.errors");
+    private static final Set<String> PRIVATE_QUEUES = Set.of(
+            "/user/queue/chat.acks", "/user/queue/chat.errors", "/user/queue/chat.messages");
     private final ChatAccounts accounts;
     private final ChatRoomService rooms;
     private final ObjectMapper json;
@@ -51,7 +52,7 @@ public class ChatInboundInterceptor implements ChannelInterceptor {
             if (supplied == null || !MessageDigest.isEqual(csrf.getToken().getBytes(StandardCharsets.UTF_8),
                     supplied.getBytes(StandardCharsets.UTF_8))) throw ChatException.forbidden();
         } else if (command == StompCommand.SUBSCRIBE) {
-            // 私人 ACK/错误队列交给用户目的地机制路由；会话主题必须逐次检查访问权。
+            // 私人消息/ACK/错误队列按认证用户路由；会话主题必须逐次检查访问权。
             String destination = headers.getDestination();
             if (PRIVATE_QUEUES.contains(destination == null ? "" : destination)) return message;
             var match = CONVERSATION.matcher(destination == null ? "" : destination);

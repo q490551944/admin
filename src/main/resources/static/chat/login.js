@@ -9,13 +9,14 @@ form.addEventListener("submit", async (event) => {
   button.disabled = true;
   errorMessage.textContent = "";
   try {
-    // 登录本身也是受 CSRF 保护的写请求；两次请求都携带 Cookie，关联同一个 Session。
-    const csrfResponse = await fetch(base + "/csrf-token", { credentials: "include", cache: "no-store" });
+    // 即使窗口复制过 sessionStorage，主动登录也先建立新 Session，不轮换另一窗口的身份。
+    window.ChatSession.clear();
+    const csrfResponse = await window.ChatSession.fetch(base + "/csrf-token");
     if (!csrfResponse.ok) throw new Error("聊天服务暂不可用，请确认已启用 CHAT_ENABLED");
     const csrf = await csrfResponse.json();
     const payload = new URLSearchParams(new FormData(form));
-    const response = await fetch(base + "/sessions", {
-      method: "POST", credentials: "include", cache: "no-store",
+    const response = await window.ChatSession.fetch(base + "/sessions", {
+      method: "POST",
       headers: { [csrf.headerName]: csrf.token },
       body: payload
     });

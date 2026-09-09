@@ -18,10 +18,12 @@ public class ChatMessageController {
     private static final Logger log = LoggerFactory.getLogger(ChatMessageController.class);
     private final ChatMessagingService service;
     private final ChatMessagePublisher publisher;
+    private final ChatMetrics metrics;
 
-    public ChatMessageController(ChatMessagingService service, ChatMessagePublisher publisher) {
+    public ChatMessageController(ChatMessagingService service, ChatMessagePublisher publisher, ChatMetrics metrics) {
         this.service = service;
         this.publisher = publisher;
+        this.metrics = metrics;
     }
 
     @GetMapping("/api/chat/v1/conversations/{id}/messages")
@@ -35,8 +37,9 @@ public class ChatMessageController {
     public void send(Authentication authentication, @Header("simpSessionId") String sessionId, @Payload JsonNode payload) {
         var principal = ChatIdentity.require(authentication);
         try {
-            service.send(principal.getUserId(), TextMessageRequest.from(payload), authentication.getName(), sessionId);
+            service.send(principal.getUserId(), ChatMessageRequest.from(payload), authentication.getName(), sessionId);
         } catch (Exception error) {
+            metrics.rejected.increment();
             ChatException business = error instanceof ChatException chat ? chat
                     : new ChatException(500, "INTERNAL_ERROR", "消息发送失败，可使用原请求 ID 重试");
             if (!(error instanceof ChatException)) log.error("Chat message transaction failed", error);

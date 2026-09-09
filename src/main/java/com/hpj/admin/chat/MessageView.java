@@ -1,6 +1,8 @@
 package com.hpj.admin.chat;
 
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import com.hpj.admin.entity.chat.MessageType;
 import lombok.Data;
@@ -21,8 +23,20 @@ public class MessageView {
     private String body;
     @JsonSerialize(using = ToStringSerializer.class)
     private Long attachmentId;
+    @JsonFormat(shape = JsonFormat.Shape.STRING)
     private LocalDateTime createdAt;
     private String status;
+
+    @JsonIgnore private String attachmentFilename;
+    @JsonIgnore private String attachmentContentType;
+    @JsonIgnore private Long attachmentSizeBytes;
+    @JsonIgnore private Integer attachmentWidth;
+    @JsonIgnore private Integer attachmentHeight;
+
+    public AttachmentView getAttachment() {
+        return attachmentId == null ? null : AttachmentView.of(attachmentId, attachmentFilename,
+                attachmentContentType, attachmentSizeBytes, attachmentWidth, attachmentHeight, "ATTACHED");
+    }
 
     public String getCursor() {
         return new MessageCursor(conversationId, createdAt, id).encode();

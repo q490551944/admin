@@ -1,6 +1,7 @@
 package com.hpj.admin.mapper.chat;
 
 import com.hpj.admin.chat.ConversationView;
+import com.hpj.admin.chat.ChatUserView;
 import com.hpj.admin.entity.chat.ChatConversation;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -46,6 +47,15 @@ public interface ChatReadMapper {
     /** 按 ID 获取投影，不执行可见性过滤；调用方须先确认访问权限或新建归属。 */
     @Select(PROJECTION + " WHERE c.id = #{conversationId}")
     ConversationView conversationView(@Param("conversationId") long conversationId, @Param("userId") long userId);
+
+    /** 用户目的地只投递给私聊中未删除且账号有效的参与者。 */
+    @Select("""
+        SELECT u.id AS user_id, u.username AS name, NULL AS avatar
+        FROM chat_participant p JOIN user u ON u.id = p.user_id
+        WHERE p.conversation_id = #{conversationId} AND p.deleted_at IS NULL AND u.status = TRUE
+        ORDER BY p.user_id
+        """)
+    List<ChatUserView> directRecipients(@Param("conversationId") long conversationId);
 
     /** 必须在事务内调用，使行锁覆盖后续状态检查和更新。 */
     @Select("SELECT * FROM chat_conversation WHERE id = #{id} FOR UPDATE")
