@@ -2,6 +2,7 @@ package com.hpj.admin.chat.security;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hpj.admin.chat.ChatRoomService;
+import com.hpj.admin.chat.ChatMetrics;
 import com.hpj.admin.common.config.chat.ChatProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.beans.factory.SmartInitializingSingleton;
@@ -33,16 +34,20 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
     private final ChatRoomService rooms;
     private final ObjectMapper json;
     private final ChatSocketSessions sockets;
+    private final ChatWindowSessions windows;
     private final ObjectProvider<MessageChannel> outbound;
 
     public ChatWebSocketConfiguration(ChatProperties properties, ChatAccounts accounts, ChatRoomService rooms,
-                                      ObjectMapper json, @Qualifier("clientOutboundChannel") ObjectProvider<MessageChannel> outbound) {
+                                      ObjectMapper json, @Qualifier("clientOutboundChannel") ObjectProvider<MessageChannel> outbound, ChatMetrics metrics,
+                                      ChatWindowSessions windows) {
         this.properties = properties;
         this.accounts = accounts;
         this.rooms = rooms;
         this.json = json;
         this.sockets = new ChatSocketSessions(accounts);
+        metrics.sockets(sockets, ChatSocketSessions::size);
         this.outbound = outbound;
+        this.windows = windows;
     }
 
     @Bean
@@ -58,7 +63,10 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
     public SmartInitializingSingleton chatSessionExpiryMonitor(
             @Qualifier("chatWebSocketScheduler") ThreadPoolTaskScheduler scheduler) {
         // 等待 Spring 完成调度器初始化后再启动巡检，避免手动初始化导致重复执行器泄漏。
-        return () -> scheduler.scheduleWithFixedDelay(sockets::closeExpired, Duration.ofSeconds(5));
+        return () -> scheduler.scheduleWithFixedDelay(() -> {
+            windows.cleanExpired();
+            sockets.closeExpired();
+        }, Duration.ofSeconds(5));
     }
 
     @Override
@@ -75,7 +83,7 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
         // 同一连接的退订、订阅及 SEND 按接收顺序处理；不同连接仍可并发执行。
         registry.setPreserveReceiveOrder(true);
         registry.addEndpoint("/ws/chat").setAllowedOrigins(origins)
-                .addInterceptors(new ChatSessionHandshake(accounts));
+                .addInterceptors(new ChatSessionHandshake(accounts, windows));
     }
 
     @Override

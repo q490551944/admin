@@ -1,0 +1,62 @@
+name: Chat regression
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  chat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.0.36
+        env:
+          MYSQL_ROOT_PASSWORD: chat-ci-only
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pchat-ci-only"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Database, WebSocket and performance gates
+        run: >-
+          bash mvnw -B '-Dtest=Chat*Test'
+          -Dchat.mysql.test.url=jdbc:mysql://127.0.0.1:3306/
+          -Dchat.mysql.test.password=chat-ci-only -Dchat.performance=true
+          test dependency:build-classpath
+          -Dmdep.outputFile=target/chat-e2e-classpath.txt -DincludeScope=test
+      - run: npm ci
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - name: Install isolated MinIO test server
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 https://dl.min.io/server/minio/release/linux-amd64/archive/minio.RELEASE.2025-09-07T16-13-09Z -o "$RUNNER_TEMP/minio"
+          chmod +x "$RUNNER_TEMP/minio"
+          echo "MINIO_BIN=$RUNNER_TEMP/minio" >> "$GITHUB_ENV"
+      - name: Three-user browser E2E with real MinIO
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-validation
+          path: |
+            target/surefire-reports
+            target/chat-performance-*.json
+            target/chat-e2e-report
+            target/chat-e2e-results
+            target/chat-e2e-final.png
+            target/chat-e2e-*/app.log
+            target/chat-e2e-*/minio.log

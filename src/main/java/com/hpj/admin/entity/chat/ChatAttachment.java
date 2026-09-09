@@ -7,7 +7,7 @@ import lombok.EqualsAndHashCode;
 
 import java.time.LocalDateTime;
 
-/** 附件存储元数据模型；实际上传、消息关联和过期清理流程仍待接入。 */
+/** 图片上传、消息关联和过期清理共用的存储元数据。 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("chat_attachment")

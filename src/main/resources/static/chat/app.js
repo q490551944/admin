@@ -1,6 +1,6 @@
 /**
  * 聊天页面入口：管理会话视图、REST 请求和原生 STOMP 连接。
- * 已接入认证、房间管理、员工搜索、私聊、文字消息、历史和 ACK；附件上传仍待接入。
+ * 已接入窗口认证、房间管理、员工搜索、私聊、文字与图片、历史和 ACK。
  * 演示模式在浏览器内模拟数据和发送状态，不能用来判断后端功能是否已实现。
  */
 const CONFIG = window.CHAT_CONFIG ?? {};
@@ -154,7 +154,7 @@ class ApiError extends Error {
   }
 }
 
-/** 统一管理 Session Cookie、CSRF、请求超时和 HTTP 错误到页面异常的转换。 */
+/** 统一管理窗口 Session、CSRF、请求超时和 HTTP 错误到页面异常的转换。 */
 class ChatApi {
   constructor(baseUrl) {
     this.baseUrl = String(baseUrl || "/api/chat/v1").replace(/\/$/, "");
@@ -164,22 +164,21 @@ class ChatApi {
   async request(path, options = {}) {
     if (state.authExpired) throw new ApiError("登录已失效，请重新登录", 401);
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), CONFIG.requestTimeoutMs || 5000);
+    const timer = window.setTimeout(() => controller.abort(), options.timeoutMs || CONFIG.requestTimeoutMs || 5000);
     const headers = new Headers(options.headers || {});
     if (this.csrf && !["GET", "HEAD"].includes(options.method || "GET")) {
       headers.set(this.csrf.headerName, this.csrf.token);
     }
     if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        credentials: "include",
+      const response = await window.ChatSession.fetch(`${this.baseUrl}${path}`, {
         cache: "no-store",
         ...options,
         headers,
         signal: controller.signal
       });
       const contentType = response.headers.get("content-type") || "";
-      const payload = response.status === 204 ? null
+      const payload = response.ok && options.responseType === "blob" ? await response.blob() : response.status === 204 ? null
         : contentType.includes("json") ? await response.json() : await response.text();
       // 其他并发请求可能已判定登录失效，不能再让迟到的成功响应恢复私有数据。
       if (state.authExpired) throw new ApiError("登录已失效，请重新登录", 401);
@@ -200,6 +199,17 @@ class ChatApi {
 
   getConversations() { return this.request("/conversations"); }
   getCurrentUser() { return this.request("/sessions/current"); }
+  createWebSocketTicket() { return this.request("/websocket-tickets", { method: "POST" }); }
+  async imageBlob(source) {
+    const url = new URL(source, window.location.href);
+    const base = new URL(this.baseUrl + "/", window.location.href);
+    const relative = url.pathname.slice(base.pathname.length);
+    if (url.origin !== base.origin || !url.pathname.startsWith(base.pathname)
+        || !/^attachments\/[1-9][0-9]*\/(thumbnail|content)$/.test(relative) || url.search || url.hash) {
+      throw new ApiError("无效的聊天图片地址");
+    }
+    return this.request("/" + relative, { responseType: "blob" });
+  }
   logout() { return this.request("/sessions/current", { method: "DELETE" }); }
   async loadSession() {
     // 登录后页面重新获取当前 Session 的 CSRF Token，再读取可信身份。
@@ -217,27 +227,20 @@ class ChatApi {
     return this.request(`/conversations/${encodeURIComponent(id)}/messages?${query}`);
   }
 
-  /** 先申请附件元数据；响应包含上传地址时，再向该地址发送文件内容。 */
+  /** 上传始终经过同源 Session/CSRF 接口，只有内容校验成功后才返回 READY。 */
   async uploadAttachment(conversationId, file) {
     const metadata = await this.request(`/conversations/${encodeURIComponent(conversationId)}/attachments`, {
       method: "POST",
       body: JSON.stringify({
         fileName: file.name,
-        filename: file.name,
-        origFilename: file.name,
-        orig_filename: file.name,
         contentType: file.type,
-        content_type: file.type,
-        sizeBytes: file.size,
-        size_bytes: file.size
+        sizeBytes: file.size
       })
     });
-    const uploadUrl = metadata?.uploadUrl || metadata?.upload_url;
-    if (uploadUrl) {
-      const uploadResponse = await fetch(uploadUrl, { method: metadata.method || "PUT", headers: metadata.headers || { "Content-Type": file.type }, body: file });
-      if (!uploadResponse.ok) throw new ApiError("图片上传失败", uploadResponse.status);
-    }
-    return metadata;
+    if (!metadata?.id) throw new ApiError("附件创建失败");
+    return this.request(`/attachments/${encodeURIComponent(metadata.id)}/upload`, {
+      method: "PUT", headers: { "Content-Type": file.type }, body: file, timeoutMs: 60000
+    });
   }
 }
 
@@ -256,26 +259,29 @@ class NativeStompClient {
     this.activeConversationId = null;
     this.reconnectTimer = null;
     this.heartbeatTimer = null;
+    this.lastReceivedAt = Date.now();
     // 断开时递增，使旧连接或尚未完成的连接检查回调失效。
     this.generation = 0;
   }
 
-  socketUrl() {
+  socketUrl(ticket) {
     const url = new URL(this.endpoint || "/ws/chat", window.location.href);
     url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    url.searchParams.set("ticket", ticket);
     return url.toString();
   }
 
   async connect() {
     if (!this.shouldReconnect) return;
+    if (window.navigator?.onLine === false) { this.callbacks.onState?.("disconnected"); return; }
     const generation = this.generation;
     this.callbacks.onState?.("connecting");
     try {
       // 浏览器不暴露握手失败的 HTTP 状态，先用 REST 检查 Session，避免失效凭证反复重连。
-      await api.getCurrentUser();
+      const { ticket } = await api.createWebSocketTicket();
       if (!this.shouldReconnect || generation !== this.generation) return;
       this.buffer = "";
-      this.socket = new WebSocket(this.socketUrl());
+      this.socket = new WebSocket(this.socketUrl(ticket));
     } catch (error) {
       if (error.status === 401) { this.disconnect(false); return; }
       this.handleDisconnect(error);
@@ -302,6 +308,7 @@ class NativeStompClient {
 
   /** 忽略独立心跳，按 NUL 分割完整帧，并保留末尾未收齐的数据供下一次消费。 */
   consume(chunk) {
+    this.lastReceivedAt = Date.now();
     if (chunk === "\n") return;
     this.buffer += chunk;
     const frames = this.buffer.split("\0");
@@ -326,14 +333,20 @@ class NativeStompClient {
   handleFrame(command, headers, body) {
     if (command === "CONNECTED") {
       this.connected = true;
+      this.lastReceivedAt = Date.now();
       window.clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = window.setInterval(() => {
+        if (Date.now() - this.lastReceivedAt > 30000) {
+          this.handleDisconnect(new Error("接收心跳超时"));
+          return;
+        }
         if (this.socket?.readyState === WebSocket.OPEN) this.socket.send("\n");
       }, 10000);
       this.callbacks.onState?.("connected");
       // 每次建立 STOMP 会话后恢复私人队列和当前会话订阅。
       this.subscribe("chat-acks", "/user/queue/chat.acks", (payload) => this.callbacks.onAck?.(payload));
       this.subscribe("chat-errors", "/user/queue/chat.errors", (payload) => this.callbacks.onError?.(payload));
+      this.subscribe("chat-messages", "/user/queue/chat.messages", (payload) => this.callbacks.onMessage?.(payload));
       if (this.activeConversationId) this.subscribeToConversation(this.activeConversationId);
       return;
     }
@@ -348,10 +361,13 @@ class NativeStompClient {
       if (!entry) return;
       window.clearTimeout(entry.timer);
       entry.ready = true;
+      if (entry === this.subscriptions.get("chat-messages")) this.callbacks.onInboxReady?.();
       const active = this.subscriptions.get(`conversation-${this.activeConversationId}`);
-      if (this.subscriptions.get("chat-acks")?.ready && this.subscriptions.get("chat-errors")?.ready
+      const privateReady = this.subscriptions.get("chat-acks")?.ready && this.subscriptions.get("chat-errors")?.ready
+        && this.subscriptions.get("chat-messages")?.ready;
+      if (privateReady
           && (!this.activeConversationId || active?.ready)) this.reconnectCount = 0;
-      if (active?.ready && this.subscriptions.get("chat-acks")?.ready && this.subscriptions.get("chat-errors")?.ready
+      if (active?.ready && privateReady
           && this.readyConversationId !== this.activeConversationId) {
         this.readyConversationId = this.activeConversationId;
         this.callbacks.onState?.("connected");
@@ -407,10 +423,13 @@ class NativeStompClient {
     this.callbacks.onState?.(this.connected ? "connected" : "connecting");
   }
 
-  sendMessage(payload) {
+  sendMessage(payload, allowBackground = false) {
     const body = JSON.stringify(payload);
     // content-length 使用 UTF-8 字节数，不能使用包含中文或表情时的字符串长度。
-    return this.connected && this.readyConversationId === String(payload.conversationId)
+    const ready = this.readyConversationId === String(payload.conversationId)
+      || (allowBackground && this.subscriptions.get("chat-acks")?.ready && this.subscriptions.get("chat-errors")?.ready
+        && this.subscriptions.get("chat-messages")?.ready);
+    return this.connected && ready
       && this.sendFrame("SEND", { destination: "/app/chat.messages.send", "content-type": "application/json", "content-length": new TextEncoder().encode(body).length }, body);
   }
 
@@ -426,6 +445,8 @@ class NativeStompClient {
     this.callbacks.onState?.("disconnected");
     if (wasConnected) this.callbacks.onDisconnect?.();
     if (!this.shouldReconnect) return;
+    // 离线期间不消耗有限的重连次数；网络恢复事件会重新启动连接。
+    if (window.navigator?.onLine === false) return;
     const maximum = CONFIG.reconnectAttempts ?? 5;
     if (this.reconnectCount >= maximum) {
       this.callbacks.onReconnectExhausted?.(error);
@@ -454,16 +475,120 @@ class NativeStompClient {
 const api = new ChatApi(CONFIG.apiBaseUrl);
 const syncJobs = new Map();
 const ackTimers = new Map();
+const mediaBlobs = new Map();
+const mediaUrls = new Set();
+const imagePreviews = new Map();
+const imageLoads = new Map();
+const MAX_CACHED_THUMBNAILS = 32;
+let mediaGeneration = 0;
+
+function releaseDetachedImages() {
+  for (const [image, dispose] of imageLoads) if (!image.isConnected) dispose();
+}
+
+// 懒加载图片脱离 DOM 后可能不再触发 load/error，移除时也必须取消其 URL 和迟到响应。
+new MutationObserver(releaseDetachedImages).observe(document.body, { childList: true, subtree: true });
+
+function clearMediaUrls() {
+  mediaGeneration++;
+  mediaBlobs.clear();
+  for (const dispose of imageLoads.values()) dispose();
+  for (const url of mediaUrls) releaseMediaUrl(url);
+  for (const timer of imagePreviews.values()) window.clearInterval(timer);
+  imagePreviews.clear();
+}
+
+function releaseMediaUrl(url) {
+  if (mediaUrls.delete(url)) URL.revokeObjectURL(url);
+}
+
+async function privateImageUrl(source) {
+  if (state.usingDemo || source.startsWith("blob:")) return source;
+  const generation = mediaGeneration;
+  // 缓存 Blob 而非可撤销 URL：淘汰缓存不会打断仍在加载的图片，各显示元素独立释放 URL。
+  const cacheable = source.endsWith("/thumbnail");
+  let pending = cacheable && mediaBlobs.get(source);
+  if (!pending) {
+    pending = api.imageBlob(source).catch(error => {
+      if (mediaBlobs.get(source) === pending) mediaBlobs.delete(source);
+      throw error;
+    });
+  }
+  if (cacheable) {
+    mediaBlobs.delete(source);
+    mediaBlobs.set(source, pending);
+    while (mediaBlobs.size > MAX_CACHED_THUMBNAILS) mediaBlobs.delete(mediaBlobs.keys().next().value);
+  }
+  const blob = await pending;
+  if (state.authExpired || generation !== mediaGeneration) throw new ApiError("登录已失效", 401);
+  const url = URL.createObjectURL(blob);
+  mediaUrls.add(url);
+  return url;
+}
+
+function loadPrivateImage(image, source) {
+  imageLoads.get(image)?.();
+  let disposed = false;
+  let currentUrl;
+  const loaded = () => dispose(true);
+  const failed = () => dispose();
+  const dispose = (complete = false) => {
+    disposed = true;
+    releaseMediaUrl(currentUrl);
+    image.removeEventListener("load", loaded);
+    image.removeEventListener("error", failed);
+    if (imageLoads.get(image) === dispose) {
+      imageLoads.delete(image);
+      if (!complete && image.dataset.source === source) delete image.dataset.source;
+    }
+  };
+  imageLoads.set(image, dispose);
+  image.dataset.source = source;
+  privateImageUrl(source).then(url => {
+    currentUrl = url;
+    if (disposed || state.authExpired || image.dataset.source !== source || !image.isConnected) { dispose(); return; }
+    image.addEventListener("load", loaded);
+    image.addEventListener("error", failed);
+    image.setAttribute("src", url);
+  }).catch(() => {
+    if (!disposed && !state.authExpired && image.dataset.source === source) { image.alt = "图片加载失败"; delete image.dataset.source; }
+    dispose();
+  });
+}
+
+async function openOriginalImage(source) {
+  if (state.authExpired) return;
+  const preview = window.open("about:blank", "_blank");
+  if (!preview) return;
+  preview.opener = null;
+  try {
+    const url = await privateImageUrl(source);
+    if (preview.closed || state.authExpired) { releaseMediaUrl(url); return; }
+    preview.location.replace(url);
+    const timer = window.setInterval(() => {
+      if (preview.closed) {
+        releaseMediaUrl(url);
+        window.clearInterval(timer);
+        imagePreviews.delete(preview);
+      }
+    }, 1000);
+    imagePreviews.set(preview, timer);
+  }
+  catch (error) { preview.close(); if (!state.authExpired) toast(error.message || "图片加载失败", "error"); }
+}
 
 /** 幂等处理登录失效：先阻止后续请求并清理私有状态，再跳转到同源登录页。 */
 function requireLogin() {
   if (state.authExpired) return;
   state.authExpired = true;
+  window.ChatSession.clear();
+  clearMediaUrls();
   ackTimers.forEach((timer) => window.clearTimeout(timer));
   ackTimers.clear();
   state.socket?.disconnect(false);
   state.usingDemo = false;
   state.conversations = [];
+  for (const messages of state.messages.values()) messages.forEach(releaseMessagePreview);
   state.messages.clear();
   state.cursors.clear();
   state.activeConversationId = null;
@@ -538,6 +663,7 @@ function normalizeMessage(raw, conversationId) {
     body: raw.body ?? raw.content ?? "",
     attachmentId,
     imageUrl: raw.imageUrl || raw.image_url || raw.thumbnailUrl || raw.thumbnail_url || raw.attachment?.thumbnailUrl || (attachmentId ? `${CONFIG.apiBaseUrl || "/api/chat/v1"}/attachments/${attachmentId}/thumbnail` : null),
+    originalUrl: raw.originalUrl || raw.attachment?.contentUrl || (attachmentId ? `${CONFIG.apiBaseUrl || "/api/chat/v1"}/attachments/${attachmentId}/content` : raw.imageUrl),
     fileName: raw.fileName || raw.file_name || raw.attachment?.origFilename || "图片",
     createdAt: raw.createdAt || raw.created_at || new Date().toISOString(),
     status: raw.status || "SENT"
@@ -610,6 +736,7 @@ function setupRealtime() {
     onMessage: handleRealtimeMessage,
     onAck: handleMessageAck,
     onError: handleSocketError,
+    onInboxReady: syncConversationList,
     onReady: (id) => syncConversation(id),
     onDisconnect: () => {
       for (const messages of state.messages.values()) for (const message of messages) {
@@ -620,6 +747,29 @@ function setupRealtime() {
     onReconnectExhausted: () => toast("实时连接多次重试失败，可刷新页面后再试", "error")
   });
   state.socket.connect();
+}
+
+/** 订阅确认后补读列表，覆盖首次加载到订阅完成之间及断线期间新建的私聊。 */
+async function syncConversationList() {
+  try {
+    const payload = await api.getConversations();
+    if (state.authExpired) return;
+    const list = Array.isArray(payload) ? payload : (payload?.items || payload?.records || payload?.conversations || []);
+    for (const raw of list) {
+      const incoming = normalizeConversation(raw);
+      const existing = state.conversations.find((item) => item.id === incoming.id);
+      if (!existing) state.conversations.push(incoming);
+      else if (!existing.latestMessage || compareMessages(existing.latestMessage,
+        { id: incoming.lastMessageId || "0", createdAt: incoming.lastActivityAt }) <= 0) {
+        // 保留窗口内的未读计数和交互状态，迟到的列表响应不能覆盖较新的实时摘要。
+        existing.preview = incoming.preview;
+        existing.time = incoming.time;
+      }
+    }
+    renderConversations();
+  } catch (error) {
+    if (!state.authExpired) toast(error.message || "会话列表同步失败", "error");
+  }
 }
 
 function setConnectionState(status) {
@@ -865,7 +1015,7 @@ function renderMessages(options = {}) {
       return;
     }
     const timestamp = parseDate(message.createdAt).getTime();
-    // 同一天内，同一发送者相隔不足五分钟的连续消息合并显示头像和时间信息。
+    // 连续消息省略重复头像，但每条仍保留发送者和服务端时间。
     const grouped = lastSender === message.senderId && timestamp - lastTimestamp < 5 * 60 * 1000;
     const previous = existing.get(key) || existingIds.get(JSON.stringify([conversationId, String(message.id)]));
     const row = messageElement(message, grouped, previous);
@@ -932,7 +1082,7 @@ function messageElement(message, grouped, existing) {
     row.append(block);
   }
   const sender = $(".sender-line", block);
-  sender.classList.toggle("hidden", grouped);
+  sender.classList.remove("hidden");
   setMessageText($("strong", sender), own ? "你" : message.senderName);
   const time = $("time", sender);
   time.dateTime = message.createdAt;
@@ -943,7 +1093,7 @@ function messageElement(message, grouped, existing) {
     imageWrap.className = "image-message";
     const image = document.createElement("img");
     image.loading = "lazy";
-    image.addEventListener("click", () => window.open(image.dataset.originalUrl || image.src, "_blank", "noopener,noreferrer"));
+    image.addEventListener("click", () => openOriginalImage(image.dataset.originalUrl || image.src));
     image.addEventListener("error", () => { image.alt = "图片加载失败"; imageWrap.classList.add("failed"); });
     const caption = document.createElement("div");
     caption.className = "image-caption";
@@ -962,7 +1112,9 @@ function messageElement(message, grouped, existing) {
   if (message.type === "IMAGE") {
     const image = $("img", block);
     const source = message.imageUrl || `${CONFIG.apiBaseUrl || "/api/chat/v1"}/attachments/${message.attachmentId}/thumbnail`;
-    if (image.getAttribute("src") !== source) image.setAttribute("src", source);
+    if (image.dataset.source !== source) {
+      loadPrivateImage(image, source);
+    }
     image.dataset.originalUrl = message.originalUrl || message.imageUrl || "";
     image.alt = message.fileName ? `图片：${message.fileName}` : "聊天图片";
     setMessageText($(".image-caption", block).firstElementChild, message.fileName || "图片");
@@ -978,9 +1130,10 @@ function messageElement(message, grouped, existing) {
     if (!status.parentElement) block.append(status);
     status.className = `message-status${message.status === "FAILED" ? " failed" : ""}`;
     status.classList.toggle("settled", message.status === "SENT");
-    if (status.dataset.status !== message.status) {
-      status.dataset.status = message.status;
-      status.textContent = message.status === "FAILED" ? "发送失败 · " : message.status === "SENT" ? "" : "发送中…";
+    const displayStatus = message.uploading ? "UPLOADING" : message.status;
+    if (status.dataset.status !== displayStatus) {
+      status.dataset.status = displayStatus;
+      status.textContent = message.status === "FAILED" ? "发送失败 · " : message.status === "SENT" ? "" : message.uploading ? "图片上传中…" : "发送中…";
       if (message.status === "FAILED") {
         const retry = document.createElement("button");
         retry.type = "button";
@@ -1050,11 +1203,17 @@ function mergeMessages(first, second) {
     const key = message.clientRequestId ? `${message.senderId}:${message.clientRequestId}` : null;
     const previous = key ? requests.get(key) : null;
     if (previous?.status === "SENT" && message.status !== "SENT") return;
+    if (previous && previous !== message && message.status === "SENT") releaseMessagePreview(previous);
     if (previous) result.delete(String(previous.id));
     result.set(String(message.id), message);
     if (key) requests.set(key, message);
   });
   return [...result.values()].sort(compareMessages);
+}
+
+function releaseMessagePreview(message) {
+  if (message.imageUrl?.startsWith("blob:")) URL.revokeObjectURL(message.imageUrl);
+  delete message.uploadFile;
 }
 
 function updateComposer() {
@@ -1117,27 +1276,36 @@ function createOptimisticMessage(data) {
 }
 
 async function sendImageMessage(file, caption) {
-  let localUrl = null;
-  let message;
+  const message = createOptimisticMessage({ type: "IMAGE", body: null, imageUrl: URL.createObjectURL(file),
+    fileName: file.name, uploadFile: file, uploading: !state.usingDemo });
+  clearPendingFile();
+  // 图片不带正文；保留已输入文字，供用户随后单独发送。
+  updateComposer();
+  await uploadAndDispatchImage(message);
+}
+
+async function uploadAndDispatchImage(message) {
+  if (message.uploadInFlight || state.authExpired) return;
+  message.uploadInFlight = true;
   try {
-    let attachment = null;
-    if (!state.usingDemo) attachment = await api.uploadAttachment(state.activeConversationId, file);
-    localUrl = URL.createObjectURL(file);
-    message = createOptimisticMessage({
-      type: "IMAGE",
-      body: caption || null,
-      attachmentId: attachment?.id || attachment?.attachmentId || attachment?.attachment_id,
-      imageUrl: localUrl,
-      fileName: file.name
-    });
-    clearPendingFile();
-    byId("messageInput").value = "";
-    updateComposer();
+    if (!state.usingDemo && !message.attachmentId) {
+      message.uploading = true;
+      const attachment = await api.uploadAttachment(message.conversationId, message.uploadFile);
+      if (state.authExpired || !state.messages.has(message.conversationId)) return;
+      message.attachmentId = attachment.id;
+      message.originalUrl = attachment.contentUrl;
+    }
+    message.uploading = false;
+    message.status = "SENDING";
+    if (state.activeConversationId === message.conversationId) renderMessages();
     await dispatchMessage(message);
   } catch (error) {
-    if (localUrl) URL.revokeObjectURL(localUrl);
-    toast(error.message || "图片上传失败", "error");
-  }
+    message.uploading = false;
+    if (!state.authExpired) {
+      updateMessageStatus(message.clientRequestId, "FAILED");
+      toast(error.message || "图片上传失败，可点击重试", "error");
+    }
+  } finally { message.uploadInFlight = false; }
 }
 
 /** 演示模式本地模拟成功；实时模式只提交消息内容，最终状态等待 ACK 或广播回填。 */
@@ -1155,7 +1323,7 @@ async function dispatchMessage(message) {
     type: message.type,
     body: message.type === "TEXT" ? message.body : undefined,
     attachmentId: message.type === "IMAGE" ? message.attachmentId : undefined
-  }); } catch (_) { /* 关闭连接与发送竞争时按未确认处理，重试沿用请求 ID。 */ }
+  }, message.type === "IMAGE" && Boolean(message.attachmentId)); } catch (_) { /* 关闭连接与发送竞争时按未确认处理，重试沿用请求 ID。 */ }
   window.clearTimeout(ackTimers.get(message.clientRequestId));
   if (sent) ackTimers.set(message.clientRequestId, window.setTimeout(() => {
     if (message.status === "SENDING") updateMessageStatus(message.clientRequestId, "FAILED");
@@ -1166,11 +1334,12 @@ async function dispatchMessage(message) {
 
 function retryMessage(id) {
   const message = (state.messages.get(state.activeConversationId) || []).find((item) => item.id === id);
-  if (!message) return;
+  if (!message || message.status !== "FAILED" || message.uploadInFlight) return;
   message.status = "SENDING";
   // ACK 丢失时服务端可能已提交，重试必须复用原请求 ID。
   renderMessages();
-  dispatchMessage(message);
+  if (message.type === "IMAGE" && !message.attachmentId) uploadAndDispatchImage(message);
+  else dispatchMessage(message);
 }
 
 function updateMessageStatus(clientRequestId, status, patch = {}) {
@@ -1180,6 +1349,7 @@ function updateMessageStatus(clientRequestId, status, patch = {}) {
     const message = messages.find((item) => item.clientRequestId === clientRequestId && item.senderId === String(state.currentUser.id));
     if (!message) continue;
     if (message.status === "SENT" && status !== "SENT") return;
+    if (status === "SENT" && patch.imageUrl && patch.imageUrl !== message.imageUrl) releaseMessagePreview(message);
     Object.assign(message, patch, { status });
     state.messages.set(conversationId, mergeMessages([], messages));
     if (status === "SENT") updateConversationPreview(message);
@@ -1208,6 +1378,7 @@ function handleSocketError(payload) {
 }
 
 function handleRealtimeMessage(payload) {
+  if (state.authExpired) return;
   if (payload.eventType === "CONVERSATION_DISSOLVED" || payload.type === "CONVERSATION_DISSOLVED") {
     const conversationId = String(payload.conversationId || payload.conversation_id);
     removeConversation(conversationId);
@@ -1217,7 +1388,14 @@ function handleRealtimeMessage(payload) {
   const raw = payload.message || payload.data || payload;
   const message = normalizeMessage(raw, raw.conversationId || raw.conversation_id || state.activeConversationId);
   const id = message.conversationId;
+  let conversation = state.conversations.find((item) => item.id === id);
+  if (!conversation && payload.conversation && String(payload.conversation.id) === id) {
+    conversation = normalizeConversation(payload.conversation);
+    state.conversations.unshift(conversation);
+  }
   const existing = state.messages.get(id) || [];
+  const duplicate = existing.some((item) => item.id === message.id
+    || (message.clientRequestId && item.clientRequestId === message.clientRequestId && item.senderId === message.senderId));
   // 广播可能先于 ACK 到达：优先回填相同请求的占位消息，再按服务端消息 ID 去重。
   if (message.senderId === String(state.currentUser.id)) {
     window.clearTimeout(ackTimers.get(message.clientRequestId));
@@ -1225,8 +1403,8 @@ function handleRealtimeMessage(payload) {
   }
   state.messages.set(id, mergeMessages(existing, [message]));
   updateConversationPreview(message);
-  const conversation = state.conversations.find((item) => item.id === id);
-  if (conversation && id !== state.activeConversationId) conversation.unread += 1;
+  if (conversation && !duplicate && message.senderId !== String(state.currentUser.id)
+      && id !== state.activeConversationId) conversation.unread += 1;
   renderConversations();
   if (id === state.activeConversationId) renderMessages({ animate: true });
 }
@@ -1291,9 +1469,9 @@ function renderDetails(conversation) {
   const displayImages = images.length ? images : (state.usingDemo ? remoteImages.slice(2, 5) : []);
   byId("mediaGrid").replaceChildren(...displayImages.slice(0, 6).map((source) => {
     const image = document.createElement("img");
-    image.src = source;
     image.alt = "会话共享图片";
     image.loading = "lazy";
+    loadPrivateImage(image, source);
     return image;
   }));
   // 按钮显隐仅控制交互入口，实际房主权限仍由后端解散接口校验。
@@ -1513,6 +1691,18 @@ function toast(message, type = "success") {
 }
 
 function bindEvents() {
+  window.addEventListener("offline", () => {
+    if (!state.usingDemo && !state.authExpired) state.socket?.handleDisconnect(new Error("网络已断开"));
+  });
+  window.addEventListener("online", () => {
+    const socket = state.socket;
+    if (!state.usingDemo && !state.authExpired && socket?.shouldReconnect && !socket.connected) {
+      window.clearTimeout(socket.reconnectTimer);
+      socket.generation += 1;
+      socket.reconnectCount = 0;
+      socket.connect();
+    }
+  });
   byId("sessionButton").addEventListener("click", async () => {
     try {
       await api.logout();
@@ -1556,6 +1746,10 @@ function bindEvents() {
     return button;
   }));
   byId("loadHistoryButton").addEventListener("click", loadEarlierMessages);
+  byId("messageScroller").addEventListener("scroll", (event) => {
+    if (event.currentTarget.scrollTop < 80 && state.cursors.get(state.activeConversationId)?.hasMore)
+      loadEarlierMessages();
+  }, { passive: true });
   byId("conversationInfoButton").addEventListener("click", () => toggleDetails());
   byId("closeDetailsButton").addEventListener("click", () => toggleDetails(false));
   byId("openConversationButton").addEventListener("click", () => toggleConversationPanel(true));
@@ -1604,6 +1798,7 @@ async function retryLiveConnection() {
     const payload = await api.getConversations();
     const list = Array.isArray(payload) ? payload : (payload?.items || payload?.records || payload?.conversations || []);
     state.conversations = list.map(normalizeConversation);
+    clearMediaUrls();
     state.messages.clear();
     state.cursors.clear();
     state.usingDemo = false;

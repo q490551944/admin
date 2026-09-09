@@ -13,6 +13,7 @@ public class ChatSocketSessions {
     public ChatSocketSessions(ChatAccounts accounts) { this.accounts = accounts; }
     public void add(WebSocketSession socket) { sockets.put(socket.getId(), socket); }
     public void remove(String id) { sockets.remove(id); }
+    public int size() { return sockets.size(); }
 
     /** 验证连接、Session 和账号；失败时以 1008 关闭连接并移出登记表。 */
     public boolean valid(String id) {

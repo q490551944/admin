@@ -1,6 +1,7 @@
 package com.hpj.admin.chat;
 
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import com.hpj.admin.entity.chat.ConversationStatus;
 import com.hpj.admin.entity.chat.ConversationType;
@@ -22,7 +23,9 @@ public class ConversationView {
     private Long lastMessageId;
     /** 最近有效已发送消息的摘要；图片显示占位文字，无有效消息时为空字符串。 */
     private String lastMessagePreview;
+    @JsonFormat(shape = JsonFormat.Shape.STRING)
     private LocalDateTime lastActivityAt;
+    @JsonFormat(shape = JsonFormat.Shape.STRING)
     private LocalDateTime createdAt;
     /** 查询用户之外的有效参与者 ID；没有对应参与者时为空。 */
     @JsonSerialize(using = ToStringSerializer.class)

@@ -64,6 +64,10 @@ class ChatInboundSecurityTest {
         assertDenied(frame(StompCommand.SUBSCRIBE, "/topic/chat/conversations/*", "", null), 403);
         assertDenied(frame(StompCommand.SUBSCRIBE, "/queue/chat.acks", "", null), 403);
         assertDenied(frame(StompCommand.SUBSCRIBE, "/user/bob/queue/chat.acks", "", null), 403);
+        assertDenied(frame(StompCommand.SUBSCRIBE, "/queue/chat.messages", "", null), 403);
+        assertDenied(frame(StompCommand.SUBSCRIBE, "/user/bob/queue/chat.messages", "", null), 403);
+        assertDenied(frame(StompCommand.SEND, "/user/queue/chat.messages", "hello", null), 403);
+        interceptor.preSend(frame(StompCommand.SUBSCRIBE, "/user/queue/chat.messages", "", null), null);
         interceptor.preSend(frame(StompCommand.SEND, "/app/chat.messages.send", "{\"conversationId\":\"10\",\"body\":\"hello\"}", null), null);
         verify(rooms).requireAccess(1, 10);
     }

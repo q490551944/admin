@@ -1,0 +1,11 @@
+{
+  "name": "admin-chat-checks",
+  "private": true,
+  "scripts": {
+    "test": "node --test src/test/js/chat-security.test.cjs",
+    "test:e2e": "node scripts/run-chat-e2e.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}
