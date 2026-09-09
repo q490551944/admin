@@ -7,7 +7,7 @@ import lombok.EqualsAndHashCode;
 
 import java.time.LocalDateTime;
 
-/** 消息持久化模型；当前提供表结构和 CRUD，完整消息发送流程仍待接入。 */
+/** 消息持久化模型；发送业务由 ChatMessagingService 统一处理事务和幂等。 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("chat_message")

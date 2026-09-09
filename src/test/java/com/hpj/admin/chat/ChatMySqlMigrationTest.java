@@ -37,7 +37,7 @@ class ChatMySqlMigrationTest {
                         + "VALUES(201,101,1,'TEXT','retain','History survives migration','SENT')");
                 var upgraded = Flyway.configure().dataSource(server, user, password)
                         .defaultSchema(schema).locations("classpath:db/migration").load();
-                assertThat(upgraded.migrate().migrationsExecuted).isEqualTo(1);
+                assertThat(upgraded.migrate().migrationsExecuted).isEqualTo(2);
                 assertThat(upgraded.migrate().migrationsExecuted).isZero();
                 data.execute("INSERT INTO chat_conversation(id,type,name,normalized_name,owner_id,status) "
                         + "VALUES(102,'PUBLIC_ROOM','Engineering','engineering',1,'ACTIVE')");

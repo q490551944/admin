@@ -1,6 +1,6 @@
 /**
  * 聊天页面入口：管理会话视图、REST 请求和原生 STOMP 连接。
- * 当前后端已接入认证和房间管理；员工搜索、消息历史、消息 ACK 与附件接口仍为预留调用。
+ * 已接入认证、房间管理、员工搜索、私聊、文字消息、历史和 ACK；附件上传仍待接入。
  * 演示模式在浏览器内模拟数据和发送状态，不能用来判断后端功能是否已实现。
  */
 const CONFIG = window.CHAT_CONFIG ?? {};
@@ -208,9 +208,9 @@ class ChatApi {
   }
   createRoom(name) { return this.request("/rooms", { method: "POST", body: JSON.stringify({ name }) }); }
   dissolveRoom(id) { return this.request(`/rooms/${encodeURIComponent(id)}`, { method: "DELETE" }); }
-  // 以下员工、私聊、历史消息及附件方法预留给后续后端功能，接口失败时向页面透传错误。
+  // 员工目录与幂等私聊接口。
   searchUsers(query = "") { return this.request(`/users?query=${encodeURIComponent(query)}`); }
-  createDirectConversation(peerUserId) { return this.request("/direct-conversations", { method: "POST", body: JSON.stringify({ peerUserId, peer_user_id: peerUserId }) }); }
+  createDirectConversation(peerUserId) { return this.request("/direct-conversations", { method: "POST", body: JSON.stringify({ peer_user_id: String(peerUserId) }) }); }
   getMessages(id, parameters = {}) {
     const query = new URLSearchParams();
     Object.entries(parameters).forEach(([key, value]) => value != null && query.set(key, String(value)));
@@ -252,6 +252,7 @@ class NativeStompClient {
     this.reconnectCount = 0;
     this.shouldReconnect = true;
     this.subscriptions = new Map();
+    this.readyConversationId = null;
     this.activeConversationId = null;
     this.reconnectTimer = null;
     this.heartbeatTimer = null;
@@ -325,7 +326,6 @@ class NativeStompClient {
   handleFrame(command, headers, body) {
     if (command === "CONNECTED") {
       this.connected = true;
-      this.reconnectCount = 0;
       window.clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = window.setInterval(() => {
         if (this.socket?.readyState === WebSocket.OPEN) this.socket.send("\n");
@@ -343,12 +343,32 @@ class NativeStompClient {
       this.subscriptions.get(headers.subscription)?.callback?.(payload, headers);
       return;
     }
+    if (command === "RECEIPT") {
+      const entry = [...this.subscriptions.values()].find((item) => item.receipt === headers["receipt-id"]);
+      if (!entry) return;
+      window.clearTimeout(entry.timer);
+      entry.ready = true;
+      const active = this.subscriptions.get(`conversation-${this.activeConversationId}`);
+      if (this.subscriptions.get("chat-acks")?.ready && this.subscriptions.get("chat-errors")?.ready
+          && (!this.activeConversationId || active?.ready)) this.reconnectCount = 0;
+      if (active?.ready && this.subscriptions.get("chat-acks")?.ready && this.subscriptions.get("chat-errors")?.ready
+          && this.readyConversationId !== this.activeConversationId) {
+        this.readyConversationId = this.activeConversationId;
+        this.callbacks.onState?.("connected");
+        this.callbacks.onReady?.(this.activeConversationId);
+      }
+      return;
+    }
     if (command === "ERROR") {
       let error = { message: body || headers.message || "实时连接错误", status: Number(headers.status) };
       try { error = { ...error, ...JSON.parse(body) }; } catch (_) { /* non-JSON protocol error */ }
       this.disconnect(false);
       if (error.status === 401 || error.code === "SESSION_EXPIRED") requireLogin();
-      else this.callbacks.onError?.(error);
+      else {
+        this.callbacks.onState?.("disconnected");
+        this.callbacks.onDisconnect?.();
+        this.callbacks.onError?.(error);
+      }
     }
   }
 
@@ -363,30 +383,42 @@ class NativeStompClient {
 
   subscribe(id, destination, callback) {
     if (this.subscriptions.has(id)) this.unsubscribe(id);
-    this.subscriptions.set(id, { destination, callback });
-    if (this.connected) this.sendFrame("SUBSCRIBE", { id, destination, ack: "auto" });
+    const entry = { destination, callback, receipt: uuid(), ready: false };
+    this.subscriptions.set(id, entry);
+    if (this.connected) {
+      this.sendFrame("SUBSCRIBE", { id, destination, ack: "auto", receipt: entry.receipt });
+      entry.timer = window.setTimeout(() => this.handleDisconnect(new Error("订阅确认超时")), 10000);
+    }
   }
 
   unsubscribe(id) {
+    window.clearTimeout(this.subscriptions.get(id)?.timer);
     if (this.connected) this.sendFrame("UNSUBSCRIBE", { id });
     this.subscriptions.delete(id);
   }
 
   subscribeToConversation(conversationId) {
+    this.readyConversationId = null;
     this.activeConversationId = conversationId;
     // 当前只订阅正在查看的会话，切换时释放旧会话主题，保留私人队列。
     [...this.subscriptions.keys()].filter((id) => id.startsWith("conversation-")).forEach((id) => this.unsubscribe(id));
     const id = `conversation-${conversationId}`;
     this.subscribe(id, `/topic/chat/conversations/${conversationId}`, (payload) => this.callbacks.onMessage?.(payload));
+    this.callbacks.onState?.(this.connected ? "connected" : "connecting");
   }
 
   sendMessage(payload) {
     const body = JSON.stringify(payload);
     // content-length 使用 UTF-8 字节数，不能使用包含中文或表情时的字符串长度。
-    return this.connected && this.sendFrame("SEND", { destination: "/app/chat.messages.send", "content-type": "application/json", "content-length": new TextEncoder().encode(body).length }, body);
+    return this.connected && this.readyConversationId === String(payload.conversationId)
+      && this.sendFrame("SEND", { destination: "/app/chat.messages.send", "content-type": "application/json", "content-length": new TextEncoder().encode(body).length }, body);
   }
 
   handleDisconnect(error) {
+    this.generation += 1;
+    this.socket?.close();
+    this.readyConversationId = null;
+    this.subscriptions.forEach((entry) => window.clearTimeout(entry.timer));
     window.clearInterval(this.heartbeatTimer);
     window.clearTimeout(this.reconnectTimer);
     const wasConnected = this.connected;
@@ -409,6 +441,8 @@ class NativeStompClient {
   disconnect(reconnect = false) {
     this.shouldReconnect = reconnect;
     this.generation += 1;
+    this.readyConversationId = null;
+    this.subscriptions.forEach((entry) => window.clearTimeout(entry.timer));
     window.clearTimeout(this.reconnectTimer);
     window.clearInterval(this.heartbeatTimer);
     if (this.connected) this.sendFrame("DISCONNECT", { receipt: `disconnect-${Date.now()}` });
@@ -418,11 +452,15 @@ class NativeStompClient {
 }
 
 const api = new ChatApi(CONFIG.apiBaseUrl);
+const syncJobs = new Map();
+const ackTimers = new Map();
 
 /** 幂等处理登录失效：先阻止后续请求并清理私有状态，再跳转到同源登录页。 */
 function requireLogin() {
   if (state.authExpired) return;
   state.authExpired = true;
+  ackTimers.forEach((timer) => window.clearTimeout(timer));
+  ackTimers.clear();
   state.socket?.disconnect(false);
   state.usingDemo = false;
   state.conversations = [];
@@ -449,11 +487,14 @@ function normalizeConversation(raw) {
   const type = raw.type || raw.conversationType || raw.conversation_type || "PUBLIC_ROOM";
   const peer = raw.peer || raw.peerUser || raw.peer_user;
   const name = raw.name || raw.displayName || raw.display_name || peer?.name || peer?.username || `会话 ${id}`;
-  const members = raw.members || raw.participants || [];
+  const peerId = String(raw.peerUserId ?? raw.peer_user_id ?? raw.peerId ?? peer?.id ?? "");
+  const members = raw.members || raw.participants || (type === "DIRECT_MESSAGE" && peerId
+    ? [state.currentUser, { id: peerId, name, avatar: peer?.avatar }] : []);
   return {
     ...raw,
     id: String(id),
     type,
+    peerId,
     name,
     avatar: raw.avatar || peer?.avatar || initials(name),
     accent: raw.accent || roomAccents[hashIndex(id, roomAccents.length)],
@@ -463,7 +504,7 @@ function normalizeConversation(raw) {
     unread: Number(raw.unreadCount ?? raw.unread_count ?? raw.unread ?? 0),
     pinned: Boolean(raw.pinned),
     ownerId: String(raw.ownerId ?? raw.owner_id ?? ""),
-    memberCount: Number(raw.memberCount ?? raw.member_count ?? members.length ?? (type === "DIRECT_MESSAGE" ? 2 : 0)),
+    memberCount: Number(raw.memberCount ?? raw.member_count ?? (type === "DIRECT_MESSAGE" ? 2 : members.length)),
     onlineCount: Number(raw.onlineCount ?? raw.online_count ?? 0),
     description: raw.description || (type === "PUBLIC_ROOM" ? "团队协作讨论组" : "一对一私信"),
     members
@@ -508,7 +549,7 @@ function normalizeMessagesResponse(payload, conversationId) {
   const source = payload || {};
   const list = Array.isArray(source) ? source : (source.items || source.messages || source.records || source.content || []);
   return {
-    items: list.map((item) => normalizeMessage(item, conversationId)).sort((a, b) => parseDate(a.createdAt) - parseDate(b.createdAt)),
+    items: list.map((item) => normalizeMessage(item, conversationId)).sort(compareMessages),
     beforeCursor: source.beforeCursor ?? source.before_cursor ?? source.previousCursor ?? source.previous_cursor ?? null,
     afterCursor: source.afterCursor ?? source.after_cursor ?? source.nextCursor ?? source.next_cursor ?? null,
     hasMore: Boolean(source.hasMore ?? source.has_more ?? source.beforeCursor ?? source.before_cursor)
@@ -557,7 +598,7 @@ async function initialize() {
   renderConversations();
   if (state.activeConversationId) await activateConversation(state.activeConversationId, { initial: true });
   else renderNoConversation();
-  renderPeople(demoPeople);
+  renderPeople(state.usingDemo ? demoPeople : []);
   bindEvents();
   byId("sessionButton").classList.toggle("hidden", state.usingDemo);
 }
@@ -569,6 +610,13 @@ function setupRealtime() {
     onMessage: handleRealtimeMessage,
     onAck: handleMessageAck,
     onError: handleSocketError,
+    onReady: (id) => syncConversation(id),
+    onDisconnect: () => {
+      for (const messages of state.messages.values()) for (const message of messages) {
+        if (message.status === "SENDING" && message.senderId === String(state.currentUser.id))
+          updateMessageStatus(message.clientRequestId, "FAILED");
+      }
+    },
     onReconnectExhausted: () => toast("实时连接多次重试失败，可刷新页面后再试", "error")
   });
   state.socket.connect();
@@ -576,6 +624,7 @@ function setupRealtime() {
 
 function setConnectionState(status) {
   state.connectionState = status;
+  updateSendButton();
   const dot = byId("connectionDot");
   if (!dot) return;
   dot.className = `status-dot ${status}`;
@@ -677,20 +726,50 @@ async function activateConversation(id, options = {}) {
   renderDetails(conversation);
   closeMobilePanels();
   byId("messageInput").placeholder = `发送消息给 ${conversation.type === "PUBLIC_ROOM" ? "#" : ""}${conversation.name}`;
-  if (!state.messages.has(conversation.id) && !state.usingDemo) {
-    renderMessageLoading();
-    try {
-      const payload = await api.getMessages(conversation.id, { limit: CONFIG.historyPageSize || 30 });
-      const result = normalizeMessagesResponse(payload, conversation.id);
-      state.messages.set(conversation.id, result.items);
-      state.cursors.set(conversation.id, result);
-    } catch (error) {
-      state.messages.set(conversation.id, []);
-      toast(error.message || "消息加载失败", "error");
-    }
-  }
-  renderMessages({ scrollToBottom: options.initial !== false });
   state.socket?.subscribeToConversation(conversation.id);
+  if (!state.usingDemo) {
+    if (!state.messages.has(conversation.id)) renderMessageLoading();
+    await syncConversation(conversation.id);
+  }
+  if (state.authExpired || state.activeConversationId !== conversation.id) return;
+  renderMessages({ scrollToBottom: options.initial !== false });
+}
+
+/** 只用已完成历史查询的游标推进补拉，广播不能跳过尚未拉到的消息。 */
+async function syncConversation(id) {
+  id = String(id);
+  if (state.usingDemo || state.authExpired) return;
+  if (syncJobs.has(id)) {
+    await syncJobs.get(id);
+    if (!state.authExpired) return syncConversation(id);
+    return;
+  }
+  const job = (async () => {
+    try {
+      let more;
+      do {
+        const previous = state.cursors.get(id);
+        const after = previous?.afterCursor;
+        const result = normalizeMessagesResponse(await api.getMessages(id,
+          { after, limit: CONFIG.historyPageSize || 30 }), id);
+        if (state.authExpired || !state.conversations.some((item) => item.id === id)) return;
+        state.messages.set(id, mergeMessages(state.messages.get(id) || [], result.items));
+        const currentCursor = state.cursors.get(id);
+        state.cursors.set(id, after ? { ...currentCursor, afterCursor: result.afterCursor } : result);
+        more = Boolean(after && result.hasMore && result.afterCursor !== after);
+        const latest = state.messages.get(id).filter((item) => item.status === "SENT").at(-1);
+        if (latest) updateConversationPreview(latest);
+        if (id === state.activeConversationId) renderMessages({ scrollToBottom: false });
+      } while (more);
+      renderConversations();
+    } catch (error) {
+      if (state.authExpired) return;
+      if (error.status === 404) removeConversation(id);
+      toast(error.message || "消息加载失败，可重新打开会话重试", "error");
+    }
+  })();
+  syncJobs.set(id, job);
+  try { await job; } finally { syncJobs.delete(id); }
 }
 
 function renderActiveHeader(conversation) {
@@ -704,7 +783,7 @@ function renderActiveHeader(conversation) {
 }
 
 function renderMemberStack(conversation) {
-  const members = conversation.members?.length ? conversation.members : demoPeople.slice(0, Math.min(conversation.memberCount || 3, 4));
+  const members = conversation.members?.length ? conversation.members : (state.usingDemo ? demoPeople.slice(0, Math.min(conversation.memberCount || 3, 4)) : []);
   const nodes = members.slice(0, 4).map((member, index) => avatarElement(member, index));
   const remaining = Math.max((conversation.memberCount || members.length) - nodes.length, 0);
   if (remaining) {
@@ -915,6 +994,8 @@ function messageElement(message, grouped, existing) {
 }
 
 async function loadEarlierMessages() {
+  const conversationId = state.activeConversationId;
+  if (byId("loadHistoryButton").disabled || !state.cursors.get(conversationId)?.hasMore) return;
   const button = byId("loadHistoryButton");
   const scroller = byId("messageScroller");
   const beforeHeight = scroller.scrollHeight;
@@ -928,16 +1009,18 @@ async function loadEarlierMessages() {
         { id: `older-${Date.now()}-1`, senderId: 1003, senderName: "陈默", senderAvatar: "陈", palette: "avatar-blue", type: "TEXT", body: "我先把基础组件和接口类型整理出来，后面联调会快一些。", createdAt: "2026-08-30T16:20:00+08:00", status: "SENT" },
         { id: `older-${Date.now()}-2`, senderId: 1001, senderName: "林澈", senderAvatar: "林", palette: "avatar-sage", type: "TEXT", body: "好，优先保证消息流和异常状态完整。", createdAt: "2026-08-30T16:28:00+08:00", status: "SENT" }
       ];
-      state.messages.set(state.activeConversationId, [...older, ...(state.messages.get(state.activeConversationId) || [])]);
-      state.cursors.set(state.activeConversationId, { hasMore: false, beforeCursor: null });
+      state.messages.set(conversationId, [...older, ...(state.messages.get(conversationId) || [])]);
+      state.cursors.set(conversationId, { hasMore: false, beforeCursor: null });
     } else {
-      const cursor = state.cursors.get(state.activeConversationId);
-      const payload = await api.getMessages(state.activeConversationId, { before: cursor?.beforeCursor, limit: CONFIG.historyPageSize || 30 });
-      const result = normalizeMessagesResponse(payload, state.activeConversationId);
-      const current = state.messages.get(state.activeConversationId) || [];
-      state.messages.set(state.activeConversationId, mergeMessages(result.items, current));
-      state.cursors.set(state.activeConversationId, result);
+      const cursor = state.cursors.get(conversationId);
+      const payload = await api.getMessages(conversationId, { before: cursor?.beforeCursor, limit: CONFIG.historyPageSize || 30 });
+      const result = normalizeMessagesResponse(payload, conversationId);
+      if (state.authExpired || !state.conversations.some((item) => item.id === conversationId)) return;
+      const current = state.messages.get(conversationId) || [];
+      state.messages.set(conversationId, mergeMessages(current, result.items));
+      state.cursors.set(conversationId, { ...state.cursors.get(conversationId), beforeCursor: result.beforeCursor, hasMore: result.hasMore });
     }
+    if (state.activeConversationId !== conversationId || state.authExpired) return;
     renderMessages({ scrollToBottom: false });
     // 历史消息插到列表前部后按新增高度补偿滚动位置，避免直接跳到列表底部。
     scroller.scrollTop = beforeTop + scroller.scrollHeight - beforeHeight;
@@ -949,11 +1032,29 @@ async function loadEarlierMessages() {
   }
 }
 
-/** 分页合并时按消息 ID 去重；第二组覆盖同 ID 数据，最后按时间重新排序。 */
+function compareMessages(a, b) {
+  const milliseconds = parseDate(a.createdAt) - parseDate(b.createdAt);
+  if (milliseconds) return milliseconds;
+  const fraction = (value) => Number((String(value).match(/\.(\d+)/)?.[1] || "").padEnd(9, "0").slice(0, 9)) % 1000000;
+  const subMillisecond = fraction(a.createdAt) - fraction(b.createdAt);
+  if (subMillisecond) return subMillisecond;
+  if (/^\d+$/.test(a.id) && /^\d+$/.test(b.id)) return BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0;
+  return String(a.id).localeCompare(String(b.id));
+}
+
+/** 按服务端 ID 去重，并按 sender/request 回填乐观消息；不同发送者可使用相同请求 ID。 */
 function mergeMessages(first, second) {
   const result = new Map();
-  [...first, ...second].forEach((message) => result.set(String(message.id), message));
-  return [...result.values()].sort((a, b) => parseDate(a.createdAt) - parseDate(b.createdAt));
+  const requests = new Map();
+  [...first, ...second].forEach((message) => {
+    const key = message.clientRequestId ? `${message.senderId}:${message.clientRequestId}` : null;
+    const previous = key ? requests.get(key) : null;
+    if (previous?.status === "SENT" && message.status !== "SENT") return;
+    if (previous) result.delete(String(previous.id));
+    result.set(String(message.id), message);
+    if (key) requests.set(key, message);
+  });
+  return [...result.values()].sort(compareMessages);
 }
 
 function updateComposer() {
@@ -967,10 +1068,15 @@ function updateComposer() {
 
 function updateSendButton() {
   const hasContent = byId("messageInput").value.trim().length > 0 || Boolean(state.pendingFile);
-  byId("sendButton").disabled = !hasContent || !state.activeConversationId;
+  byId("sendButton").disabled = !hasContent || !state.activeConversationId
+    || (!state.usingDemo && state.socket?.readyConversationId !== state.activeConversationId);
 }
 
 async function sendCurrentMessage() {
+  if (!state.activeConversationId || (!state.usingDemo && state.socket?.readyConversationId !== state.activeConversationId)) {
+    toast("实时连接尚未就绪，请稍后发送", "error");
+    return;
+  }
   const input = byId("messageInput");
   const body = input.value.trim();
   if (!body && !state.pendingFile) return;
@@ -1042,13 +1148,19 @@ async function dispatchMessage(message) {
     return;
   }
   // 不上传页面模型里的 senderId 等身份字段，由服务端根据 Session 决定发送者。
-  const sent = state.socket?.sendMessage({
+  let sent = false;
+  try { sent = state.socket?.sendMessage({
     clientRequestId: message.clientRequestId,
     conversationId: message.conversationId,
     type: message.type,
     body: message.type === "TEXT" ? message.body : undefined,
     attachmentId: message.type === "IMAGE" ? message.attachmentId : undefined
-  });
+  }); } catch (_) { /* 关闭连接与发送竞争时按未确认处理，重试沿用请求 ID。 */ }
+  window.clearTimeout(ackTimers.get(message.clientRequestId));
+  if (sent) ackTimers.set(message.clientRequestId, window.setTimeout(() => {
+    if (message.status === "SENDING") updateMessageStatus(message.clientRequestId, "FAILED");
+    ackTimers.delete(message.clientRequestId);
+  }, CONFIG.messageAckTimeoutMs || 10000));
   if (!sent) updateMessageStatus(message.clientRequestId, "FAILED");
 }
 
@@ -1056,17 +1168,21 @@ function retryMessage(id) {
   const message = (state.messages.get(state.activeConversationId) || []).find((item) => item.id === id);
   if (!message) return;
   message.status = "SENDING";
-  // 当前重试会生成新的请求标识，ACK 按本次标识关联；这不是复用原请求的幂等重放。
-  message.clientRequestId = uuid();
+  // ACK 丢失时服务端可能已提交，重试必须复用原请求 ID。
   renderMessages();
   dispatchMessage(message);
 }
 
 function updateMessageStatus(clientRequestId, status, patch = {}) {
+  window.clearTimeout(ackTimers.get(clientRequestId));
+  ackTimers.delete(clientRequestId);
   for (const [conversationId, messages] of state.messages.entries()) {
-    const message = messages.find((item) => item.clientRequestId === clientRequestId);
+    const message = messages.find((item) => item.clientRequestId === clientRequestId && item.senderId === String(state.currentUser.id));
     if (!message) continue;
+    if (message.status === "SENT" && status !== "SENT") return;
     Object.assign(message, patch, { status });
+    state.messages.set(conversationId, mergeMessages([], messages));
+    if (status === "SENT") updateConversationPreview(message);
     if (conversationId === state.activeConversationId) renderMessages({ scrollToBottom: false });
     break;
   }
@@ -1103,10 +1219,11 @@ function handleRealtimeMessage(payload) {
   const id = message.conversationId;
   const existing = state.messages.get(id) || [];
   // 广播可能先于 ACK 到达：优先回填相同请求的占位消息，再按服务端消息 ID 去重。
-  const optimisticIndex = existing.findIndex((item) => item.clientRequestId && item.clientRequestId === message.clientRequestId);
-  if (optimisticIndex >= 0) existing[optimisticIndex] = { ...existing[optimisticIndex], ...message, status: "SENT" };
-  else if (!existing.some((item) => item.id === message.id)) existing.push(message);
-  state.messages.set(id, existing.sort((a, b) => parseDate(a.createdAt) - parseDate(b.createdAt)));
+  if (message.senderId === String(state.currentUser.id)) {
+    window.clearTimeout(ackTimers.get(message.clientRequestId));
+    ackTimers.delete(message.clientRequestId);
+  }
+  state.messages.set(id, mergeMessages(existing, [message]));
   updateConversationPreview(message);
   const conversation = state.conversations.find((item) => item.id === id);
   if (conversation && id !== state.activeConversationId) conversation.unread += 1;
@@ -1117,7 +1234,10 @@ function handleRealtimeMessage(payload) {
 function updateConversationPreview(message) {
   const conversation = state.conversations.find((item) => item.id === String(message.conversationId || state.activeConversationId));
   if (!conversation) return;
-  conversation.preview = message.type === "IMAGE" ? `${message.senderName || ""}：发送了一张图片` : `${Number(message.senderId) === Number(state.currentUser.id) ? "你" : message.senderName}：${message.body}`;
+  // 乐观消息使用浏览器时间，不能拿它阻止服务端确认或后续消息更新摘要。
+  if (message.status === "SENT" && conversation.latestMessage && compareMessages(message, conversation.latestMessage) < 0) return;
+  if (message.status === "SENT") conversation.latestMessage = message;
+  conversation.preview = message.type === "IMAGE" ? `${message.senderName || ""}：发送了一张图片` : `${String(message.senderId) === String(state.currentUser.id) ? "你" : message.senderName}：${message.body}`;
   conversation.time = formatClock(message.createdAt);
 }
 
@@ -1165,7 +1285,7 @@ function renderDetails(conversation) {
   const imageMessages = (state.messages.get(conversation.id) || []).filter((message) => message.type === "IMAGE");
   byId("detailsImageCount").textContent = String(imageMessages.length);
   byId("detailsFileCount").textContent = "0";
-  const members = conversation.members?.length ? conversation.members : demoPeople.slice(0, 4);
+  const members = conversation.members?.length ? conversation.members : (state.usingDemo ? demoPeople.slice(0, 4) : []);
   byId("detailsMembers").replaceChildren(...members.slice(0, 4).map(memberRow));
   const images = imageMessages.map((message) => message.imageUrl).filter(Boolean);
   const displayImages = images.length ? images : (state.usingDemo ? remoteImages.slice(2, 5) : []);
@@ -1190,7 +1310,7 @@ function memberRow(member, index) {
   role.textContent = member.role || "团队成员";
   info.append(name, role);
   const status = document.createElement("small");
-  status.textContent = member.online ? "在线" : "离线";
+  status.textContent = typeof member.online === "boolean" ? (member.online ? "在线" : "离线") : "";
   row.append(avatarElement(member, index), info, status);
   return row;
 }
@@ -1221,7 +1341,7 @@ function renderPeople(people) {
   const list = people.map((person, index) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `person-option${Number(person.id) === Number(selectedId) ? " selected" : ""}`;
+    button.className = `person-option${String(person.id) === String(selectedId) ? " selected" : ""}`;
     button.dataset.personId = person.id;
     const info = document.createElement("span");
     const name = document.createElement("strong");
@@ -1243,7 +1363,14 @@ function renderPeople(people) {
   byId("peopleList").replaceChildren(...list);
 }
 
+let peopleSearchVersion = 0;
+let directOpening = false;
+
 async function searchPeople(query) {
+  const version = ++peopleSearchVersion;
+  state.selectedPerson = null;
+  byId("submitDirectButton").disabled = true;
+  renderPeople([]);
   const normalized = query.trim().toLocaleLowerCase("zh-CN");
   if (state.usingDemo) {
     renderPeople(demoPeople.filter((person) => `${person.name} ${person.username} ${person.role}`.toLocaleLowerCase("zh-CN").includes(normalized)));
@@ -1251,15 +1378,17 @@ async function searchPeople(query) {
   }
   try {
     const payload = await api.searchUsers(query.trim());
+    if (state.authExpired || version !== peopleSearchVersion) return;
     const users = (Array.isArray(payload) ? payload : (payload?.items || payload?.records || payload?.users || [])).map((user) => ({
       ...user,
-      id: user.id ?? user.userId ?? user.user_id,
+      id: String(user.id ?? user.userId ?? user.user_id),
       name: user.name || user.displayName || user.username,
       avatar: user.avatar || initials(user.name || user.username),
       palette: palette[hashIndex(user.id, palette.length)]
     }));
     renderPeople(users);
   } catch (error) {
+    if (state.authExpired || version !== peopleSearchVersion) return;
     toast(error.message || "员工搜索失败", "error");
   }
 }
@@ -1298,19 +1427,20 @@ async function createRoom(name) {
 }
 
 async function createDirectConversation(person) {
-  if (!person) return;
+  if (!person || directOpening || state.authExpired) return;
+  directOpening = true;
   byId("submitDirectButton").disabled = true;
   try {
     let conversation;
     if (state.usingDemo) {
       await sleep(300);
-      conversation = state.conversations.find((item) => Number(item.peerId) === Number(person.id));
+      conversation = state.conversations.find((item) => String(item.peerId) === String(person.id));
       if (!conversation) conversation = normalizeConversation({ id: `dm-${person.id}`, type: "DIRECT_MESSAGE", name: person.name, peerId: person.id, avatar: person.avatar, palette: person.palette, memberCount: 2, onlineCount: person.online ? 1 : 0, members: [person], preview: "开始一段新对话" });
     } else {
       conversation = normalizeConversation(await api.createDirectConversation(person.id));
     }
+    if (state.authExpired) return;
     if (!state.conversations.some((item) => item.id === conversation.id)) state.conversations.unshift(conversation);
-    if (!state.messages.has(conversation.id)) state.messages.set(conversation.id, []);
     byId("directDialog").close();
     state.selectedPerson = null;
     toast(`已打开与 ${conversation.name} 的对话`);
@@ -1318,6 +1448,7 @@ async function createDirectConversation(person) {
   } catch (error) {
     toast(error.message || "私信创建失败", "error");
   } finally {
+    directOpening = false;
     byId("submitDirectButton").disabled = !state.selectedPerson;
   }
 }
@@ -1343,6 +1474,7 @@ async function dissolveActiveRoom() {
 function removeConversation(id) {
   state.conversations = state.conversations.filter((conversation) => conversation.id !== String(id));
   state.messages.delete(String(id));
+  state.cursors.delete(String(id));
   if (state.activeConversationId === String(id)) {
     state.activeConversationId = state.conversations[0]?.id || null;
     if (state.activeConversationId) activateConversation(state.activeConversationId);
@@ -1361,7 +1493,7 @@ function openDirectDialog() {
   state.selectedPerson = null;
   byId("submitDirectButton").disabled = true;
   byId("peopleSearch").value = "";
-  renderPeople(demoPeople);
+  searchPeople("");
   byId("directDialog").showModal();
   requestAnimationFrame(() => byId("peopleSearch").focus());
 }
@@ -1434,6 +1566,10 @@ function bindEvents() {
   let searchTimer;
   byId("peopleSearch").addEventListener("input", (event) => {
     window.clearTimeout(searchTimer);
+    ++peopleSearchVersion;
+    state.selectedPerson = null;
+    byId("submitDirectButton").disabled = true;
+    renderPeople([]);
     searchTimer = window.setTimeout(() => searchPeople(event.target.value), 220);
   });
   byId("dissolveRoomButton").addEventListener("click", () => {

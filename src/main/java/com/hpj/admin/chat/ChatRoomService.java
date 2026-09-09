@@ -24,13 +24,15 @@ public class ChatRoomService {
     private final ChatReadMapper reads;
     private final ChatAuditEventMapper audits;
     private final ApplicationEventPublisher events;
+    private final ChatAccessAudit accessAudit;
 
     public ChatRoomService(ChatConversationMapper conversations, ChatReadMapper reads,
-                           ChatAuditEventMapper audits, ApplicationEventPublisher events) {
+                           ChatAuditEventMapper audits, ApplicationEventPublisher events, ChatAccessAudit accessAudit) {
         this.conversations = conversations;
         this.reads = reads;
         this.audits = audits;
         this.events = events;
+        this.accessAudit = accessAudit;
     }
 
     /** 查询活动公共房间及当前用户仍参与的私聊，按最近活跃时间倒序返回。 */
@@ -95,7 +97,10 @@ public class ChatRoomService {
             throw ChatException.notFound();
         }
         if (conversation.getType() == ConversationType.DIRECT_MESSAGE
-                && reads.participantCount(conversationId, userId) == 0) throw ChatException.forbidden();
+                && reads.participantCount(conversationId, userId) == 0) {
+            accessAudit.denied(userId, conversationId);
+            throw ChatException.forbidden();
+        }
     }
 
     /** 加入调用方事务，确保业务变更失败时审计也一并回滚。 */

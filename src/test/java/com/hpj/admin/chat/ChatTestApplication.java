@@ -25,7 +25,9 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 @MapperScan("com.hpj.admin.mapper.chat")
 @Import({ChatSecurityConfiguration.class, LegacySecurityConfiguration.class, ChatWebSocketConfiguration.class,
         ChatAccounts.class, ChatRoomService.class, RoomEventPublisher.class, ChatSessionController.class,
-        ChatRoomController.class, ChatExceptionAdvice.class, ChatPageConfiguration.class, MyExceptionHandler.class})
+        ChatRoomController.class, ChatExceptionAdvice.class, ChatPageConfiguration.class, MyExceptionHandler.class,
+        ChatMessagingService.class, ChatMessagePublisher.class, ChatMessageController.class, ChatSubscriptionReceipts.class,
+        ChatDirectService.class, ChatDirectController.class, ChatAccessAudit.class, ChatAttachmentAccessConfiguration.class})
 @ImportAutoConfiguration({DataSourceAutoConfiguration.class, JdbcTemplateAutoConfiguration.class,
         DataSourceTransactionManagerAutoConfiguration.class, FlywayAutoConfiguration.class,
         MybatisPlusAutoConfiguration.class, JacksonAutoConfiguration.class,

@@ -5,6 +5,7 @@ import com.hpj.admin.chat.ChatRoomService;
 import com.hpj.admin.common.config.chat.ChatProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -13,6 +14,8 @@ import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.messaging.simp.SimpMessageType;
 import org.springframework.messaging.simp.config.*;
 import org.springframework.messaging.support.ChannelInterceptor;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.security.messaging.context.SecurityContextChannelInterceptor;
 import org.springframework.web.socket.*;
@@ -30,14 +33,16 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
     private final ChatRoomService rooms;
     private final ObjectMapper json;
     private final ChatSocketSessions sockets;
+    private final ObjectProvider<MessageChannel> outbound;
 
     public ChatWebSocketConfiguration(ChatProperties properties, ChatAccounts accounts, ChatRoomService rooms,
-                                      ObjectMapper json) {
+                                      ObjectMapper json, @Qualifier("clientOutboundChannel") ObjectProvider<MessageChannel> outbound) {
         this.properties = properties;
         this.accounts = accounts;
         this.rooms = rooms;
         this.json = json;
         this.sockets = new ChatSocketSessions(accounts);
+        this.outbound = outbound;
     }
 
     @Bean
@@ -67,6 +72,8 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
             }
         }
         registry.setErrorHandler(new ChatStompErrorHandler(json));
+        // 同一连接的退订、订阅及 SEND 按接收顺序处理；不同连接仍可并发执行。
+        registry.setPreserveReceiveOrder(true);
         registry.addEndpoint("/ws/chat").setAllowedOrigins(origins)
                 .addInterceptors(new ChatSessionHandshake(accounts));
     }
@@ -83,8 +90,22 @@ public class ChatWebSocketConfiguration implements WebSocketMessageBrokerConfigu
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
         // 先从 Session 确认并写入用户，再由安全上下文拦截器向消息处理线程传播身份。
-        registration.interceptors(new ChatInboundInterceptor(accounts, rooms, json),
-                new SecurityContextChannelInterceptor());
+        registration.interceptors(new ChannelInterceptor() {
+            private final ChatInboundInterceptor security = new ChatInboundInterceptor(accounts, rooms, json);
+
+            @Override public Message<?> preSend(Message<?> message, MessageChannel channel) {
+                try { return security.preSend(message, channel); }
+                catch (RuntimeException error) {
+                    // 按序通道会吞掉异常并记录整帧；直接回 ERROR，避免日志包含 Session 或私人正文。
+                    Message<byte[]> failure = new ChatStompErrorHandler(json).handleClientMessageProcessingError(
+                            MessageBuilder.createMessage(new byte[0], message.getHeaders()), error);
+                    StompHeaderAccessor headers = StompHeaderAccessor.wrap(failure);
+                    headers.setSessionId(SimpMessageHeaderAccessor.getSessionId(message.getHeaders()));
+                    outbound.getObject().send(MessageBuilder.createMessage(failure.getPayload(), headers.getMessageHeaders()));
+                    return null;
+                }
+            }
+        }, new SecurityContextChannelInterceptor());
     }
 
     @Override
