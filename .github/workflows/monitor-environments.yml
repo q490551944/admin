@@ -1,0 +1,37 @@
+name: Monitoring test environments
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  environment:
+    name: environment (${{ matrix.type }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        type: [mysql, redis, kafka, mongodb, elasticsearch, minio]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Verify container runtime
+        run: docker info
+      - name: Start, prepare, verify and clean two independent environments
+        run: >-
+          bash mvnw -B -Dtest=MonitoringEnvironmentIntegrationTest
+          -Dmonitor.test.type=${{ matrix.type }} test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: monitor-environment-${{ matrix.type }}
+          path: |
+            target/surefire-reports
+            target/monitor-environments
