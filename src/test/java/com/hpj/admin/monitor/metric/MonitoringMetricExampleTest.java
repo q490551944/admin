@@ -16,6 +16,10 @@ class MonitoringMetricExampleTest {
         TargetSnapshot snapshot = new ObjectMapper().findAndRegisterModules().readValue(
                 Path.of("docs/middleware-monitoring-metrics-example.json").toFile(), TargetSnapshot.class);
         assertThat(snapshot.metrics()).hasSize(4);
+        assertThat(snapshot.metrics()).extracting(StoredMetric::bindingId).containsOnly("cache-main");
+        assertThat(snapshot.metrics()).extracting(StoredMetric::source).containsOnly("redisConnectionFactory");
+        assertThat(snapshot.attempts()).extracting(Attempt::bindingId).containsOnly("cache-main");
+        assertThat(snapshot.attempts().get(1).reason()).isEqualTo(MissingReason.TIMEOUT);
         assertThat(snapshot.metrics().get(0).latestAttempt().value()).isEqualTo(BigDecimal.valueOf(200));
         assertThat(snapshot.metrics().get(1).latestAttempt().value()).isEqualTo(BigDecimal.ZERO);
         assertThat(snapshot.metrics().get(2).latestAttempt().value()).isNull();
@@ -26,6 +30,6 @@ class MonitoringMetricExampleTest {
         assertThat(capacity.lastSuccess().value()).isEqualTo(BigDecimal.valueOf(1024));
         assertThat(capacity.lastSuccess().sampledAt()).isEqualTo(Instant.parse("2026-09-10T00:00:00Z"));
         assertThat(capacity.lastSuccess().validUntil()).isEqualTo(Instant.parse("2026-09-10T00:03:00Z"));
-        assertThat(snapshot.serviceProbes().get("redisConnectionFactory").availability()).isEqualTo(ServiceAvailability.AVAILABLE);
+        assertThat(snapshot.serviceProbes().get("cache-main").availability()).isEqualTo(ServiceAvailability.AVAILABLE);
     }
 }

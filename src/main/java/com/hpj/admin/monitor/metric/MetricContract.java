@@ -105,15 +105,22 @@ public final class MetricContract {
 
     /** Complete inventory includes missing-value placeholders for every still-authorized metric series. */
     public record CollectionResult(CollectionStatus status, Instant startedAt, Instant completedAt,
-                                   List<MetricSample> metrics, ServiceProbe serviceProbe, boolean inventoryComplete) {
+                                   List<MetricSample> metrics, ServiceProbe serviceProbe, boolean inventoryComplete,
+                                   MissingReason reason) {
         /** Unspecified inventory completeness must never retire a previously known series. */
         public CollectionResult(CollectionStatus status, Instant startedAt, Instant completedAt,
                                 List<MetricSample> metrics, ServiceProbe serviceProbe) {
-            this(status, startedAt, completedAt, metrics, serviceProbe, false);
+            this(status, startedAt, completedAt, metrics, serviceProbe, false, null);
+        }
+
+        public CollectionResult(CollectionStatus status, Instant startedAt, Instant completedAt,
+                                List<MetricSample> metrics, ServiceProbe serviceProbe, boolean inventoryComplete) {
+            this(status, startedAt, completedAt, metrics, serviceProbe, inventoryComplete, null);
         }
 
         public CollectionResult {
             required(status, "collection status is required");
+            statusReason(status, reason);
             ordered(startedAt, completedAt, "collection completion must not precede its start");
             metrics = copy(metrics, "collection metrics must not be null");
             Set<SeriesKey> unique = new HashSet<>();
@@ -123,9 +130,15 @@ public final class MetricContract {
         }
     }
 
-    public record StoredMetric(String source, CollectionKind kind, MetricSample latestAttempt, MetricSample lastSuccess) {
+    public record StoredMetric(String source, String bindingId, CollectionKind kind,
+                               MetricSample latestAttempt, MetricSample lastSuccess) {
+        public StoredMetric(String source, CollectionKind kind, MetricSample latestAttempt, MetricSample lastSuccess) {
+            this(source, source, kind, latestAttempt, lastSuccess);
+        }
+
         public StoredMetric {
             reference(source, "stored metric source must be a safe reference");
+            reference(bindingId, "stored metric binding ID must be a safe reference");
             required(kind, "stored metric collection kind is required");
             required(latestAttempt, "stored metric latest attempt is required");
             if (lastSuccess != null) {
@@ -141,13 +154,25 @@ public final class MetricContract {
         }
     }
 
-    public record Attempt(String source, CollectionKind kind, long sequence, Instant startedAt,
-                          Instant completedAt, CollectionStatus status) {
+    public record Attempt(String source, String bindingId, CollectionKind kind, long sequence, Instant startedAt,
+                          Instant completedAt, CollectionStatus status, MissingReason reason) {
+        public Attempt(String source, CollectionKind kind, long sequence, Instant startedAt,
+                       Instant completedAt, CollectionStatus status) {
+            this(source, source, kind, sequence, startedAt, completedAt, status, null);
+        }
+
+        public Attempt(String source, String bindingId, CollectionKind kind, long sequence, Instant startedAt,
+                       Instant completedAt, CollectionStatus status) {
+            this(source, bindingId, kind, sequence, startedAt, completedAt, status, null);
+        }
+
         public Attempt {
             reference(source, "attempt source must be a safe reference");
+            reference(bindingId, "attempt binding ID must be a safe reference");
             required(kind, "attempt collection kind is required");
             require(sequence >= 0, "attempt sequence must not be negative");
             required(status, "attempt status is required");
+            statusReason(status, reason);
             ordered(startedAt, completedAt, "attempt completion must not precede its start");
         }
     }
@@ -159,31 +184,46 @@ public final class MetricContract {
             require(generation >= 0, "target generation must not be negative");
             attempts = copy(attempts, "snapshot attempts must not be null");
             metrics = copy(metrics, "snapshot metrics must not be null");
-            Set<SourceKind> attemptKeys = new HashSet<>();
+            Set<BindingKind> attemptKeys = new HashSet<>();
             for (Attempt attempt : attempts) {
-                require(attemptKeys.add(new SourceKind(attempt.source(), attempt.kind())),
-                        "snapshot contains a duplicate source attempt");
+                require(attemptKeys.add(new BindingKind(attempt.bindingId(), attempt.kind())),
+                        "snapshot contains a duplicate binding attempt");
             }
             Set<StoredKey> metricKeys = new HashSet<>();
             for (StoredMetric metric : metrics) {
-                require(metricKeys.add(new StoredKey(metric.source(), metric.kind(), series(metric.latestAttempt().definition()))),
+                require(metricKeys.add(new StoredKey(metric.bindingId(), metric.kind(), series(metric.latestAttempt().definition()))),
                         "snapshot contains a duplicate stored metric series");
             }
             required(serviceProbes, "snapshot service probes must not be null");
             Map<String, ServiceProbe> probes = new LinkedHashMap<>();
-            serviceProbes.forEach((source, probe) -> {
-                reference(source, "service probe source must be a safe reference");
+            serviceProbes.forEach((bindingId, probe) -> {
+                reference(bindingId, "service probe binding ID must be a safe reference");
                 required(probe, "service probe must not be null");
-                probes.put(source, probe);
+                probes.put(bindingId, probe);
             });
             serviceProbes = Collections.unmodifiableMap(probes);
         }
     }
 
     private record SeriesKey(String key, Scope scope) { }
-    private record SourceKind(String source, CollectionKind kind) { }
-    private record StoredKey(String source, CollectionKind kind, SeriesKey series) { }
+    private record BindingKind(String bindingId, CollectionKind kind) { }
+    private record StoredKey(String bindingId, CollectionKind kind, SeriesKey series) { }
     private static SeriesKey series(Definition definition) { return new SeriesKey(definition.key(), definition.scope()); }
+
+    /** A result-level reason also describes failures before any metric series has been discovered. */
+    private static void statusReason(CollectionStatus status, MissingReason reason) {
+        if (reason == null) return;
+        boolean valid = switch (status) {
+            case SUCCESS -> false;
+            case PARTIAL, STALE -> true;
+            case UNAUTHORIZED -> reason == MissingReason.UNAUTHORIZED;
+            case UNSUPPORTED -> reason == MissingReason.UNSUPPORTED || reason == MissingReason.NOT_APPLICABLE;
+            case BUSY -> reason == MissingReason.BUSY;
+            case WAITING -> reason == MissingReason.WAITING_SAMPLE || reason == MissingReason.NO_REQUESTS;
+            case FAILED -> reason == MissingReason.FAILED || reason == MissingReason.TIMEOUT || reason == MissingReason.INVALID_VALUE;
+        };
+        require(valid, "collection status and reason must agree");
+    }
 
     private static Object scalar(Object value) {
         if (value instanceof String || value instanceof Boolean || value.getClass() == BigDecimal.class) return value;
