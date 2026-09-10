@@ -270,6 +270,70 @@ class MonitoringMetricContractTest {
     }
 
     @Test
+    void previousConstructorsDefaultBindingToSourceAndLeaveCollectionReasonUnspecified() {
+        var sample = MetricSample.success(definition("memory", Unit.BYTES, PROCESS), 1, NOW, TTL);
+        StoredMetric stored = new StoredMetric("factory", CollectionKind.ORDINARY, sample, sample);
+        Attempt attempt = new Attempt("factory", CollectionKind.ORDINARY, 1, NOW, NOW, CollectionStatus.FAILED);
+        assertThat(stored.bindingId()).isEqualTo("factory");
+        assertThat(attempt.bindingId()).isEqualTo("factory");
+        assertThat(attempt.reason()).isNull();
+        assertThat(new CollectionResult(CollectionStatus.FAILED, NOW, NOW, List.of(), null).reason()).isNull();
+        assertThat(new CollectionResult(CollectionStatus.FAILED, NOW, NOW, List.of(), null, true).reason()).isNull();
+    }
+
+    @ParameterizedTest
+    @EnumSource(MissingReason.class)
+    void partialCollectionCanRetainAnySpecificMissingReasonWithoutFabricatingMetrics(MissingReason reason) {
+        CollectionResult result = new CollectionResult(CollectionStatus.PARTIAL, NOW, NOW, List.of(), null, false, reason);
+        Attempt attempt = new Attempt("factory", "orders-binding", CollectionKind.ORDINARY, 1, NOW, NOW,
+                CollectionStatus.PARTIAL, reason);
+        assertThat(result.reason()).isEqualTo(reason);
+        assertThat(attempt.reason()).isEqualTo(reason);
+        assertThat(result.metrics()).isEmpty();
+    }
+
+    @Test
+    void collectionLevelReasonsAgreeWithTerminalStatusWithoutConflatingTimeoutWithConnectionHealth() {
+        var reasons = Map.of(CollectionStatus.FAILED, MissingReason.TIMEOUT,
+                CollectionStatus.BUSY, MissingReason.BUSY, CollectionStatus.UNAUTHORIZED, MissingReason.UNAUTHORIZED,
+                CollectionStatus.UNSUPPORTED, MissingReason.UNSUPPORTED, CollectionStatus.WAITING, MissingReason.WAITING_SAMPLE);
+        reasons.forEach((status, reason) -> {
+            assertThat(new CollectionResult(status, NOW, NOW, List.of(), null, false, reason).reason()).isEqualTo(reason);
+            assertThat(new Attempt("factory", "orders-binding", CollectionKind.ORDINARY, 1, NOW, NOW, status, reason).reason())
+                    .isEqualTo(reason);
+        });
+        assertThatThrownBy(() -> new CollectionResult(CollectionStatus.SUCCESS, NOW, NOW, List.of(), null, false, MissingReason.TIMEOUT))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new CollectionResult(CollectionStatus.UNAUTHORIZED, NOW, NOW, List.of(), null, false, MissingReason.FAILED))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new Attempt("factory", "orders-binding", CollectionKind.ORDINARY, 1, NOW, NOW,
+                CollectionStatus.BUSY, MissingReason.UNSUPPORTED)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void snapshotUniquenessUsesBindingRatherThanTheBorrowedBeanName() {
+        var sample = MetricSample.success(definition("memory", Unit.BYTES, PROCESS), 1, NOW, TTL);
+        var orders = new StoredMetric("factory", "orders-binding", CollectionKind.ORDINARY, sample, sample);
+        var billing = new StoredMetric("factory", "billing-binding", CollectionKind.ORDINARY, sample, sample);
+        var ordersAttempt = new Attempt("factory", "orders-binding", CollectionKind.ORDINARY, 1, NOW, NOW, CollectionStatus.SUCCESS);
+        var billingAttempt = new Attempt("factory", "billing-binding", CollectionKind.ORDINARY, 1, NOW, NOW, CollectionStatus.SUCCESS);
+        assertThat(new TargetSnapshot("cache", 1, List.of(ordersAttempt, billingAttempt), List.of(orders, billing), Map.of()).metrics())
+                .hasSize(2);
+        // A renamed source cannot make a duplicate entry in the same binding valid.
+        var duplicateMetric = new StoredMetric("otherFactory", "orders-binding", CollectionKind.ORDINARY, sample, sample);
+        var duplicateAttempt = new Attempt("otherFactory", "orders-binding", CollectionKind.ORDINARY, 1, NOW, NOW, CollectionStatus.SUCCESS);
+        assertThatThrownBy(() -> new TargetSnapshot("cache", 1, List.of(ordersAttempt, duplicateAttempt), List.of(), Map.of()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new TargetSnapshot("cache", 1, List.of(), List.of(orders, duplicateMetric), Map.of()))
+                .isInstanceOf(IllegalArgumentException.class);
+        String unsafe = "redis://private-user:private-password@host";
+        assertThatThrownBy(() -> new StoredMetric("factory", unsafe, CollectionKind.ORDINARY, sample, sample))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageNotContaining("private-password");
+        assertThatThrownBy(() -> new Attempt("factory", unsafe, CollectionKind.ORDINARY, 1, NOW, NOW, CollectionStatus.SUCCESS))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageNotContaining("private-password");
+    }
+
+    @Test
     void targetSnapshotKeepsSeparateSourcesAndCollectionKindsButRejectsDuplicatesWithinOneLane() {
         var sample = MetricSample.success(definition("memory", Unit.BYTES, PROCESS), 1, NOW, TTL);
         var ordinary = new StoredMetric("cacheA", CollectionKind.ORDINARY, sample, sample);

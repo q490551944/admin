@@ -8,9 +8,12 @@ import com.hpj.admin.monitor.metric.MonitoringAdapter;
 import com.hpj.admin.monitor.metric.MonitoringAdapterRegistry;
 import com.hpj.admin.monitor.metric.MonitoringCounterStore;
 import com.hpj.admin.monitor.metric.MonitoringSnapshotStore;
+import com.hpj.admin.monitor.scheduling.MonitoringScheduler;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.ApplicationListener;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -44,5 +47,17 @@ public class MonitoringConfiguration {
     @Bean
     MonitoringCounterStore monitoringCounterStore(MonitoringProperties properties) {
         return new MonitoringCounterStore(properties.getMaxTargets(), 5000);
+    }
+
+    @Bean(destroyMethod = "close")
+    MonitoringScheduler monitoringScheduler(MonitoringProperties properties, MonitoringConnectionResolver resolver,
+                                             MonitoringAdapterRegistry adapters, MonitoringSnapshotStore snapshots,
+                                             MonitoringCounterStore counters) {
+        return new MonitoringScheduler(properties, resolver::resolve, adapters, snapshots, counters);
+    }
+
+    @Bean
+    ApplicationListener<ApplicationReadyEvent> startMonitoringAfterReadiness(MonitoringScheduler scheduler) {
+        return event -> scheduler.start();
     }
 }

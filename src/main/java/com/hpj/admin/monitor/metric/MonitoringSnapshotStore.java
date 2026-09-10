@@ -17,16 +17,16 @@ public final class MonitoringSnapshotStore {
 
     private final int maxTargets;
     private final int maxMetricsPerTarget;
-    private final int maxSourcesPerTarget;
+    private final int maxBindingsPerTarget;
     private final Map<String, State> targets = new LinkedHashMap<>();
 
-    public MonitoringSnapshotStore(int maxTargets, int maxMetricsPerTarget, int maxSourcesPerTarget) {
-        if (maxTargets < 1 || maxMetricsPerTarget < 1 || maxSourcesPerTarget < 1) {
+    public MonitoringSnapshotStore(int maxTargets, int maxMetricsPerTarget, int maxBindingsPerTarget) {
+        if (maxTargets < 1 || maxMetricsPerTarget < 1 || maxBindingsPerTarget < 1) {
             throw new IllegalArgumentException("Snapshot limits must be positive");
         }
         this.maxTargets = maxTargets;
         this.maxMetricsPerTarget = maxMetricsPerTarget;
-        this.maxSourcesPerTarget = maxSourcesPerTarget;
+        this.maxBindingsPerTarget = maxBindingsPerTarget;
     }
 
     /** The scheduler owns monotonically increasing generations, including when a removed target is re-added. */
@@ -50,8 +50,8 @@ public final class MonitoringSnapshotStore {
         if (request == null || result == null) throw new IllegalArgumentException("Collection input is required");
         State state = targets.get(request.targetId());
         if (state == null || state.generation != request.generation()) return Acceptance.INACTIVE_GENERATION;
-        SourceKey sourceKey = new SourceKey(request.source(), request.kind());
-        Attempt previousAttempt = state.attempts.get(sourceKey);
+        BindingKey bindingKey = new BindingKey(request.bindingId(), request.kind());
+        Attempt previousAttempt = state.attempts.get(bindingKey);
         if (previousAttempt != null && request.sequence() <= previousAttempt.sequence()) return Acceptance.OUT_OF_ORDER;
         if (previousAttempt != null && result.completedAt().isBefore(previousAttempt.completedAt())) return Acceptance.OUT_OF_ORDER;
         if (result.completedAt().isAfter(request.deadline())) return Acceptance.DEADLINE_EXCEEDED;
@@ -60,37 +60,37 @@ public final class MonitoringSnapshotStore {
                 || metric.sampledAt().isAfter(result.completedAt()))
                 || result.serviceProbe() != null && (result.serviceProbe().sampledAt().isBefore(result.startedAt())
                 || result.serviceProbe().sampledAt().isAfter(result.completedAt()))) return Acceptance.INVALID_TIMING;
-        boolean knownSource = state.attempts.keySet().stream().anyMatch(key -> key.source.equals(request.source()));
-        if (!knownSource && state.attempts.keySet().stream().map(SourceKey::source).distinct().count() >= maxSourcesPerTarget) {
+        boolean knownBinding = state.attempts.keySet().stream().anyMatch(key -> key.bindingId.equals(request.bindingId()));
+        if (!knownBinding && state.attempts.keySet().stream().map(BindingKey::bindingId).distinct().count() >= maxBindingsPerTarget) {
             return Acceptance.CAPACITY_EXCEEDED;
         }
 
         Map<MetricKey, StoredMetric> updates = new LinkedHashMap<>();
         for (MetricSample sample : result.metrics()) {
-            MetricKey key = new MetricKey(request.source(), request.kind(), sample.definition().key(), sample.definition().scope());
+            MetricKey key = new MetricKey(request.bindingId(), request.kind(), sample.definition().key(), sample.definition().scope());
             StoredMetric previous = state.metrics.get(key);
             if (previous != null && sample.sampledAt().isBefore(previous.latestAttempt().sampledAt())) return Acceptance.OUT_OF_ORDER;
             // A changed definition must not attach a value with an old unit/source to new metadata.
             MetricSample lastSuccess = previous != null && previous.latestAttempt().definition().equals(sample.definition())
                     ? previous.lastSuccess() : null;
             if (sample.missingReason() == null) lastSuccess = sample;
-            updates.put(key, new StoredMetric(request.source(), request.kind(), sample, lastSuccess));
+            updates.put(key, new StoredMetric(request.source(), request.bindingId(), request.kind(), sample, lastSuccess));
         }
         long additions = updates.keySet().stream().filter(key -> !state.metrics.containsKey(key)).count();
         // Only authoritative discovery can retire absent objects. Failed/partial inventory must retain old evidence.
         List<MetricKey> retired = result.inventoryComplete() ? state.metrics.keySet().stream()
-                .filter(key -> key.source.equals(request.source()) && key.kind == request.kind() && !updates.containsKey(key)).toList()
+                .filter(key -> key.bindingId.equals(request.bindingId()) && key.kind == request.kind() && !updates.containsKey(key)).toList()
                 : List.of();
         if (state.metrics.size() - retired.size() + additions > maxMetricsPerTarget) return Acceptance.CAPACITY_EXCEEDED;
 
-        state.attempts.put(sourceKey, new Attempt(request.source(), request.kind(), request.sequence(),
-                result.startedAt(), result.completedAt(), result.status()));
+        state.attempts.put(bindingKey, new Attempt(request.source(), request.bindingId(), request.kind(), request.sequence(),
+                result.startedAt(), result.completedAt(), result.status(), result.reason()));
         retired.forEach(state.metrics::remove);
         state.metrics.putAll(updates);
         ServiceProbe probe = result.serviceProbe();
-        ServiceProbe previousProbe = state.probes.get(request.source());
+        ServiceProbe previousProbe = state.probes.get(request.bindingId());
         if (probe != null && (previousProbe == null || !probe.sampledAt().isBefore(previousProbe.sampledAt()))) {
-            state.probes.put(request.source(), probe);
+            state.probes.put(request.bindingId(), probe);
         }
         return Acceptance.ACCEPTED;
     }
@@ -111,9 +111,9 @@ public final class MonitoringSnapshotStore {
 
     private static TargetSnapshot snapshot(String targetId, State state) {
         List<Attempt> attempts = state.attempts.values().stream()
-                .sorted(Comparator.comparing(Attempt::source).thenComparing(Attempt::kind)).toList();
+                .sorted(Comparator.comparing(Attempt::bindingId).thenComparing(Attempt::kind)).toList();
         List<StoredMetric> metrics = new ArrayList<>(state.metrics.values());
-        metrics.sort(Comparator.comparing(StoredMetric::source).thenComparing(StoredMetric::kind)
+        metrics.sort(Comparator.comparing(StoredMetric::bindingId).thenComparing(StoredMetric::kind)
                 .thenComparing(metric -> metric.latestAttempt().definition().key())
                 .thenComparing(metric -> metric.latestAttempt().definition().scope().kind())
                 .thenComparing(metric -> metric.latestAttempt().definition().scope().id())
@@ -123,12 +123,12 @@ public final class MonitoringSnapshotStore {
         return new TargetSnapshot(targetId, state.generation, attempts, metrics, probes);
     }
 
-    private record SourceKey(String source, CollectionKind kind) { }
-    private record MetricKey(String source, CollectionKind kind, String key, Scope scope) { }
+    private record BindingKey(String bindingId, CollectionKind kind) { }
+    private record MetricKey(String bindingId, CollectionKind kind, String key, Scope scope) { }
 
     private static final class State {
         private final long generation;
-        private final Map<SourceKey, Attempt> attempts = new LinkedHashMap<>();
+        private final Map<BindingKey, Attempt> attempts = new LinkedHashMap<>();
         private final Map<MetricKey, StoredMetric> metrics = new LinkedHashMap<>();
         private final Map<String, ServiceProbe> probes = new LinkedHashMap<>();
         private State(long generation) { this.generation = generation; }

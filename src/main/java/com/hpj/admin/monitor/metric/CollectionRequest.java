@@ -18,6 +18,7 @@ import java.util.Map;
 public record CollectionRequest(
         @JsonIgnore String targetId,
         @JsonIgnore String source,
+        @JsonIgnore String bindingId,
         @JsonIgnore MetricContract.CollectionKind kind,
         @JsonIgnore long generation,
         @JsonIgnore long sequence,
@@ -25,11 +26,27 @@ public record CollectionRequest(
         @JsonIgnore Instant deadline,
         @JsonIgnore MonitoringTarget.Scope scope,
         @JsonIgnore Object client,
-        @JsonIgnore Map<String, Object> settings) {
+        @JsonIgnore Map<String, Object> settings,
+        @JsonIgnore CollectionControl control) {
+
+    public CollectionRequest(String targetId, String source, MetricContract.CollectionKind kind,
+                             long generation, long sequence, Instant scheduledAt, Instant deadline,
+                             MonitoringTarget.Scope scope, Object client, Map<String, Object> settings) {
+        this(targetId, source, source, kind, generation, sequence, scheduledAt, deadline, scope, client, settings,
+                detached(deadline));
+    }
+
+    public CollectionRequest(String targetId, String source, String bindingId, MetricContract.CollectionKind kind,
+                             long generation, long sequence, Instant scheduledAt, Instant deadline,
+                             MonitoringTarget.Scope scope, Object client, Map<String, Object> settings) {
+        this(targetId, source, bindingId, kind, generation, sequence, scheduledAt, deadline, scope, client, settings,
+                detached(deadline));
+    }
 
     public CollectionRequest {
         require(MonitoringProperties.safeReference(targetId), "target ID must be a safe reference");
         require(MonitoringProperties.safeReference(source), "source must be a safe reference");
+        require(MonitoringProperties.safeReference(bindingId), "binding ID must be a safe reference");
         require(kind != null, "collection kind is required");
         require(generation >= 0 && sequence >= 0, "generation and sequence must be nonnegative");
         require(scheduledAt != null && deadline != null, "collection timestamps are required");
@@ -37,13 +54,19 @@ public record CollectionRequest(
         require(scope != null, "source scope is required");
         require(client != null, "borrowed client is required");
         require(settings != null, "source settings are required");
+        require(control != null, "collection control is required");
         // Map.copyOf rejects legitimate null option values. Preserve them and retain opaque credential/TLS references.
         settings = Collections.unmodifiableMap(new LinkedHashMap<>(settings));
     }
 
     @Override
     public String toString() {
-        return "CollectionRequest[" + targetId + ", " + source + ", " + kind + ", sequence=" + sequence + "]";
+        return "CollectionRequest[" + targetId + ", " + source + ", " + bindingId + ", " + kind + ", sequence=" + sequence + "]";
+    }
+
+    private static CollectionControl detached(Instant deadline) {
+        require(deadline != null, "collection timestamps are required");
+        return CollectionControl.detached(deadline);
     }
 
     private static void require(boolean condition, String message) {

@@ -22,6 +22,8 @@ import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class MonitoringAdapterRegistryTest {
     private static final Instant SCHEDULED = Instant.parse("2026-09-10T12:00:00Z");
@@ -148,6 +150,8 @@ class MonitoringAdapterRegistryTest {
         assertThat(zero.deadline()).isEqualTo(SCHEDULED.plusNanos(1));
         assertThat(maximum.generation()).isEqualTo(Long.MAX_VALUE);
         assertThat(maximum.sequence()).isEqualTo(Long.MAX_VALUE);
+        assertThat(zero.bindingId()).isEqualTo(zero.source());
+        assertThat(zero.control()).isNotNull();
     }
 
     @ParameterizedTest(name = "{0}")
@@ -187,7 +191,13 @@ class MonitoringAdapterRegistryTest {
                 invalid("missing settings", () -> request("primary", "source", 0, 0,
                         SCHEDULED, SCHEDULED.plusSeconds(1), SCOPE, CLIENT, null)),
                 invalid("missing collection kind", () -> new CollectionRequest("primary", "source", null, 0, 0,
-                        SCHEDULED, SCHEDULED.plusSeconds(1), SCOPE, CLIENT, Map.of()))
+                        SCHEDULED, SCHEDULED.plusSeconds(1), SCOPE, CLIENT, Map.of())),
+                invalid("unsafe binding", () -> new CollectionRequest("primary", "source", "redis://private-user:private-password@host",
+                        MetricContract.CollectionKind.ORDINARY, 0, 0, SCHEDULED, SCHEDULED.plusSeconds(1), SCOPE, CLIENT, Map.of())),
+                invalid("missing binding", () -> new CollectionRequest("primary", "source", null,
+                        MetricContract.CollectionKind.ORDINARY, 0, 0, SCHEDULED, SCHEDULED.plusSeconds(1), SCOPE, CLIENT, Map.of())),
+                invalid("missing control", () -> new CollectionRequest("primary", "source", "binding",
+                        MetricContract.CollectionKind.ORDINARY, 0, 0, SCHEDULED, SCHEDULED.plusSeconds(1), SCOPE, CLIENT, Map.of(), null))
         );
     }
 
@@ -201,6 +211,22 @@ class MonitoringAdapterRegistryTest {
         ObjectMapper mapper = new ObjectMapper().disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
         assertThat(mapper.writeValueAsString(request)).isEqualTo("{}");
         assertThat(mapper.writeValueAsString(new Envelope("ready", request))).isEqualTo("{\"status\":\"ready\"}");
+    }
+
+    @Test
+    void explicitBindingAndServerOnlyControlDoNotEnterAnyJsonOrDiagnosticRepresentation() throws Exception {
+        CollectionControl control = mock(CollectionControl.class);
+        CollectionRequest request = new CollectionRequest("primary", "dataSource", "orders-binding",
+                MetricContract.CollectionKind.ORDINARY, 4, 7, SCHEDULED, SCHEDULED.plusSeconds(5), SCOPE, CLIENT,
+                Map.of("password", "private-password"), control);
+        assertThat(request.bindingId()).isEqualTo("orders-binding");
+        assertThat(request.source()).isEqualTo("dataSource");
+        assertThat(request.control()).isSameAs(control);
+        assertThat(request.toString()).contains("orders-binding").doesNotContain("control", "private-password");
+        ObjectMapper mapper = new ObjectMapper().disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
+        assertThat(mapper.writeValueAsString(request)).isEqualTo("{}");
+        assertThat(mapper.writeValueAsString(new Envelope("ready", request))).isEqualTo("{\"status\":\"ready\"}");
+        verifyNoInteractions(control);
     }
 
     private static CollectionRequest request(String id, String source, long generation, long sequence,

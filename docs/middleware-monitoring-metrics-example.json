@@ -4,24 +4,29 @@
   "attempts": [
     {
       "source": "redisConnectionFactory",
+      "bindingId": "cache-main",
       "kind": "ORDINARY",
       "sequence": 2,
       "startedAt": "2026-09-10T00:00:15Z",
       "completedAt": "2026-09-10T00:00:15Z",
-      "status": "PARTIAL"
+      "status": "PARTIAL",
+      "reason": "NOT_APPLICABLE"
     },
     {
       "source": "redisConnectionFactory",
+      "bindingId": "cache-main",
       "kind": "CAPACITY",
       "sequence": 1,
       "startedAt": "2026-09-10T00:00:55Z",
       "completedAt": "2026-09-10T00:01:00Z",
-      "status": "FAILED"
+      "status": "FAILED",
+      "reason": "TIMEOUT"
     }
   ],
   "metrics": [
     {
       "source": "redisConnectionFactory",
+      "bindingId": "cache-main",
       "kind": "ORDINARY",
       "latestAttempt": {
         "definition": {
@@ -64,6 +69,7 @@
     },
     {
       "source": "redisConnectionFactory",
+      "bindingId": "cache-main",
       "kind": "ORDINARY",
       "latestAttempt": {
         "definition": {
@@ -106,6 +112,7 @@
     },
     {
       "source": "redisConnectionFactory",
+      "bindingId": "cache-main",
       "kind": "ORDINARY",
       "latestAttempt": {
         "definition": {
@@ -130,6 +137,7 @@
     },
     {
       "source": "redisConnectionFactory",
+      "bindingId": "cache-main",
       "kind": "CAPACITY",
       "latestAttempt": {
         "definition": {
@@ -172,7 +180,7 @@
     }
   ],
   "serviceProbes": {
-    "redisConnectionFactory": {
+    "cache-main": {
       "availability": "AVAILABLE",
       "reason": null,
       "scope": {

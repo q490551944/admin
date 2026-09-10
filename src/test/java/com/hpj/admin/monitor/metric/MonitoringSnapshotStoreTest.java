@@ -73,6 +73,90 @@ class MonitoringSnapshotStoreTest {
     }
 
     @Test
+    void sameBeanBindingsKeepIndependentSequencesInventoryAndPermissionProbes() {
+        store.activate("cache", 1);
+        MonitoringTarget.Scope orders = new MonitoringTarget.Scope(List.of("orders"), List.of(), List.of(), List.of(), List.of());
+        MonitoringTarget.Scope billing = new MonitoringTarget.Scope(List.of("billing"), List.of(), List.of(), List.of(), List.of());
+        Definition sharedProcess = definition("memory.bytes", Unit.BYTES);
+        ServiceProbe available = new ServiceProbe(ServiceAvailability.AVAILABLE, null, PROCESS, at(0), at(45));
+        ServiceProbe unauthorized = new ServiceProbe(ServiceAvailability.UNKNOWN, MissingReason.UNAUTHORIZED, PROCESS, at(0), at(45));
+        Object sharedClient = new Object();
+        CollectionRequest first = new CollectionRequest("cache", "factory", "orders-binding", CollectionKind.ORDINARY,
+                1, 0, at(0), at(5), orders, sharedClient, Map.of());
+        CollectionRequest second = new CollectionRequest("cache", "factory", "billing-binding", CollectionKind.ORDINARY,
+                1, 0, at(0), at(5), billing, sharedClient, Map.of());
+        assertThat(first.scope().databases()).containsExactly("orders");
+        assertThat(second.scope().databases()).containsExactly("billing");
+        assertThat(store.accept(first, new CollectionResult(CollectionStatus.SUCCESS, at(0), at(0),
+                List.of(MetricSample.success(sharedProcess, 10, at(0), Duration.ofSeconds(45))), available, true)))
+                .isEqualTo(ACCEPTED);
+        assertThat(store.accept(second, new CollectionResult(CollectionStatus.UNAUTHORIZED, at(0), at(0),
+                List.of(MetricSample.missing(sharedProcess, MissingReason.UNAUTHORIZED, at(0))), unauthorized,
+                true, MissingReason.UNAUTHORIZED))).isEqualTo(ACCEPTED);
+        TargetSnapshot initial = store.snapshot("cache").orElseThrow();
+        assertThat(initial.attempts()).extracting(Attempt::bindingId).containsExactly("billing-binding", "orders-binding");
+        assertThat(initial.attempts()).extracting(Attempt::source).containsOnly("factory");
+        assertThat(initial.metrics()).hasSize(2).extracting(StoredMetric::bindingId)
+                .containsExactly("billing-binding", "orders-binding");
+        assertThat(initial.serviceProbes()).containsOnlyKeys("orders-binding", "billing-binding")
+                .containsEntry("orders-binding", available).containsEntry("billing-binding", unauthorized);
+
+        // A complete empty orders inventory must not retire billing, even though both use the same bean and series.
+        CollectionRequest retired = new CollectionRequest("cache", "factory", "orders-binding", CollectionKind.ORDINARY,
+                1, 2, at(15), at(20), orders, sharedClient, Map.of());
+        assertThat(store.accept(retired, new CollectionResult(CollectionStatus.SUCCESS, at(15), at(15),
+                List.of(), null, true))).isEqualTo(ACCEPTED);
+        TargetSnapshot afterRetirement = store.snapshot("cache").orElseThrow();
+        assertThat(afterRetirement.metrics()).singleElement().satisfies(metric -> {
+            assertThat(metric.bindingId()).isEqualTo("billing-binding");
+            assertThat(metric.lastSuccess()).isNull();
+        });
+        assertThat(afterRetirement.serviceProbes()).containsEntry("billing-binding", unauthorized);
+
+        // Billing sequence 1 is independent of the accepted orders sequence 2.
+        CollectionRequest nextBilling = new CollectionRequest("cache", "factory", "billing-binding", CollectionKind.ORDINARY,
+                1, 1, at(15), at(20), billing, sharedClient, Map.of());
+        assertThat(store.accept(nextBilling, result(15, CollectionStatus.SUCCESS, List.of(
+                MetricSample.success(sharedProcess, 20, at(15), Duration.ofSeconds(45))), null))).isEqualTo(ACCEPTED);
+        assertThat(store.snapshot("cache").orElseThrow().metrics()).singleElement()
+                .satisfies(metric -> assertThat(metric.lastSuccess().value()).isEqualTo(BigDecimal.valueOf(20)));
+    }
+
+    @Test
+    void bindingBudgetStillAppliesWhenEveryBindingBorrowsTheSameBean() {
+        MonitoringSnapshotStore bounded = new MonitoringSnapshotStore(1, 4, 1);
+        bounded.activate("cache", 1);
+        CollectionRequest first = new CollectionRequest("cache", "factory", "orders-binding", CollectionKind.ORDINARY,
+                1, 0, at(0), at(5), ALLOWED, new Object(), Map.of());
+        CollectionRequest second = new CollectionRequest("cache", "factory", "billing-binding", CollectionKind.ORDINARY,
+                1, 0, at(0), at(5), ALLOWED, first.client(), Map.of());
+        assertThat(bounded.accept(first, result(0, CollectionStatus.WAITING, List.of(), null))).isEqualTo(ACCEPTED);
+        TargetSnapshot before = bounded.snapshot("cache").orElseThrow();
+        assertThat(bounded.accept(second, result(0, CollectionStatus.WAITING, List.of(), null))).isEqualTo(CAPACITY_EXCEEDED);
+        assertThat(bounded.snapshot("cache").orElseThrow()).isEqualTo(before);
+    }
+
+    @Test
+    void firstTimeoutAndBusyAttemptsNeedNoInventedMetricOrConnectionFailure() {
+        store.activate("cache", 1);
+        assertThat(store.accept(request("cache", "factory", CollectionKind.ORDINARY, 1, 0, 0),
+                new CollectionResult(CollectionStatus.FAILED, at(0), at(5), List.of(), null, false, MissingReason.TIMEOUT)))
+                .isEqualTo(ACCEPTED);
+        TargetSnapshot timedOut = store.snapshot("cache").orElseThrow();
+        assertThat(timedOut.metrics()).isEmpty();
+        assertThat(timedOut.serviceProbes()).isEmpty();
+        assertThat(timedOut.attempts()).singleElement().satisfies(attempt -> {
+            assertThat(attempt.reason()).isEqualTo(MissingReason.TIMEOUT);
+            assertThat(attempt.bindingId()).isEqualTo("factory");
+        });
+        assertThat(store.accept(request("cache", "factory", CollectionKind.ORDINARY, 1, 1, 15),
+                new CollectionResult(CollectionStatus.BUSY, at(15), at(15), List.of(), null, false, MissingReason.BUSY)))
+                .isEqualTo(ACCEPTED);
+        assertThat(store.snapshot("cache").orElseThrow().attempts()).singleElement()
+                .satisfies(attempt -> assertThat(attempt.reason()).isEqualTo(MissingReason.BUSY));
+    }
+
+    @Test
     void retiredLateAndOutOfOrderResultsCannotRecreateOrOverwriteCurrentState() {
         store.activate("cache", 1);
         CollectionRequest original = request("cache", "factory", CollectionKind.ORDINARY, 1, 3, 10);
