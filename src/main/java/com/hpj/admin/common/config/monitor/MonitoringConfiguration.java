@@ -4,6 +4,11 @@ import com.hpj.admin.monitor.MonitoringCatalog;
 import com.hpj.admin.monitor.connection.MonitoringConnectionResolver;
 import com.hpj.admin.monitor.connection.RedisConnectionInspector;
 import com.hpj.admin.monitor.connection.StandardConnectionInspector;
+import com.hpj.admin.monitor.metric.MonitoringAdapter;
+import com.hpj.admin.monitor.metric.MonitoringAdapterRegistry;
+import com.hpj.admin.monitor.metric.MonitoringCounterStore;
+import com.hpj.admin.monitor.metric.MonitoringSnapshotStore;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -24,5 +29,20 @@ public class MonitoringConfiguration {
                                                               ConfigurableListableBeanFactory beanFactory) {
         return new MonitoringConnectionResolver(properties, beanFactory,
                 List.of(new RedisConnectionInspector(), new StandardConnectionInspector()));
+    }
+
+    @Bean
+    MonitoringAdapterRegistry monitoringAdapterRegistry(ObjectProvider<MonitoringAdapter> adapters) {
+        return new MonitoringAdapterRegistry(adapters.orderedStream().toList());
+    }
+
+    @Bean
+    MonitoringSnapshotStore monitoringSnapshotStore(MonitoringProperties properties) {
+        return new MonitoringSnapshotStore(properties.getMaxTargets(), 5000, properties.getMaxTargets());
+    }
+
+    @Bean
+    MonitoringCounterStore monitoringCounterStore(MonitoringProperties properties) {
+        return new MonitoringCounterStore(properties.getMaxTargets(), 5000);
     }
 }
