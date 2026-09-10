@@ -1,0 +1,187 @@
+{
+  "targetId": "cache-main",
+  "generation": 7,
+  "attempts": [
+    {
+      "source": "redisConnectionFactory",
+      "kind": "ORDINARY",
+      "sequence": 2,
+      "startedAt": "2026-09-10T00:00:15Z",
+      "completedAt": "2026-09-10T00:00:15Z",
+      "status": "PARTIAL"
+    },
+    {
+      "source": "redisConnectionFactory",
+      "kind": "CAPACITY",
+      "sequence": 1,
+      "startedAt": "2026-09-10T00:00:55Z",
+      "completedAt": "2026-09-10T00:01:00Z",
+      "status": "FAILED"
+    }
+  ],
+  "metrics": [
+    {
+      "source": "redisConnectionFactory",
+      "kind": "ORDINARY",
+      "latestAttempt": {
+        "definition": {
+          "key": "redis.cpu.single_core_percent",
+          "label": "进程 CPU（单核基准）",
+          "unit": "PERCENT",
+          "scope": {
+            "kind": "PROCESS",
+            "id": "redis-main",
+            "nodeId": null
+          },
+          "source": "INFO cpu",
+          "calculation": "进程 user/system 秒数增量之和 / 实际秒数 × 100"
+        },
+        "value": 200,
+        "missingReason": null,
+        "sampledAt": "2026-09-10T00:00:15Z",
+        "lastSuccessAt": "2026-09-10T00:00:15Z",
+        "validUntil": "2026-09-10T00:01:00Z"
+      },
+      "lastSuccess": {
+        "definition": {
+          "key": "redis.cpu.single_core_percent",
+          "label": "进程 CPU（单核基准）",
+          "unit": "PERCENT",
+          "scope": {
+            "kind": "PROCESS",
+            "id": "redis-main",
+            "nodeId": null
+          },
+          "source": "INFO cpu",
+          "calculation": "进程 user/system 秒数增量之和 / 实际秒数 × 100"
+        },
+        "value": 200,
+        "missingReason": null,
+        "sampledAt": "2026-09-10T00:00:15Z",
+        "lastSuccessAt": "2026-09-10T00:00:15Z",
+        "validUntil": "2026-09-10T00:01:00Z"
+      }
+    },
+    {
+      "source": "redisConnectionFactory",
+      "kind": "ORDINARY",
+      "latestAttempt": {
+        "definition": {
+          "key": "redis.commands.rate",
+          "label": "命令处理速率",
+          "unit": "COUNT_PER_SECOND",
+          "scope": {
+            "kind": "PROCESS",
+            "id": "redis-main",
+            "nodeId": null
+          },
+          "source": "INFO stats.total_commands_processed",
+          "calculation": "相邻计数差 / 实际秒数"
+        },
+        "value": 0,
+        "missingReason": null,
+        "sampledAt": "2026-09-10T00:00:15Z",
+        "lastSuccessAt": "2026-09-10T00:00:15Z",
+        "validUntil": "2026-09-10T00:01:00Z"
+      },
+      "lastSuccess": {
+        "definition": {
+          "key": "redis.commands.rate",
+          "label": "命令处理速率",
+          "unit": "COUNT_PER_SECOND",
+          "scope": {
+            "kind": "PROCESS",
+            "id": "redis-main",
+            "nodeId": null
+          },
+          "source": "INFO stats.total_commands_processed",
+          "calculation": "相邻计数差 / 实际秒数"
+        },
+        "value": 0,
+        "missingReason": null,
+        "sampledAt": "2026-09-10T00:00:15Z",
+        "lastSuccessAt": "2026-09-10T00:00:15Z",
+        "validUntil": "2026-09-10T00:01:00Z"
+      }
+    },
+    {
+      "source": "redisConnectionFactory",
+      "kind": "ORDINARY",
+      "latestAttempt": {
+        "definition": {
+          "key": "redis.memory.limit_percent",
+          "label": "已用内存 / 配置上限",
+          "unit": "PERCENT",
+          "scope": {
+            "kind": "PROCESS",
+            "id": "redis-main",
+            "nodeId": null
+          },
+          "source": "INFO memory",
+          "calculation": "used_memory / 正 maxmemory × 100"
+        },
+        "value": null,
+        "missingReason": "NOT_APPLICABLE",
+        "sampledAt": "2026-09-10T00:00:15Z",
+        "lastSuccessAt": null,
+        "validUntil": "2026-09-10T00:00:15Z"
+      },
+      "lastSuccess": null
+    },
+    {
+      "source": "redisConnectionFactory",
+      "kind": "CAPACITY",
+      "latestAttempt": {
+        "definition": {
+          "key": "redis.aof.current_bytes",
+          "label": "当前 AOF 文件大小",
+          "unit": "BYTES",
+          "scope": {
+            "kind": "PROCESS",
+            "id": "redis-main",
+            "nodeId": null
+          },
+          "source": "INFO persistence.aof_current_size",
+          "calculation": "Redis 原生 AOF 文件大小；不代表文件系统总容量"
+        },
+        "value": null,
+        "missingReason": "TIMEOUT",
+        "sampledAt": "2026-09-10T00:01:00Z",
+        "lastSuccessAt": null,
+        "validUntil": "2026-09-10T00:01:00Z"
+      },
+      "lastSuccess": {
+        "definition": {
+          "key": "redis.aof.current_bytes",
+          "label": "当前 AOF 文件大小",
+          "unit": "BYTES",
+          "scope": {
+            "kind": "PROCESS",
+            "id": "redis-main",
+            "nodeId": null
+          },
+          "source": "INFO persistence.aof_current_size",
+          "calculation": "Redis 原生 AOF 文件大小；不代表文件系统总容量"
+        },
+        "value": 1024,
+        "missingReason": null,
+        "sampledAt": "2026-09-10T00:00:00Z",
+        "lastSuccessAt": "2026-09-10T00:00:00Z",
+        "validUntil": "2026-09-10T00:03:00Z"
+      }
+    }
+  ],
+  "serviceProbes": {
+    "redisConnectionFactory": {
+      "availability": "AVAILABLE",
+      "reason": null,
+      "scope": {
+        "kind": "ENDPOINT",
+        "id": "configured-redis",
+        "nodeId": null
+      },
+      "sampledAt": "2026-09-10T00:00:15Z",
+      "validUntil": "2026-09-10T00:01:00Z"
+    }
+  }
+}
