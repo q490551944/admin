@@ -38,3 +38,4 @@ build/
 /INFO/
 /WARN/
 /ERROR/
+.loop-state.json

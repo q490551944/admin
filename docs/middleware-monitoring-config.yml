@@ -1,0 +1,66 @@
+# Monitoring references existing application connections. No endpoints or credentials belong here.
+# The directory is available when disabled; no collector is enabled by this example by default.
+monitor:
+  enabled: false
+  ordinary-interval: 15s
+  capacity-interval: 60s
+  refresh-interval: 15s
+  collection-timeout: 5s # Includes waiting for a collection slot.
+  service-ttl: 45s
+  metric-ttl-multiplier: 3
+  ordinary-concurrency: 8
+  capacity-concurrency: 2
+  max-targets: 20
+  allowed-user-ids: [] # Empty denies every user. Use existing positive user IDs when granting access.
+  limits:
+    databases: 20
+    topics: 100
+    consumer-groups: 100
+    buckets: 20
+    indices: 100
+    partitions: 1000
+    nodes: 100
+    log-directories: 64
+  targets:
+    - id: primary-db
+      type: MYSQL
+      name: Project database
+      enabled: true
+      connection-source: spring.datasource
+      scope:
+        databases: [project_database]
+    - id: cache-main
+      type: REDIS
+      enabled: true
+      connection-source: redisConnectionFactory
+    - id: event-stream
+      type: KAFKA
+      enabled: false
+      connection-source: spring.kafka
+      scope:
+        topics: [project_events]
+        consumer-groups: [project_workers]
+    - id: document-store
+      type: MONGODB
+      enabled: true
+      # Missing source is CONFIGURATION_MISSING once global monitoring is enabled, not a startup error.
+      scope:
+        databases: [project_documents]
+    - id: search-store
+      type: ELASTICSEARCH
+      enabled: false
+      connection-source: spring.elasticsearch
+      scope:
+        indices: [project_index]
+    - id: attachment-store
+      type: MINIO
+      enabled: false
+      connection-source: chat.attachment
+      scope:
+        buckets: [project_attachments]
+
+# Connection source names are safe references understood by the connection resolver, not URLs.
+# A resolver must report that a source is configured; a name alone never proves configuration or health.
+# Empty scope lists authorize no resource enumeration, never "all databases/topics/buckets".
+# max-targets: 1..1000; concurrency: 1..64; item limits: 1..100000; metric TTL multiplier: 1..100.
+# Durations must be positive and at most one day; timeout must fit both collection intervals.
