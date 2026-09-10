@@ -32,7 +32,7 @@ jobs:
           cache: npm
       - name: Database, WebSocket and performance gates
         run: >-
-          bash mvnw -B '-Dtest=Chat*Test,Monitoring*Test'
+          bash mvnw -B '-Dtest=Chat*Test,Monitoring*Test,*ConnectionInspectorTest'
           -Dchat.mysql.test.url=jdbc:mysql://127.0.0.1:3306/
           -Dchat.mysql.test.password=chat-ci-only -Dchat.performance=true
           test dependency:build-classpath

@@ -221,8 +221,11 @@ class MonitoringPropertiesTest {
         assertThatCode(properties::validate).doesNotThrowAnyException();
         assertThat(properties.isEnabled()).isFalse();
         assertThat(properties.getAllowedUserIds()).isEmpty();
-        assertThat(properties.getTargets()).extracting(MonitoringProperties.Target::getType)
+        assertThat(properties.getTargets().stream().map(MonitoringProperties.Target::getType).distinct().toList())
                 .containsExactlyInAnyOrder(MiddlewareType.values());
+        assertThat(properties.getTargets().stream().filter(target -> target.getType() == MiddlewareType.REDIS))
+                .extracting(MonitoringProperties.Target::getConnectionSource)
+                .containsExactlyInAnyOrder("redisConnectionFactory", "redisson");
         assertThat(new MonitoringCatalog(properties).snapshot(List.of()))
                 .allSatisfy(type -> assertThat(type.status()).isEqualTo(MonitoringTarget.ConfigurationStatus.DISABLED));
         properties.setEnabled(true);

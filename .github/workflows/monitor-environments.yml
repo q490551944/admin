@@ -28,6 +28,11 @@ jobs:
         run: >-
           bash mvnw -B -Dtest=MonitoringEnvironmentIntegrationTest,MonitoringArchiveCompatibilityTest
           -Dmonitor.test.type=${{ matrix.type }} test
+      - name: Verify effective Redis and Redisson connection identity
+        if: matrix.type == 'redis'
+        run: >-
+          bash mvnw -B -Dtest=MonitoringConnectionResolutionIntegrationTest
+          -Dmonitor.test.type=redis test
       - uses: actions/upload-artifact@v4
         if: always()
         with:
