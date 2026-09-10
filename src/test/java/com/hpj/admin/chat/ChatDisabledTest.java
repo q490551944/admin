@@ -37,6 +37,8 @@ class ChatDisabledTest {
         mvc.perform(post("/sys/users/probe")).andExpect(status().isOk()).andExpect(content().string("legacy"));
         mvc.perform(get("/chat/index.html")).andExpect(status().isOk());
         mvc.perform(get("/api/chat/v1/conversations")).andExpect(status().isForbidden());
+        // 即使该最小应用没有导入监控安全链，监控 API 也不能落入旧接口的匿名放行规则。
+        mvc.perform(get("/api/monitor/v1/sessions/current")).andExpect(status().isForbidden());
         mvc.perform(post("/api/chat/v1/rooms").contentType("application/json").content("{\"name\":\"No room\"}"))
                 .andExpect(status().isForbidden());
         mvc.perform(get("/logout")).andExpect(status().isNotFound());
