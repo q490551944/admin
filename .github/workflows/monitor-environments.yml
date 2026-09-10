@@ -26,7 +26,7 @@ jobs:
         run: docker info
       - name: Start, prepare, verify and clean two independent environments
         run: >-
-          bash mvnw -B -Dtest=MonitoringEnvironmentIntegrationTest
+          bash mvnw -B -Dtest=MonitoringEnvironmentIntegrationTest,MonitoringArchiveCompatibilityTest
           -Dmonitor.test.type=${{ matrix.type }} test
       - uses: actions/upload-artifact@v4
         if: always()

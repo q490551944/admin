@@ -317,6 +317,28 @@
         </dependencies>
     </dependencyManagement>
 
+    <!-- Match the archive library's dependencies only while running disposable service tests. -->
+    <profiles>
+        <profile>
+            <id>monitor-environments</id>
+            <activation>
+                <property><name>monitor.test.type</name></property>
+            </activation>
+            <properties>
+                <commons-lang3.version>3.16.0</commons-lang3.version>
+            </properties>
+            <dependencyManagement>
+                <dependencies>
+                    <dependency>
+                        <groupId>commons-io</groupId>
+                        <artifactId>commons-io</artifactId>
+                        <version>2.16.1</version>
+                    </dependency>
+                </dependencies>
+            </dependencyManagement>
+        </profile>
+    </profiles>
+
     <build>
         <plugins>
             <plugin>

@@ -132,11 +132,11 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
             environment.container.start();
             environment.writeSummary("ready");
             return environment;
-        } catch (Exception failure) {
+        } catch (Exception | LinkageError failure) {
             environment.diagnostic("start", failure);
             try {
                 environment.close();
-            } catch (Exception cleanupFailure) {
+            } catch (Exception | LinkageError cleanupFailure) {
                 environment.diagnostic("startup cleanup", cleanupFailure);
             }
             throw environment.failure("start");
@@ -557,7 +557,7 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
         return result.replaceAll("(?i)(password|secret|authorization|access[_-]?key)([=:]\\s*)[^\\s,;]+", "$1$2[REDACTED]");
     }
 
-    private void diagnostic(String action, Exception failure) {
+    private void diagnostic(String action, Throwable failure) {
         try {
             Files.createDirectories(logDirectory);
             Files.writeString(logDirectory.resolve("diagnostics.log"), Instant.now() + " " + action + ": "

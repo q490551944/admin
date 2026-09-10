@@ -47,6 +47,10 @@ Kafka 客户端 `3.6.1` 的 `LogDirDescription` 已包含 `OptionalLong totalByt
 
 ## 本地运行
 
+`monitor.test.type` 同时激活 `monitor-environments` Maven profile，仅为真实服务测试对齐 Commons Compress `1.27.1` 声明的 Commons Lang `3.16.0` 和 Commons IO `2.16.1`。否则 Spring Boot 管理的旧 Commons Lang 缺少 `ArrayFill`，Kafka 启动脚本的 tar 打包会失败。普通构建不激活该 profile，保留应用原有依赖版本。
+
+可在无 Docker 的机器上单独检查这条归档路径：`./mvnw -B -Dtest=MonitoringArchiveCompatibilityTest -Dmonitor.test.type=kafka test`。这只验证依赖兼容性，不能代替下方真实环境验收。
+
 需要 Java 17、项目 Maven Wrapper，以及可运行 Linux 容器的 Docker 环境。启动 Docker 后，先确认当前用户能执行 `docker info`。Windows 若使用 Docker Desktop，应选择 Linux 容器模式。首次运行还需要能够获取上述镜像及测试依赖。
 
 Linux 或 macOS，在项目根目录执行：
