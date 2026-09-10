@@ -2,6 +2,7 @@ package com.hpj.admin.monitor;
 
 import com.hpj.admin.common.config.monitor.MonitoringProperties;
 import com.hpj.admin.monitor.MonitoringTarget.ConfigurationStatus;
+import com.hpj.admin.monitor.connection.ResolvedTarget;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -26,10 +27,17 @@ public class MonitoringCatalog {
     /** A declaration alone is not evidence that its existing connection is configured. */
     public List<TypeCatalog> snapshot(Collection<MonitoringConnectionSource> configuredSources) {
         Set<MonitoringConnectionSource> available = Set.copyOf(configuredSources);
+        return group(properties.getTargets().stream().map(target -> target(target, available)).toList());
+    }
+
+    /** Project resolved source bindings into the same public, credential-free catalog contract. */
+    public List<TypeCatalog> resolvedSnapshot(List<ResolvedTarget> resolvedTargets) {
+        return group(resolvedTargets.stream().map(ResolvedTarget::display).toList());
+    }
+
+    private List<TypeCatalog> group(List<MonitoringTarget> allTargets) {
         return Arrays.stream(MiddlewareType.values()).map(type -> {
-            List<MonitoringTarget> targets = properties.getTargets().stream()
-                    .filter(target -> target.getType() == type)
-                    .map(target -> target(target, available)).toList();
+            List<MonitoringTarget> targets = allTargets.stream().filter(target -> target.type() == type).toList();
             int configured = count(targets, ConfigurationStatus.CONFIGURED);
             int missing = count(targets, ConfigurationStatus.CONFIGURATION_MISSING);
             int disabled = count(targets, ConfigurationStatus.DISABLED);

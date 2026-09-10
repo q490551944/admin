@@ -33,6 +33,11 @@ monitor:
       type: REDIS
       enabled: true
       connection-source: redisConnectionFactory
+    - id: cache-redisson
+      type: REDIS
+      enabled: true
+      connection-source: redisson
+      # Merges with cache-main only when the existing clients prove the same connection identity.
     - id: event-stream
       type: KAFKA
       enabled: false
