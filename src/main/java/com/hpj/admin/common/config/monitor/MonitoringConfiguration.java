@@ -1,6 +1,8 @@
 package com.hpj.admin.common.config.monitor;
 
 import com.hpj.admin.monitor.MonitoringCatalog;
+import com.hpj.admin.monitor.api.MonitoringReadService;
+import com.hpj.admin.monitor.api.MonitoringResponseProjector;
 import com.hpj.admin.monitor.connection.MonitoringConnectionResolver;
 import com.hpj.admin.monitor.connection.RedisConnectionInspector;
 import com.hpj.admin.monitor.connection.StandardConnectionInspector;
@@ -18,10 +20,21 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.util.List;
+import java.time.Clock;
 
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(MonitoringProperties.class)
 public class MonitoringConfiguration {
+    @Bean
+    MonitoringResponseProjector monitoringResponseProjector() {
+        return new MonitoringResponseProjector();
+    }
+
+    @Bean
+    MonitoringReadService monitoringReadService(MonitoringScheduler scheduler, MonitoringResponseProjector projector) {
+        return new MonitoringReadService(scheduler, projector, Clock.systemUTC());
+    }
+
     @Bean
     MonitoringCatalog monitoringCatalog(MonitoringProperties properties) {
         return new MonitoringCatalog(properties);

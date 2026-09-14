@@ -1,5 +1,7 @@
 package com.hpj.admin.monitor.metric;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.DateTimeException;
@@ -48,7 +50,9 @@ public final class MetricContract {
     }
 
     public record MetricSample(Definition definition, Object value, MissingReason missingReason,
-                               Instant sampledAt, Instant lastSuccessAt, Instant validUntil) {
+                               @JsonFormat(shape = JsonFormat.Shape.STRING) Instant sampledAt,
+                               @JsonFormat(shape = JsonFormat.Shape.STRING) Instant lastSuccessAt,
+                               @JsonFormat(shape = JsonFormat.Shape.STRING) Instant validUntil) {
         public MetricSample {
             required(definition, "metric definition is required");
             ordered(sampledAt, validUntil, "metric validity must not precede its sample");
@@ -90,7 +94,8 @@ public final class MetricContract {
     }
 
     public record ServiceProbe(ServiceAvailability availability, MissingReason reason, Scope scope,
-                               Instant sampledAt, Instant validUntil) {
+                               @JsonFormat(shape = JsonFormat.Shape.STRING) Instant sampledAt,
+                               @JsonFormat(shape = JsonFormat.Shape.STRING) Instant validUntil) {
         public ServiceProbe {
             required(availability, "service availability is required");
             required(scope, "service probe scope is required");
@@ -104,7 +109,9 @@ public final class MetricContract {
     }
 
     /** Complete inventory includes missing-value placeholders for every still-authorized metric series. */
-    public record CollectionResult(CollectionStatus status, Instant startedAt, Instant completedAt,
+    public record CollectionResult(CollectionStatus status,
+                                   @JsonFormat(shape = JsonFormat.Shape.STRING) Instant startedAt,
+                                   @JsonFormat(shape = JsonFormat.Shape.STRING) Instant completedAt,
                                    List<MetricSample> metrics, ServiceProbe serviceProbe, boolean inventoryComplete,
                                    MissingReason reason) {
         /** Unspecified inventory completeness must never retire a previously known series. */
@@ -154,8 +161,10 @@ public final class MetricContract {
         }
     }
 
-    public record Attempt(String source, String bindingId, CollectionKind kind, long sequence, Instant startedAt,
-                          Instant completedAt, CollectionStatus status, MissingReason reason) {
+    public record Attempt(String source, String bindingId, CollectionKind kind, long sequence,
+                          @JsonFormat(shape = JsonFormat.Shape.STRING) Instant startedAt,
+                          @JsonFormat(shape = JsonFormat.Shape.STRING) Instant completedAt,
+                          CollectionStatus status, MissingReason reason) {
         public Attempt(String source, CollectionKind kind, long sequence, Instant startedAt,
                        Instant completedAt, CollectionStatus status) {
             this(source, source, kind, sequence, startedAt, completedAt, status, null);

@@ -24,9 +24,11 @@
 | `kafka` | `apache/kafka-native:3.8.0` | [Apache Kafka Native 镜像](https://hub.docker.com/r/apache/kafka-native) |
 | `mongodb` | `mongo:6.0.11` | [MongoDB 官方镜像](https://hub.docker.com/_/mongo) |
 | `elasticsearch` | `docker.elastic.co/elasticsearch/elasticsearch:8.10.4` | [Elastic 官方镜像仓库](https://www.docker.elastic.co/r/elasticsearch/elasticsearch) |
-| `minio` | `minio/minio:RELEASE.2025-09-07T16-13-09Z` | [MinIO 镜像](https://hub.docker.com/r/minio/minio)，release 与现有 chat CI 一致 |
+| `minio` | `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` | [MinIO 对应该版本的官方容器文档](https://github.com/minio/minio/blob/RELEASE.2025-09-07T16-13-09Z/docs/docker/README.md)，release 与现有 chat CI 一致 |
 
 镜像标签和启动选项由测试辅助类 `MonitoringTestEnvironment` 集中管理。调整测试版本时，应同步修改本表并重新运行对应真实环境验收，不能仅修改说明中的版本号。
+
+聊天浏览器 CI 也从同一官方 Quay 镜像提取 `/usr/bin/minio`，替代已返回 HTTP 410 的旧二进制下载地址。提取用容器不启动，退出步骤时按本次创建的容器 ID 清理；实际浏览器测试仍使用原有隔离 MinIO 进程和临时数据目录。二进制位置来自该版本的 [Dockerfile.release](https://github.com/minio/minio/blob/RELEASE.2025-09-07T16-13-09Z/Dockerfile.release#L61)。
 
 ## 应用客户端基线
 
