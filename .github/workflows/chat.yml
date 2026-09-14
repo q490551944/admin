@@ -43,8 +43,12 @@ jobs:
       - name: Install isolated MinIO test server
         shell: bash
         run: |
-          curl --fail --location --retry 3 https://dl.min.io/server/minio/release/linux-amd64/archive/minio.RELEASE.2025-09-07T16-13-09Z -o "$RUNNER_TEMP/minio"
+          minio_image=quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+          minio_container=$(docker create --platform linux/amd64 "$minio_image")
+          trap 'docker rm "$minio_container" >/dev/null' EXIT
+          docker cp "$minio_container:/usr/bin/minio" "$RUNNER_TEMP/minio"
           chmod +x "$RUNNER_TEMP/minio"
+          "$RUNNER_TEMP/minio" --version
           echo "MINIO_BIN=$RUNNER_TEMP/minio" >> "$GITHUB_ENV"
       - name: Three-user browser E2E with real MinIO
         run: npm run test:e2e

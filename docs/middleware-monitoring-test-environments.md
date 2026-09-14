@@ -28,6 +28,8 @@
 
 镜像标签和启动选项由测试辅助类 `MonitoringTestEnvironment` 集中管理。调整测试版本时，应同步修改本表并重新运行对应真实环境验收，不能仅修改说明中的版本号。
 
+聊天浏览器 CI 也从同一官方 Quay 镜像提取 `/usr/bin/minio`，替代已返回 HTTP 410 的旧二进制下载地址。提取用容器不启动，退出步骤时按本次创建的容器 ID 清理；实际浏览器测试仍使用原有隔离 MinIO 进程和临时数据目录。二进制位置来自该版本的 [Dockerfile.release](https://github.com/minio/minio/blob/RELEASE.2025-09-07T16-13-09Z/Dockerfile.release#L61)。
+
 ## 应用客户端基线
 
 以下版本已通过引入 Testcontainers 后的实际 Maven `dependency:tree` 核实，检查产物为 `target/monitor-dependency-tree.txt`。它们与上一表的服务端版本是两类独立信息；本次新增测试依赖没有改变这些应用客户端版本。
