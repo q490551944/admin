@@ -52,6 +52,8 @@ jobs:
           echo "MINIO_BIN=$RUNNER_TEMP/minio" >> "$GITHUB_ENV"
       - name: Three-user browser E2E with real MinIO
         run: npm run test:e2e
+      - name: Monitoring login browser E2E with chat disabled
+        run: npm run test:monitor:e2e
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -65,3 +67,6 @@ jobs:
             target/chat-e2e-final.png
             target/chat-e2e-*/app.log
             target/chat-e2e-*/minio.log
+            target/monitor-e2e-report
+            target/monitor-e2e-results
+            target/monitor-e2e-*/app.log
