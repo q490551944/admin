@@ -1,6 +1,7 @@
 package com.hpj.admin.monitor.scheduling;
 
 import com.hpj.admin.common.config.monitor.MonitoringProperties;
+import com.hpj.admin.monitor.MonitoringConnectionSource;
 import com.hpj.admin.monitor.MonitoringTarget;
 import com.hpj.admin.monitor.connection.ResolvedTarget;
 import com.hpj.admin.monitor.metric.CollectionControl;
@@ -37,6 +38,27 @@ public final class MonitoringScheduler implements AutoCloseable {
     public record Diagnostics(int ordinaryActive, int ordinaryQueued, int capacityActive, int capacityQueued,
                               int inFlightTasks, int cleanupQueued, int workerThreads, int cleanupThreads) { }
 
+    public enum ResolutionState { RESOLVING, READY }
+
+    /** Immutable read boundary: no resolved connection, client, settings, or collection control escapes. */
+    public record ReadState(long generation, ResolutionState resolutionState,
+                            List<ReadTarget> targets, List<TargetSnapshot> snapshots) {
+        public ReadState {
+            targets = List.copyOf(targets);
+            snapshots = List.copyOf(snapshots);
+        }
+    }
+
+    public record ReadTarget(MonitoringTarget display, ResolvedTarget.Reason resolutionReason,
+                             List<String> memberIds, List<ReadBinding> bindings) {
+        public ReadTarget {
+            memberIds = List.copyOf(memberIds);
+            bindings = List.copyOf(bindings);
+        }
+    }
+
+    public record ReadBinding(String bindingId, MonitoringConnectionSource source, MonitoringTarget.Scope scope) { }
+
     private final Object gate = new Object();
     private final MonitoringProperties properties;
     private final Supplier<List<ResolvedTarget>> resolver;
@@ -49,6 +71,8 @@ public final class MonitoringScheduler implements AutoCloseable {
     private final Map<Lane, Task> occupied = new LinkedHashMap<>();
     private final Map<Long, Task> tasks = new LinkedHashMap<>();
     private List<ResolvedTarget> targets = List.of();
+    private List<ReadTarget> readTargets;
+    private ResolutionState resolutionState = ResolutionState.RESOLVING;
     private ThreadPoolExecutor ordinary;
     private ThreadPoolExecutor capacity;
     private ThreadPoolExecutor cleanup;
@@ -75,6 +99,7 @@ public final class MonitoringScheduler implements AutoCloseable {
         this.snapshots = Objects.requireNonNull(snapshots);
         this.counters = Objects.requireNonNull(counters);
         this.periodic = periodic;
+        this.readTargets = declaredReadTargets();
     }
 
     /** Called after application readiness. Optional connection resolution never blocks startup. */
@@ -126,6 +151,11 @@ public final class MonitoringScheduler implements AutoCloseable {
             snapshots.clear();
             counters.clear();
             targets = List.copyOf(copy);
+            readTargets = targets.stream().map(target -> new ReadTarget(target.display(), target.reason(), target.memberIds(),
+                    target.bindings().stream().map(binding -> new ReadBinding(binding.targetId(),
+                            new MonitoringConnectionSource(binding.connection().type(), binding.connection().source()),
+                            binding.scope())).toList())).toList();
+            resolutionState = ResolutionState.READY;
             long now = System.nanoTime();
             int count = copy.size();
             for (int index = 0; index < count; index++) {
@@ -151,6 +181,13 @@ public final class MonitoringScheduler implements AutoCloseable {
 
     public boolean isRunning() { synchronized (gate) { return running; } }
     public List<ResolvedTarget> targets() { synchronized (gate) { return targets; } }
+
+    /** Copy one generation while holding the same gate used for replacement and collection publication. */
+    public ReadState readState() {
+        synchronized (gate) {
+            return new ReadState(generation, resolutionState, readTargets, snapshots.snapshots());
+        }
+    }
 
     public Diagnostics diagnostics() {
         synchronized (gate) {
@@ -355,6 +392,7 @@ public final class MonitoringScheduler implements AutoCloseable {
             for (Task task : tasks.values()) cancelTask(task, MissingReason.FAILED);
             states.clear();
             targets = List.of();
+            readTargets = List.of();
             snapshots.clear();
             counters.clear();
             if (ordinary != null) ordinary.shutdownNow();
@@ -382,6 +420,22 @@ public final class MonitoringScheduler implements AutoCloseable {
             return new ResolvedTarget(display, List.of(target.getId()), List.of(),
                     target.isEnabled() ? ResolvedTarget.Reason.SOURCE_MISSING : ResolvedTarget.Reason.DISABLED);
         }).toList();
+    }
+
+    private List<ReadTarget> declaredReadTargets() {
+        return properties.getTargets().stream().map(target -> {
+            boolean disabled = !properties.isEnabled() || !target.isEnabled();
+            String source = target.getConnectionSource();
+            var scope = target.getScope();
+            var display = new MonitoringTarget(target.getId(), target.getType(),
+                    target.getName() == null || target.getName().isBlank() ? target.getType().displayName() : target.getName(),
+                    disabled ? MonitoringTarget.ConfigurationStatus.DISABLED : null,
+                    source == null || source.isBlank() ? List.of() : List.of(source),
+                    new MonitoringTarget.Scope(scope.getDatabases(), scope.getTopics(), scope.getConsumerGroups(),
+                            scope.getBuckets(), scope.getIndices()));
+            return new ReadTarget(display, disabled ? ResolvedTarget.Reason.DISABLED : null,
+                    List.of(target.getId()), List.of());
+        }).sorted(Comparator.comparing(target -> target.display().id())).toList();
     }
 
     private Duration interval(CollectionKind kind) {

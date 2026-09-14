@@ -1,0 +1,391 @@
+{
+  "catalog" : {
+    "serverTime" : "2026-09-14T02:00:20Z",
+    "generation" : 7,
+    "resolutionState" : "READY",
+    "types" : [ {
+      "type" : "MYSQL",
+      "name" : "MySQL",
+      "configurationStatus" : "DISABLED",
+      "configuredCount" : 0,
+      "missingCount" : 0,
+      "disabledCount" : 0,
+      "resolvingCount" : 0,
+      "targets" : [ ]
+    }, {
+      "type" : "REDIS",
+      "name" : "Redis",
+      "configurationStatus" : "CONFIGURED",
+      "configuredCount" : 1,
+      "missingCount" : 0,
+      "disabledCount" : 0,
+      "resolvingCount" : 0,
+      "targets" : [ {
+        "id" : "redis-a",
+        "type" : "REDIS",
+        "name" : "redis-a display",
+        "configurationStatus" : "CONFIGURED",
+        "resolutionReason" : "CONFIGURED",
+        "connectionSources" : [ "sharedRedis" ],
+        "scope" : {
+          "databases" : [ "0" ],
+          "topics" : [ ],
+          "consumerGroups" : [ ],
+          "buckets" : [ ],
+          "indices" : [ ]
+        },
+        "memberIds" : [ "redis-a" ],
+        "bindings" : [ {
+          "bindingId" : "redis-a",
+          "source" : "sharedRedis",
+          "scope" : {
+            "databases" : [ "0" ],
+            "topics" : [ ],
+            "consumerGroups" : [ ],
+            "buckets" : [ ],
+            "indices" : [ ]
+          }
+        } ]
+      } ]
+    }, {
+      "type" : "KAFKA",
+      "name" : "Kafka",
+      "configurationStatus" : "DISABLED",
+      "configuredCount" : 0,
+      "missingCount" : 0,
+      "disabledCount" : 0,
+      "resolvingCount" : 0,
+      "targets" : [ ]
+    }, {
+      "type" : "MONGODB",
+      "name" : "MongoDB",
+      "configurationStatus" : "DISABLED",
+      "configuredCount" : 0,
+      "missingCount" : 0,
+      "disabledCount" : 0,
+      "resolvingCount" : 0,
+      "targets" : [ ]
+    }, {
+      "type" : "ELASTICSEARCH",
+      "name" : "Elasticsearch",
+      "configurationStatus" : "DISABLED",
+      "configuredCount" : 0,
+      "missingCount" : 0,
+      "disabledCount" : 0,
+      "resolvingCount" : 0,
+      "targets" : [ ]
+    }, {
+      "type" : "MINIO",
+      "name" : "MinIO",
+      "configurationStatus" : "DISABLED",
+      "configuredCount" : 0,
+      "missingCount" : 0,
+      "disabledCount" : 0,
+      "resolvingCount" : 0,
+      "targets" : [ ]
+    } ]
+  },
+  "snapshots" : {
+    "serverTime" : "2026-09-14T02:00:20Z",
+    "generation" : 7,
+    "resolutionState" : "READY",
+    "targets" : [ {
+      "target" : {
+        "id" : "redis-a",
+        "type" : "REDIS",
+        "name" : "redis-a display",
+        "configurationStatus" : "CONFIGURED",
+        "resolutionReason" : "CONFIGURED",
+        "connectionSources" : [ "sharedRedis" ],
+        "scope" : {
+          "databases" : [ "0" ],
+          "topics" : [ ],
+          "consumerGroups" : [ ],
+          "buckets" : [ ],
+          "indices" : [ ]
+        },
+        "memberIds" : [ "redis-a" ],
+        "bindings" : [ {
+          "bindingId" : "redis-a",
+          "source" : "sharedRedis",
+          "scope" : {
+            "databases" : [ "0" ],
+            "topics" : [ ],
+            "consumerGroups" : [ ],
+            "buckets" : [ ],
+            "indices" : [ ]
+          }
+        } ]
+      },
+      "schedulingState" : "ACTIVE",
+      "collections" : [ {
+        "bindingId" : "redis-a",
+        "source" : "sharedRedis",
+        "kind" : "ORDINARY",
+        "status" : "SUCCESS",
+        "reason" : null,
+        "lastAttempt" : {
+          "source" : "sharedRedis",
+          "bindingId" : "redis-a",
+          "kind" : "ORDINARY",
+          "sequence" : 1,
+          "startedAt" : "2026-09-14T01:59:59Z",
+          "completedAt" : "2026-09-14T02:00:00Z",
+          "status" : "SUCCESS",
+          "reason" : null
+        }
+      }, {
+        "bindingId" : "redis-a",
+        "source" : "sharedRedis",
+        "kind" : "CAPACITY",
+        "status" : "FAILED",
+        "reason" : "TIMEOUT",
+        "lastAttempt" : {
+          "source" : "sharedRedis",
+          "bindingId" : "redis-a",
+          "kind" : "CAPACITY",
+          "sequence" : 1,
+          "startedAt" : "2026-09-14T01:59:59Z",
+          "completedAt" : "2026-09-14T02:00:00Z",
+          "status" : "FAILED",
+          "reason" : "TIMEOUT"
+        }
+      } ],
+      "serviceObservations" : [ {
+        "bindingId" : "redis-a",
+        "source" : "sharedRedis",
+        "availability" : "AVAILABLE",
+        "reason" : null,
+        "lastObservation" : {
+          "availability" : "AVAILABLE",
+          "reason" : null,
+          "scope" : {
+            "kind" : "DATABASE",
+            "id" : "db-0",
+            "nodeId" : null
+          },
+          "sampledAt" : "2026-09-14T02:00:00Z",
+          "validUntil" : "2026-09-14T02:00:45Z"
+        }
+      } ],
+      "metricCount" : 2,
+      "missingMetricCount" : 1
+    } ]
+  },
+  "detail" : {
+    "serverTime" : "2026-09-14T02:00:20Z",
+    "generation" : 7,
+    "resolutionState" : "READY",
+    "target" : {
+      "target" : {
+        "id" : "redis-a",
+        "type" : "REDIS",
+        "name" : "redis-a display",
+        "configurationStatus" : "CONFIGURED",
+        "resolutionReason" : "CONFIGURED",
+        "connectionSources" : [ "sharedRedis" ],
+        "scope" : {
+          "databases" : [ "0" ],
+          "topics" : [ ],
+          "consumerGroups" : [ ],
+          "buckets" : [ ],
+          "indices" : [ ]
+        },
+        "memberIds" : [ "redis-a" ],
+        "bindings" : [ {
+          "bindingId" : "redis-a",
+          "source" : "sharedRedis",
+          "scope" : {
+            "databases" : [ "0" ],
+            "topics" : [ ],
+            "consumerGroups" : [ ],
+            "buckets" : [ ],
+            "indices" : [ ]
+          }
+        } ]
+      },
+      "schedulingState" : "ACTIVE",
+      "collections" : [ {
+        "bindingId" : "redis-a",
+        "source" : "sharedRedis",
+        "kind" : "ORDINARY",
+        "status" : "SUCCESS",
+        "reason" : null,
+        "lastAttempt" : {
+          "source" : "sharedRedis",
+          "bindingId" : "redis-a",
+          "kind" : "ORDINARY",
+          "sequence" : 1,
+          "startedAt" : "2026-09-14T01:59:59Z",
+          "completedAt" : "2026-09-14T02:00:00Z",
+          "status" : "SUCCESS",
+          "reason" : null
+        }
+      }, {
+        "bindingId" : "redis-a",
+        "source" : "sharedRedis",
+        "kind" : "CAPACITY",
+        "status" : "FAILED",
+        "reason" : "TIMEOUT",
+        "lastAttempt" : {
+          "source" : "sharedRedis",
+          "bindingId" : "redis-a",
+          "kind" : "CAPACITY",
+          "sequence" : 1,
+          "startedAt" : "2026-09-14T01:59:59Z",
+          "completedAt" : "2026-09-14T02:00:00Z",
+          "status" : "FAILED",
+          "reason" : "TIMEOUT"
+        }
+      } ],
+      "serviceObservations" : [ {
+        "bindingId" : "redis-a",
+        "source" : "sharedRedis",
+        "availability" : "AVAILABLE",
+        "reason" : null,
+        "lastObservation" : {
+          "availability" : "AVAILABLE",
+          "reason" : null,
+          "scope" : {
+            "kind" : "DATABASE",
+            "id" : "db-0",
+            "nodeId" : null
+          },
+          "sampledAt" : "2026-09-14T02:00:00Z",
+          "validUntil" : "2026-09-14T02:00:45Z"
+        }
+      } ],
+      "metricCount" : 2,
+      "missingMetricCount" : 1
+    },
+    "metrics" : [ {
+      "source" : "sharedRedis",
+      "bindingId" : "redis-a",
+      "kind" : "ORDINARY",
+      "latestAttempt" : {
+        "definition" : {
+          "key" : "connections",
+          "label" : "Connected clients",
+          "unit" : "COUNT",
+          "scope" : {
+            "kind" : "PROCESS",
+            "id" : "redis-process",
+            "nodeId" : null
+          },
+          "source" : "INFO clients",
+          "calculation" : "Native connected_clients"
+        },
+        "value" : 0,
+        "missingReason" : null,
+        "sampledAt" : "2026-09-14T02:00:00Z",
+        "lastSuccessAt" : "2026-09-14T02:00:00Z",
+        "validUntil" : "2026-09-14T02:00:45Z"
+      },
+      "lastSuccess" : {
+        "definition" : {
+          "key" : "connections",
+          "label" : "Connected clients",
+          "unit" : "COUNT",
+          "scope" : {
+            "kind" : "PROCESS",
+            "id" : "redis-process",
+            "nodeId" : null
+          },
+          "source" : "INFO clients",
+          "calculation" : "Native connected_clients"
+        },
+        "value" : 0,
+        "missingReason" : null,
+        "sampledAt" : "2026-09-14T02:00:00Z",
+        "lastSuccessAt" : "2026-09-14T02:00:00Z",
+        "validUntil" : "2026-09-14T02:00:45Z"
+      }
+    }, {
+      "source" : "sharedRedis",
+      "bindingId" : "redis-a",
+      "kind" : "CAPACITY",
+      "latestAttempt" : {
+        "definition" : {
+          "key" : "aof.bytes",
+          "label" : "AOF bytes",
+          "unit" : "BYTES",
+          "scope" : {
+            "kind" : "PROCESS",
+            "id" : "redis-process",
+            "nodeId" : null
+          },
+          "source" : "INFO persistence",
+          "calculation" : "Native aof_current_size"
+        },
+        "value" : null,
+        "missingReason" : "TIMEOUT",
+        "sampledAt" : "2026-09-14T02:00:00Z",
+        "lastSuccessAt" : null,
+        "validUntil" : "2026-09-14T02:00:00Z"
+      },
+      "lastSuccess" : {
+        "definition" : {
+          "key" : "aof.bytes",
+          "label" : "AOF bytes",
+          "unit" : "BYTES",
+          "scope" : {
+            "kind" : "PROCESS",
+            "id" : "redis-process",
+            "nodeId" : null
+          },
+          "source" : "INFO persistence",
+          "calculation" : "Native aof_current_size"
+        },
+        "value" : 4096,
+        "missingReason" : null,
+        "sampledAt" : "2026-09-14T01:59:00Z",
+        "lastSuccessAt" : "2026-09-14T01:59:00Z",
+        "validUntil" : "2026-09-14T02:02:00Z"
+      }
+    } ],
+    "capabilityState" : "OBSERVED",
+    "capabilities" : [ {
+      "bindingId" : "redis-a",
+      "source" : "sharedRedis",
+      "kind" : "ORDINARY",
+      "definition" : {
+        "key" : "connections",
+        "label" : "Connected clients",
+        "unit" : "COUNT",
+        "scope" : {
+          "kind" : "PROCESS",
+          "id" : "redis-process",
+          "nodeId" : null
+        },
+        "source" : "INFO clients",
+        "calculation" : "Native connected_clients"
+      },
+      "capability" : "AVAILABLE",
+      "latestMissingReason" : null,
+      "sampledAt" : "2026-09-14T02:00:00Z",
+      "lastSuccessAt" : "2026-09-14T02:00:00Z",
+      "validUntil" : "2026-09-14T02:00:45Z"
+    }, {
+      "bindingId" : "redis-a",
+      "source" : "sharedRedis",
+      "kind" : "CAPACITY",
+      "definition" : {
+        "key" : "aof.bytes",
+        "label" : "AOF bytes",
+        "unit" : "BYTES",
+        "scope" : {
+          "kind" : "PROCESS",
+          "id" : "redis-process",
+          "nodeId" : null
+        },
+        "source" : "INFO persistence",
+        "calculation" : "Native aof_current_size"
+      },
+      "capability" : "UNKNOWN",
+      "latestMissingReason" : "TIMEOUT",
+      "sampledAt" : "2026-09-14T02:00:00Z",
+      "lastSuccessAt" : "2026-09-14T01:59:00Z",
+      "validUntil" : "2026-09-14T02:00:00Z"
+    } ]
+  }
+}

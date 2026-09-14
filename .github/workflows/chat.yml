@@ -34,7 +34,7 @@ jobs:
         run: >-
           bash mvnw -B '-Dtest=Chat*Test,Monitoring*Test,*ConnectionInspectorTest'
           -Dchat.mysql.test.url=jdbc:mysql://127.0.0.1:3306/
-          -Dchat.mysql.test.password=chat-ci-only -Dchat.performance=true
+          -Dchat.mysql.test.password=chat-ci-only -Dchat.performance=true -Dmonitor.performance=true
           test dependency:build-classpath
           -Dmdep.outputFile=target/chat-e2e-classpath.txt -DincludeScope=test
       - run: npm ci
@@ -55,6 +55,7 @@ jobs:
           path: |
             target/surefire-reports
             target/chat-performance-*.json
+            target/monitor-api-performance.json
             target/chat-e2e-report
             target/chat-e2e-results
             target/chat-e2e-final.png
