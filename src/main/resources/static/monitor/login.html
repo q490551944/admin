@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <title>登录监控 · Admin</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body data-page="login">
+  <header class="site-header"><a class="brand" href="./index.html"><span class="brand-mark" aria-hidden="true">M</span>Admin <span class="brand-divider">/</span> 中间件监控</a><span class="header-note">运维工作台</span></header>
+  <main class="layout">
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow">MIDDLEWARE MONITORING</p>
+      <h1 id="page-title">从这里，<br>了解服务状态。</h1>
+      <p class="intro-copy">使用已有员工账号，安全访问中间件监控。</p>
+      <div class="intro-note"><span class="note-line" aria-hidden="true"></span><p>访问由管理员授权。<br>如需开通权限，请联系系统维护人员。</p></div>
+    </section>
+    <section class="card" id="shell" aria-busy="true" aria-label="监控登录">
+      <p class="card-kicker">账号访问</p>
+      <div id="status-panel" class="status" role="status" aria-live="polite" aria-atomic="true" data-kind="neutral">
+        <h2 id="status-title">正在确认身份</h2>
+        <p id="status-description">正在检查登录状态与监控查看权限。</p>
+      </div>
+      <div id="identity" class="identity" hidden><span>当前账号</span><strong id="identity-name"></strong></div>
+      <form id="login-form" hidden>
+        <label class="field" for="username">用户名</label>
+        <input id="username" name="username" autocomplete="username" required maxlength="100" spellcheck="false" placeholder="输入员工用户名">
+        <label class="field" for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="输入登录密码">
+        <button class="primary-button" type="submit">登录</button>
+      </form>
+      <div class="actions"><button class="primary-button" id="retry-button" type="button" hidden>重试</button><button class="secondary-button" id="logout-button" type="button" hidden>退出登录</button></div>
+      <a class="back-link" href="./index.html">返回监控入口 <span aria-hidden="true">↗</span></a>
+      <noscript><p class="noscript">请启用 JavaScript 后登录监控。</p></noscript>
+    </section>
+  </main>
+  <footer>ADMIN <span aria-hidden="true">·</span> 中间件监控</footer>
+  <script src="./session.js"></script>
+  <script src="./app.js" defer></script>
+</body>
+</html>
