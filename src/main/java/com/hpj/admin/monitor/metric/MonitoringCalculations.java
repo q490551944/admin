@@ -22,7 +22,8 @@ public final class MonitoringCalculations {
     private MonitoringCalculations() {}
 
     public enum Calculation {
-        RATE(1), DELTA(1), REDIS_HIT_PERCENT(2), MYSQL_HIT_PERCENT(2), CPU_SINGLE_CORE_PERCENT(2);
+        RATE(1), DELTA(1), RATE_WITH_UPTIME(2), DELTA_WITH_UPTIME(2),
+        REDIS_HIT_PERCENT(2), MYSQL_HIT_PERCENT(2), CPU_SINGLE_CORE_PERCENT(2);
 
         private final int counterCount;
 
@@ -34,6 +35,7 @@ public final class MonitoringCalculations {
     /**
      * The epoch is an immutable, server-only token for the connection/service generation.
      * Redis uses [hits, misses], MySQL [physical reads, logical reads], CPU [process user seconds, process system seconds].
+     * Uptime-aware rate/delta use [counter, native uptime seconds] so a restart also invalidates a rising counter.
      * A null counter is an explicit missing native value and is rejected by evaluate, without replacing a good baseline.
      */
     @JsonIgnoreType
@@ -88,8 +90,8 @@ public final class MonitoringCalculations {
         }
         BigDecimal first = deltas.get(0);
         return switch (calculation) {
-            case RATE -> numeric(first.divide(elapsed, PRECISION), BaselineAction.REPLACE);
-            case DELTA -> numeric(first, BaselineAction.REPLACE);
+            case RATE, RATE_WITH_UPTIME -> numeric(first.divide(elapsed, PRECISION), BaselineAction.REPLACE);
+            case DELTA, DELTA_WITH_UPTIME -> numeric(first, BaselineAction.REPLACE);
             case REDIS_HIT_PERCENT -> ratio(first, first.add(deltas.get(1)), false);
             case MYSQL_HIT_PERCENT -> ratio(first, deltas.get(1), true);
             case CPU_SINGLE_CORE_PERCENT -> numeric(first.add(deltas.get(1)).multiply(HUNDRED)

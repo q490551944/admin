@@ -46,6 +46,18 @@ class MonitoringCalculationsTest {
         numeric(calculate(DELTA, sample(0, "100"), sample(12, "130")), "30", REPLACE);
     }
 
+    @ParameterizedTest
+    @EnumSource(value = Calculation.class, names = {"RATE_WITH_UPTIME", "DELTA_WITH_UPTIME"})
+    void decreasingNativeUptimeDiscardsAnIntervalEvenWhenTheQueryCounterHasCaughtUp(Calculation kind) {
+        missing(calculate(kind, sample(0, "100", "86400"), sample(15, "500", "10")),
+                MissingReason.WAITING_SAMPLE, REPLACE);
+        missing(calculate(kind, sample(0, "100", "86400"), sample(15, "500", (String) null)),
+                MissingReason.INVALID_VALUE, KEEP);
+        numeric(calculate(kind, sample(0, "100", "86400"), sample(12, "130", "86412")),
+                kind == RATE_WITH_UPTIME ? "2.5" : "30", REPLACE);
+        numeric(calculate(kind, sample(0, "100", "86400"), sample(12, "100", "86412")), "0", REPLACE);
+    }
+
     @Test
     void subsecondIntervalsAreNotTruncatedToWholeSeconds() {
         CounterSample current = new CounterSample(START.plusMillis(250), EPOCH, List.of(new BigDecimal("101")));

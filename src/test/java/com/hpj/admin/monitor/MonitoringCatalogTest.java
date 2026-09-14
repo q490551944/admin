@@ -4,6 +4,8 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hpj.admin.common.config.monitor.MonitoringConfiguration;
 import com.hpj.admin.common.config.monitor.MonitoringProperties;
+import com.hpj.admin.monitor.metric.MonitoringAdapterRegistry;
+import com.hpj.admin.monitor.mysql.MysqlMonitoringAdapter;
 import com.mongodb.client.MongoClient;
 import io.minio.MinioClient;
 import org.apache.kafka.clients.admin.AdminClient;
@@ -112,6 +114,8 @@ class MonitoringCatalogTest {
                         "monitor.targets[0].enabled=true", "monitor.targets[0].connection-source=redisFactory")
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasSingleBean(MonitoringCatalog.class);
+                    assertThat(context.getBean(MonitoringAdapterRegistry.class).find(MiddlewareType.MYSQL))
+                            .hasValueSatisfying(adapter -> assertThat(adapter).isInstanceOf(MysqlMonitoringAdapter.class));
                     MonitoringCatalog.TypeCatalog redis = type(context.getBean(MonitoringCatalog.class).snapshot(List.of()),
                             MiddlewareType.REDIS);
                     assertThat(redis.status()).isEqualTo(monitorEnabled ? CONFIGURATION_MISSING : DISABLED);
