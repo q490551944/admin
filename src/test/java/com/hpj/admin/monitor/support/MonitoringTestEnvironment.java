@@ -76,7 +76,7 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
             "kafka", "apache/kafka-native:3.8.0",
             "mongodb", "mongo:6.0.11",
             "elasticsearch", "docker.elastic.co/elasticsearch/elasticsearch:8.10.4",
-            "minio", "minio/minio:RELEASE.2025-09-07T16-13-09Z");
+            "minio", "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z");
     private static final Duration CLIENT_TIMEOUT = Duration.ofSeconds(3);
     private static final String SENTINEL = "monitor-fixture-payload";
     private static final ObjectMapper JSON = new ObjectMapper();

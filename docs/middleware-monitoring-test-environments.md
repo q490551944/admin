@@ -24,7 +24,7 @@
 | `kafka` | `apache/kafka-native:3.8.0` | [Apache Kafka Native 镜像](https://hub.docker.com/r/apache/kafka-native) |
 | `mongodb` | `mongo:6.0.11` | [MongoDB 官方镜像](https://hub.docker.com/_/mongo) |
 | `elasticsearch` | `docker.elastic.co/elasticsearch/elasticsearch:8.10.4` | [Elastic 官方镜像仓库](https://www.docker.elastic.co/r/elasticsearch/elasticsearch) |
-| `minio` | `minio/minio:RELEASE.2025-09-07T16-13-09Z` | [MinIO 镜像](https://hub.docker.com/r/minio/minio)，release 与现有 chat CI 一致 |
+| `minio` | `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` | [MinIO 对应该版本的官方容器文档](https://github.com/minio/minio/blob/RELEASE.2025-09-07T16-13-09Z/docs/docker/README.md)，release 与现有 chat CI 一致 |
 
 镜像标签和启动选项由测试辅助类 `MonitoringTestEnvironment` 集中管理。调整测试版本时，应同步修改本表并重新运行对应真实环境验收，不能仅修改说明中的版本号。
 
