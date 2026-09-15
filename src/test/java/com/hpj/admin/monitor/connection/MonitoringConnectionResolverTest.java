@@ -8,6 +8,7 @@ import com.hpj.admin.monitor.MiddlewareType;
 import com.hpj.admin.monitor.MonitoringCatalog;
 import com.hpj.admin.monitor.MonitoringTarget;
 import com.mongodb.client.MongoClient;
+import io.minio.MinioClient;
 import org.elasticsearch.client.RestClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,6 +44,26 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 class MonitoringConnectionResolverTest {
+    @Test
+    void explicitExistingS3SourceWorksWithoutChatProperties() throws Exception {
+        var beans = new DefaultListableBeanFactory();
+        try (var client = MinioClient.builder().endpoint("http://127.0.0.1:1")
+                .region("us-east-1").credentials("owned-access", "owned-secret").build()) {
+            beans.registerSingleton("existingS3", client);
+            var target = target("attachments", MiddlewareType.MINIO, "existingS3");
+            target.getScope().setBuckets(List.of("owned-bucket"));
+            var result = new MonitoringConnectionResolver(properties(target), beans,
+                    List.of(new StandardConnectionInspector())).resolve();
+            assertThat(result).singleElement().satisfies(resolved -> {
+                assertThat(resolved.reason()).isEqualTo(ResolvedTarget.Reason.CONFIGURED);
+                assertThat(resolved.bindings()).singleElement().satisfies(binding -> {
+                    assertThat(binding.connection().client()).isSameAs(client);
+                    assertThat(binding.scope().buckets()).containsExactly("owned-bucket");
+                });
+            });
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"false,true", "true,false", "false,false"})
     void disabledMonitoringDoesNotEvenEnumerateSingletonsOrInspectClients(boolean global, boolean targetEnabled) {

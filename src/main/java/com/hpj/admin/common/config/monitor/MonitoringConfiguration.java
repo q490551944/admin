@@ -21,6 +21,8 @@ import com.hpj.admin.monitor.mongodb.MongoMonitoringAdapter;
 import com.hpj.admin.monitor.mongodb.MongoMonitoringConnections;
 import com.hpj.admin.monitor.elasticsearch.ElasticsearchMonitoringAdapter;
 import com.hpj.admin.monitor.elasticsearch.ElasticsearchMonitoringConnections;
+import com.hpj.admin.monitor.minio.MinioMonitoringAdapter;
+import com.hpj.admin.monitor.minio.MinioMonitoringConnections;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -35,6 +37,11 @@ import java.time.Clock;
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(MonitoringProperties.class)
 public class MonitoringConfiguration {
+    @Bean
+    MinioMonitoringAdapter minioMonitoringAdapter(MonitoringProperties properties) {
+        return new MinioMonitoringAdapter(properties, new MinioMonitoringConnections(), Clock.systemUTC());
+    }
+
     @Bean
     ElasticsearchMonitoringAdapter elasticsearchMonitoringAdapter(MonitoringProperties properties) {
         return new ElasticsearchMonitoringAdapter(properties, new ElasticsearchMonitoringConnections(), Clock.systemUTC());

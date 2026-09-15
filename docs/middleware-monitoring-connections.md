@@ -17,6 +17,7 @@
 | `spring.data.mongodb` | 已存在的 MongoClient 的最终 settings，包含 customizer 修改 |
 | `spring.elasticsearch` | 优先已有 ElasticsearchClient，或已有底层 RestClient |
 | `chat.attachment` | 已绑定的 ChatProperties.Attachment，沿用附件存储的 endpoint / secure 规则 |
+| MinioClient 的实际 Bean 名 | 已创建的 MinIO Java SDK 8.5.17 标准 S3 客户端；仅证明 S3 连接，原生 MinIO 健康接口不作推断 |
 
 Kafka 使用工厂当前有效配置（包含 bootstrap supplier 的结果），不使用原始 YAML。MongoDB 不读取 customizer 执行前的 settings 模板。MinIO 附件客户端是懒字段，解析配置不触发文件存储业务方法；聊天业务关闭时不把其附件配置认作启用的连接来源。已有连接对象或服务端配置引用被保留供后续只读采集使用。
 
@@ -39,6 +40,8 @@ Kafka 使用工厂当前有效配置（包含 bootstrap supplier 的结果），
 合并目标仍保留每个 `SourceBinding` 自己的凭据及范围。公开目录中的范围并集只用于说明声明范围；采集必须使用各来源自己的范围，不能拿一个来源的凭据访问另一个来源授权的范围。空范围不授权枚举所有资源。
 
 示例见 [middleware-monitoring-config.yml](middleware-monitoring-config.yml)。示例包含七条目标声明、六类中间件；两条 Redis 声明是否合并取决于实际连接。
+
+MinIO 的桶检查使用显式 `scope.buckets`；该列表为空且来源是附件配置时，仅检查附件配置里的那一个桶。没有任何已配置桶时不枚举桶。S3 客户端保留现有端点、地域、静态凭据及 TLS 设置，不兼容的自定义路由或认证返回不支持，详情见 [MinIO 采集说明](middleware-monitoring-minio.md)。
 
 ## 验证
 

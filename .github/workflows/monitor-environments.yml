@@ -58,6 +58,11 @@ jobs:
         run: >-
           bash mvnw -B -Dtest=MonitoringElasticsearchAdapterIntegrationTest
           -Dmonitor.test.type=elasticsearch test
+      - name: Verify MinIO native health, configured bucket permissions and read-only collection
+        if: matrix.type == 'minio'
+        run: >-
+          bash mvnw -B -Dtest=MonitoringMinioAdapterIntegrationTest
+          -Dmonitor.test.type=minio test
       - uses: actions/upload-artifact@v4
         if: always()
         with:

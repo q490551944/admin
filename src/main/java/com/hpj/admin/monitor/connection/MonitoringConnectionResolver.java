@@ -6,6 +6,7 @@ import com.hpj.admin.common.config.monitor.MonitoringProperties;
 import com.hpj.admin.monitor.MiddlewareType;
 import com.hpj.admin.monitor.MonitoringTarget;
 import com.mongodb.client.MongoClient;
+import io.minio.MinioClient;
 import org.elasticsearch.client.RestClient;
 import org.redisson.api.RedissonClient;
 import org.springframework.aop.support.AopUtils;
@@ -132,7 +133,7 @@ public final class MonitoringConnectionResolver {
             case KAFKA -> instance instanceof KafkaAdmin || instance instanceof ProducerFactory<?, ?> || instance instanceof ConsumerFactory<?, ?>;
             case MONGODB -> instance instanceof MongoClient;
             case ELASTICSEARCH -> instance instanceof ElasticsearchClient || instance instanceof RestClient;
-            case MINIO -> instance instanceof ChatProperties;
+            case MINIO -> instance instanceof ChatProperties || instance instanceof MinioClient;
         };
     }
 

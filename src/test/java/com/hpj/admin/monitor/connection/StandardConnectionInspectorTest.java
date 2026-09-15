@@ -9,6 +9,7 @@ import com.alibaba.druid.pool.DruidPooledConnection;
 import com.hpj.admin.chat.MinioChatObjectStorage;
 import com.hpj.admin.common.config.chat.ChatProperties;
 import com.hpj.admin.monitor.MiddlewareType;
+import io.minio.MinioClient;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoCredential;
@@ -52,6 +53,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 class StandardConnectionInspectorTest {
+    @Test
+    void existingS3ClientCanBeResolvedWithoutNativeMinioHealthOrNetworkAccess() throws Exception {
+        try (MinioClient client = MinioClient.builder().endpoint("http://127.0.0.1:1")
+                .region("us-east-1").credentials("owned-access", "owned-secret").build()) {
+            var resolved = new StandardConnectionInspector().inspect("s3Client", client).orElseThrow();
+            assertThat(resolved.type()).isEqualTo(MiddlewareType.MINIO);
+            assertThat(resolved.client()).isSameAs(client);
+            assertThat(resolved.toString()).doesNotContain("owned-access", "owned-secret", "127.0.0.1");
+        }
+    }
+
     private final StandardConnectionInspector inspector = new StandardConnectionInspector();
 
     @Test

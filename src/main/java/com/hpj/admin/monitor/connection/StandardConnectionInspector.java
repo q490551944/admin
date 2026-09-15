@@ -6,6 +6,8 @@ import com.alibaba.druid.pool.DruidDataSource;
 import com.hpj.admin.common.config.chat.ChatProperties;
 import com.hpj.admin.common.config.monitor.MonitoringProperties;
 import com.hpj.admin.monitor.MiddlewareType;
+import com.hpj.admin.monitor.minio.MinioMonitoringConnections;
+import io.minio.MinioClient;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.client.internal.MongoClientImpl;
 import com.zaxxer.hikari.HikariDataSource;
@@ -73,6 +75,7 @@ public final class StandardConnectionInspector implements ConnectionInspector {
                 return elasticsearch(source, singleton, transport.restClient(), transport);
             }
             if (singleton instanceof RestClient restClient) return elasticsearch(source, singleton, restClient, null);
+            if (singleton instanceof MinioClient minio) return MinioMonitoringConnections.inspect(source, minio);
             if (singleton instanceof ChatProperties chat) return minio(source, chat);
         } catch (RuntimeException ignored) {
             // Metadata can contain credentials. A failed inspection is missing evidence, not a loggable raw exception.
