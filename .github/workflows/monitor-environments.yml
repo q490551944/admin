@@ -48,6 +48,11 @@ jobs:
         run: >-
           bash mvnw -B -Dtest=MonitoringKafkaAdapterIntegrationTest
           -Dmonitor.test.type=kafka test
+      - name: Verify MongoDB native metrics, permissions and read-only collection
+        if: matrix.type == 'mongodb'
+        run: >-
+          bash mvnw -B -Dtest=MonitoringMongoAdapterIntegrationTest
+          -Dmonitor.test.type=mongodb test
       - uses: actions/upload-artifact@v4
         if: always()
         with:
