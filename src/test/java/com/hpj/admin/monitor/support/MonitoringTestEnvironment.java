@@ -39,6 +39,7 @@ import org.bson.Document;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
+import org.elasticsearch.client.RestClientBuilder;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.wait.strategy.AbstractWaitStrategy;
@@ -83,6 +84,7 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
 
     private final String type;
     private final boolean kafkaAuthorizer;
+    private final MonitoringTlsMaterial elasticsearchTls;
     private final String id = "monitor-" + UUID.randomUUID().toString().replace("-", "");
     private final String resourceName = "mon_" + UUID.randomUUID().toString().replace("-", "");
     private final String password = UUID.randomUUID().toString().replace("-", "");
@@ -101,8 +103,16 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
     }
 
     private MonitoringTestEnvironment(String type, boolean kafkaAuthorizer) {
+        this(type, kafkaAuthorizer, null);
+    }
+
+    private MonitoringTestEnvironment(String type, boolean kafkaAuthorizer, MonitoringTlsMaterial elasticsearchTls) {
         this.type = normalizeType(type);
         this.kafkaAuthorizer = kafkaAuthorizer;
+        this.elasticsearchTls = elasticsearchTls;
+        if (elasticsearchTls != null && !this.type.equals("elasticsearch")) {
+            throw new IllegalArgumentException("HTTPS fixture requires Elasticsearch");
+        }
         if (kafkaAuthorizer && !this.type.equals("kafka")) {
             throw new IllegalArgumentException("Kafka authorization fixture requires Kafka");
         }
@@ -141,6 +151,18 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
     /** Fixed opt-in mode for ACL tests; default environments retain their original behavior. */
     public static MonitoringTestEnvironment startKafkaWithAuthorizer() {
         return start(new MonitoringTestEnvironment("kafka", true));
+    }
+
+    /** Fixed HTTPS mode with private localhost trust material; never accepts an external endpoint. */
+    public static MonitoringTestEnvironment startElasticsearchWithTls() {
+        MonitoringTlsMaterial material;
+        try { material = MonitoringTlsMaterial.create(); }
+        catch (IOException failure) { throw new IllegalStateException("Cannot prepare owned Elasticsearch TLS fixture"); }
+        try { return start(new MonitoringTestEnvironment("elasticsearch", false, material)); }
+        catch (RuntimeException | LinkageError failure) {
+            try { material.close(); } catch (IOException ignored) { }
+            throw failure;
+        }
     }
 
     private static MonitoringTestEnvironment start(MonitoringTestEnvironment environment) {
@@ -184,7 +206,7 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
         if (!type.equals("elasticsearch") && !type.equals("minio")) {
             throw new IllegalStateException("HTTP endpoint only available for HTTP middleware");
         }
-        return "http://" + host() + ":" + port();
+        return (elasticsearchTls == null ? "http://" : "https://") + host() + ":" + port();
     }
 
     /** Connection URL deliberately excludes user/password; callers must never log credentials. */
@@ -228,13 +250,26 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
     }
 
     public RestClient elasticsearchClient() {
+        return elasticsearchClient(username, password, true);
+    }
+
+    /** Test-only authentication/trust variants still target this owned container's exact endpoint. */
+    public RestClient elasticsearchClient(String username, String password, boolean trustOwnedCertificate) {
         requireType("elasticsearch");
+        if (!trustOwnedCertificate && elasticsearchTls == null) {
+            throw new IllegalStateException("Untrusted certificate variant requires owned TLS fixture");
+        }
         String authorization = Base64.getEncoder().encodeToString(
                 (username + ":" + password).getBytes(StandardCharsets.UTF_8));
-        return RestClient.builder(new HttpHost(host(), port(), "http"))
+        RestClientBuilder builder = RestClient.builder(new HttpHost(host(), port(), elasticsearchTls == null ? "http" : "https"))
                 .setDefaultHeaders(new BasicHeader[]{new BasicHeader("Authorization", "Basic " + authorization)})
                 .setRequestConfigCallback(config -> config.setConnectTimeout(3000)
-                        .setSocketTimeout(3000).setConnectionRequestTimeout(3000)).build();
+                        .setSocketTimeout(3000).setConnectionRequestTimeout(3000));
+        if (elasticsearchTls != null) {
+            builder.setHttpClientConfigCallback(http -> http.setSSLContext(trustOwnedCertificate
+                    ? elasticsearchTls.trustedClientContext() : elasticsearchTls.untrustedClientContext()));
+        }
+        return builder.build();
     }
 
     /** The environment owns the shared HTTP resources behind this client. */
@@ -274,11 +309,20 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
             case "redis" -> instance.withCommand("redis-server", "--requirepass", password, "--appendonly", "yes");
             case "mongodb" -> instance.withEnv("MONGO_INITDB_ROOT_USERNAME", username)
                     .withEnv("MONGO_INITDB_ROOT_PASSWORD", password);
-            case "elasticsearch" -> instance.withEnv("discovery.type", "single-node")
-                    .withEnv("xpack.security.enabled", "true")
-                    .withEnv("xpack.security.http.ssl.enabled", "false")
-                    .withEnv("xpack.security.transport.ssl.enabled", "false")
-                    .withEnv("ELASTIC_PASSWORD", password).withEnv("ES_JAVA_OPTS", "-Xms512m -Xmx512m");
+            case "elasticsearch" -> {
+                instance.withEnv("discovery.type", "single-node")
+                        .withEnv("xpack.security.enabled", "true")
+                        .withEnv("xpack.security.http.ssl.enabled", elasticsearchTls == null ? "false" : "true")
+                        .withEnv("xpack.security.transport.ssl.enabled", "false")
+                        .withEnv("ELASTIC_PASSWORD", password).withEnv("ES_JAVA_OPTS", "-Xms512m -Xmx512m");
+                if (elasticsearchTls != null) {
+                    elasticsearchTls.copyTo(instance);
+                    instance.withEnv("xpack.security.autoconfiguration.enabled", "false")
+                            .withEnv("xpack.security.http.ssl.key", "monitor-http.key")
+                            .withEnv("xpack.security.http.ssl.certificate", "monitor-http.crt")
+                            .withEnv("xpack.security.http.ssl.client_authentication", "none");
+                }
+            }
             case "minio" -> instance.withEnv("MINIO_ROOT_USER", username)
                     .withEnv("MINIO_ROOT_PASSWORD", password)
                     .withCommand("server", "/data", "--console-address", ":9001");
@@ -597,6 +641,7 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
         report.put("id", id);
         report.put("type", type);
         if (kafkaAuthorizer) report.put("authorization", "native-standard-authorizer");
+        if (elasticsearchTls != null) report.put("transport", "https-owned-certificate");
         report.put("image", image());
         report.put("resourceName", resourceName());
         report.put("status", status);
@@ -634,11 +679,20 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
             try {
                 container.close();
                 verifyOwnedContainersRemoved();
+                if (elasticsearchTls != null) elasticsearchTls.close();
                 closed = true;
                 try { writeSummary("closed"); } catch (IOException failure) { diagnostic("save final status", failure); }
             } catch (Exception failure) {
                 diagnostic("remove owned container", failure);
                 cleanupFailure = failure("close");
+            } finally {
+                if (!closed && elasticsearchTls != null) {
+                    try { elasticsearchTls.close(); }
+                    catch (IOException failure) {
+                        diagnostic("remove owned TLS material", failure);
+                        cleanupFailure = failure("close");
+                    }
+                }
             }
         }
         if (cleanupFailure != null) { throw cleanupFailure; }

@@ -22,7 +22,7 @@ public final class MetricContract {
     public enum ServiceAvailability { AVAILABLE, DEGRADED, CONNECTION_FAILED, UNKNOWN }
     public enum CollectionStatus { SUCCESS, PARTIAL, UNAUTHORIZED, UNSUPPORTED, BUSY, FAILED, STALE, WAITING }
     public enum MissingReason {
-        UNSUPPORTED, UNAUTHORIZED, NOT_APPLICABLE, WAITING_SAMPLE, NO_REQUESTS, BUSY, TIMEOUT, FAILED, INVALID_VALUE
+        UNSUPPORTED, UNAUTHORIZED, NOT_APPLICABLE, WAITING_SAMPLE, NO_REQUESTS, BUSY, TIMEOUT, TLS_FAILED, FAILED, INVALID_VALUE
     }
     public enum Unit { COUNT, COUNT_PER_SECOND, BYTES, BYTES_PER_SECOND, SECONDS, MILLISECONDS, PERCENT, CORES, TEXT, BOOLEAN }
     public enum ScopeKind {
@@ -103,8 +103,9 @@ public final class MetricContract {
             require(availability != ServiceAvailability.UNKNOWN || reason != null,
                     "an unknown service observation requires a reason");
             require(availability != ServiceAvailability.CONNECTION_FAILED
-                            || reason != MissingReason.UNAUTHORIZED && reason != MissingReason.UNSUPPORTED,
-                    "authorization and unsupported capabilities do not prove a connection failure");
+                            || reason != MissingReason.UNAUTHORIZED && reason != MissingReason.UNSUPPORTED
+                            && reason != MissingReason.TLS_FAILED,
+                    "authorization, TLS verification and unsupported capabilities do not prove service unavailability");
         }
     }
 
@@ -229,7 +230,8 @@ public final class MetricContract {
             case UNSUPPORTED -> reason == MissingReason.UNSUPPORTED || reason == MissingReason.NOT_APPLICABLE;
             case BUSY -> reason == MissingReason.BUSY;
             case WAITING -> reason == MissingReason.WAITING_SAMPLE || reason == MissingReason.NO_REQUESTS;
-            case FAILED -> reason == MissingReason.FAILED || reason == MissingReason.TIMEOUT || reason == MissingReason.INVALID_VALUE;
+            case FAILED -> reason == MissingReason.FAILED || reason == MissingReason.TIMEOUT
+                    || reason == MissingReason.TLS_FAILED || reason == MissingReason.INVALID_VALUE;
         };
         require(valid, "collection status and reason must agree");
     }

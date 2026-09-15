@@ -9,6 +9,7 @@ import com.hpj.admin.monitor.mysql.MysqlMonitoringAdapter;
 import com.hpj.admin.monitor.redis.RedisMonitoringAdapter;
 import com.hpj.admin.monitor.kafka.KafkaMonitoringAdapter;
 import com.hpj.admin.monitor.mongodb.MongoMonitoringAdapter;
+import com.hpj.admin.monitor.elasticsearch.ElasticsearchMonitoringAdapter;
 import com.mongodb.client.MongoClient;
 import io.minio.MinioClient;
 import org.apache.kafka.clients.admin.AdminClient;
@@ -125,6 +126,8 @@ class MonitoringCatalogTest {
                             .hasValueSatisfying(adapter -> assertThat(adapter).isInstanceOf(KafkaMonitoringAdapter.class));
                     assertThat(context.getBean(MonitoringAdapterRegistry.class).find(MiddlewareType.MONGODB))
                             .hasValueSatisfying(adapter -> assertThat(adapter).isInstanceOf(MongoMonitoringAdapter.class));
+                    assertThat(context.getBean(MonitoringAdapterRegistry.class).find(MiddlewareType.ELASTICSEARCH))
+                            .hasValueSatisfying(adapter -> assertThat(adapter).isInstanceOf(ElasticsearchMonitoringAdapter.class));
                     MonitoringCatalog.TypeCatalog redis = type(context.getBean(MonitoringCatalog.class).snapshot(List.of()),
                             MiddlewareType.REDIS);
                     assertThat(redis.status()).isEqualTo(monitorEnabled ? CONFIGURATION_MISSING : DISABLED);

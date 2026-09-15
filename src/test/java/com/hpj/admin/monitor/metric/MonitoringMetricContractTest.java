@@ -162,7 +162,7 @@ class MonitoringMetricContractTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = MissingReason.class, names = {"UNAUTHORIZED", "UNSUPPORTED"})
+    @EnumSource(value = MissingReason.class, names = {"UNAUTHORIZED", "UNSUPPORTED", "TLS_FAILED"})
     void authorizationAndUnsupportedMetricsNeverBecomeConnectionFailures(MissingReason reason) {
         assertThatThrownBy(() -> new ServiceProbe(ServiceAvailability.CONNECTION_FAILED, reason, PROCESS, NOW, NOW.plus(TTL)))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -308,6 +308,18 @@ class MonitoringMetricContractTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new Attempt("factory", "orders-binding", CollectionKind.ORDINARY, 1, NOW, NOW,
                 CollectionStatus.BUSY, MissingReason.UNSUPPORTED)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void tlsVerificationFailureIsAnExplicitFailedCollectionWithUnknownServiceAvailability() {
+        var result = new CollectionResult(CollectionStatus.FAILED, NOW, NOW, List.of(),
+                new ServiceProbe(ServiceAvailability.UNKNOWN, MissingReason.TLS_FAILED, PROCESS, NOW, NOW.plus(TTL)),
+                false, MissingReason.TLS_FAILED);
+        assertThat(result.reason()).isEqualTo(MissingReason.TLS_FAILED);
+        assertThat(new Attempt("factory", "binding", CollectionKind.ORDINARY, 1, NOW, NOW,
+                result.status(), result.reason()).reason()).isEqualTo(MissingReason.TLS_FAILED);
+        assertThatThrownBy(() -> new CollectionResult(CollectionStatus.UNAUTHORIZED, NOW, NOW, List.of(), null,
+                false, MissingReason.TLS_FAILED)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

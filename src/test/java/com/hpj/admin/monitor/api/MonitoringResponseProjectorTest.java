@@ -252,6 +252,22 @@ class MonitoringResponseProjectorTest {
     }
 
     @Test
+    void tlsFailureSurvivesThePublicReadModelWithoutBecomingAnAuthorizationFailure() throws Exception {
+        ReadTarget target = configured("es", binding("es", "0"));
+        StoredMetric missing = new StoredMetric(SOURCE, "es", CollectionKind.ORDINARY,
+                MetricSample.missing(definition("cluster.status", "cluster"), MissingReason.TLS_FAILED, SAMPLE_TIME), null);
+        TargetSnapshot sample = snapshot("es",
+                List.of(attempt("es", CollectionKind.ORDINARY, CollectionStatus.FAILED, MissingReason.TLS_FAILED)),
+                List.of(missing), Map.of("es", probe(ServiceAvailability.UNKNOWN, MissingReason.TLS_FAILED, "cluster")));
+        DetailResponse response = projector.detail(state(List.of(target), sample), SERVER_TIME, "es").orElseThrow();
+        assertThat(response.target().collections().get(0).reason()).isEqualTo(MissingReason.TLS_FAILED);
+        assertThat(response.capabilities().get(0).capability()).isEqualTo(Capability.UNKNOWN);
+        assertThat(response.capabilities().get(0).latestMissingReason()).isEqualTo(MissingReason.TLS_FAILED);
+        assertThat(new ObjectMapper().registerModule(new JavaTimeModule()).writeValueAsString(response))
+                .contains("TLS_FAILED").doesNotContain("UNAUTHORIZED", "SSLHandshakeException", "CertificateException");
+    }
+
+    @Test
     void partialMetricsKeepOriginalScopesWithoutInventingClusterTotalsOrCoverage() {
         ReadTarget target = configured("redis-a", binding("redis-a", "0", "1", "2"));
         StoredMetric first = success("redis-a", CollectionKind.CAPACITY, "database.bytes", "db-0", 100, SAMPLE_TIME, 180);
