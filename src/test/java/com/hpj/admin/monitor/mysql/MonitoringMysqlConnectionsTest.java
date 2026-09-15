@@ -17,6 +17,7 @@ import java.net.SocketTimeoutException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
@@ -25,9 +26,11 @@ import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -356,22 +359,325 @@ class MonitoringMysqlConnectionsTest {
         }
     }
 
+    @Test
+    void bufferPoolShowWhitelistUsesNativeBytesAndOnlyRequiredCounters() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            Connection connection = mock(Connection.class);
+            Statement status = mock(Statement.class), variables = mock(Statement.class);
+            when(connection.createStatement()).thenReturn(status, variables);
+            ResultSet statusRows = rows(new String[]{"Innodb_buffer_pool_bytes_data", "65536"},
+                    new String[]{"Innodb_buffer_pool_reads", "4"}, new String[]{"Innodb_buffer_pool_read_requests", "400"});
+            ResultSet variableRows = rows(new String[]{"innodb_buffer_pool_size", "134217728"});
+            when(status.executeQuery(anyString())).thenReturn(statusRows);
+            when(variables.executeQuery(anyString())).thenReturn(variableRows);
+            try (var session = new MysqlMonitoringConnections(host -> connection).open(fixture.request())) {
+                assertThat(session.globalStatus()).containsEntry("Innodb_buffer_pool_bytes_data", "65536")
+                        .containsEntry("Innodb_buffer_pool_reads", "4").containsEntry("Innodb_buffer_pool_read_requests", "400");
+                assertThat(session.globalVariables()).containsEntry("innodb_buffer_pool_size", "134217728");
+            }
+            verify(status).executeQuery("SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Threads_running','Questions','Slow_queries','Uptime',"
+                    + "'Innodb_buffer_pool_bytes_data','Innodb_buffer_pool_reads','Innodb_buffer_pool_read_requests')");
+            verify(variables).executeQuery("SHOW GLOBAL VARIABLES WHERE Variable_name IN ('max_connections','server_uuid','innodb_buffer_pool_size')");
+            verify(statusRows).close();
+            verify(variableRows).close();
+        }
+    }
+
+    @Test
+    void capacityBindsDatabaseAndTableNamesAndReadsDynamicStatsOnlyAfterBoundedSelection() throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            String database = "quoted' OR 1=1 --";
+            String table = "odd'name";
+            f.databases = List.of(database);
+            CapacityScript script = new CapacityScript()
+                    .add(new String[]{database})
+                    .add(new String[]{database, table}, new String[]{database, "next-table"}, new String[]{database, "sentinel-table"})
+                    .add(new String[]{database, table, "InnoDB", "16384", "0"}, new String[]{database, "next-table", "InnoDB", null, "8192"});
+            try (var session = script.access().open(f.request())) {
+                var result = session.database(database, 2);
+                assertThat(result.visible()).isTrue();
+                assertThat(result.canonicalName()).isEqualTo(database);
+                assertThat(result.selectedTables()).containsExactly(table, "next-table");
+                assertThat(result.tables()).hasSize(2);
+                assertThat(result.tables().get(1).dataLength()).isNull();
+                assertThat(result.truncated()).isTrue();
+                assertThat(result.reason()).isNull();
+                assertThat(session.remainingTableBudget()).isZero();
+            }
+            assertThat(script.queries).hasSize(3);
+            assertThat(script.queries.get(0).sql).isEqualTo(MysqlMonitoringConnections.DATABASE);
+            assertThat(script.queries.get(0).parameters).containsExactlyEntriesOf(Map.of(1, database));
+            assertThat(script.queries.get(1).sql).isEqualTo(MysqlMonitoringConnections.TABLE_NAMES)
+                    .doesNotContain("DATA_LENGTH", "INDEX_LENGTH", "SUM(");
+            assertThat(script.queries.get(1).parameters).containsExactlyInAnyOrderEntriesOf(Map.of(1, database, 2, database, 3, 3));
+            assertThat(script.queries.get(2).sql).isEqualTo(MysqlMonitoringConnections.TABLE_SIZES_PREFIX
+                    + "CAST(? AS BINARY),CAST(? AS BINARY)) LIMIT ?");
+            assertThat(script.queries.get(2).parameters).containsExactlyInAnyOrderEntriesOf(Map.of(1, database, 2, database, 3, table, 4, "next-table", 5, 3));
+            assertThat(script.queries).allSatisfy(query -> assertThat(query.sql).doesNotContain(database, table, "sentinel-table"));
+            script.verifyClosed();
+            verifyNoInteractions(f.business);
+        }
+    }
+
+    @Test
+    void globalTableBudgetCannotBeMultipliedAcrossDatabasesOrIncreasedByLaterCaller() throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            f.databases = List.of("first", "second", "third");
+            CapacityScript script = new CapacityScript()
+                    .add(new String[]{"first"}).add(new String[]{"first", "one"})
+                    .add(new String[]{"first", "one", "InnoDB", "1", "2"})
+                    .add(new String[]{"second"}).add(new String[]{"second", "two"}, new String[]{"second", "three"})
+                    .add(new String[]{"second", "two", "InnoDB", "3", "4"});
+            try (var session = script.access().open(f.request())) {
+                assertThat(session.database("first", 2).truncated()).isFalse();
+                assertThat(session.remainingTableBudget()).isEqualTo(1);
+                var second = session.database("second", MysqlMonitoringConnections.MAX_TABLES);
+                assertThat(second.selectedTables()).containsExactly("two");
+                assertThat(second.truncated()).isTrue();
+                assertThat(session.remainingTableBudget()).isZero();
+                assertThatThrownBy(() -> session.database("third", 1000)).isInstanceOf(SQLFeatureNotSupportedException.class);
+            }
+            assertThat(script.queries).hasSize(6);
+            assertThat(script.queries.get(4).parameters.get(3)).isEqualTo(2);
+            assertThat(script.queries.get(5).parameters.values()).doesNotContain("three");
+            script.verifyClosed();
+        }
+    }
+
+    @Test
+    void invisibleDatabaseAndVisibleZeroTableScopeAreDistinctWithoutZeroByteFabrication() throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            f.databases = List.of("invisible", "visible");
+            CapacityScript script = new CapacityScript().add().add(new String[]{"visible"}).add();
+            try (var session = script.access().open(f.request())) {
+                var invisible = session.database("invisible", 10);
+                assertThat(invisible.visible()).isFalse();
+                assertThat(invisible.canonicalName()).isNull();
+                assertThat(invisible.selectedTables()).isEmpty();
+                var empty = session.database("visible", 10);
+                assertThat(empty.visible()).isTrue();
+                assertThat(empty.canonicalName()).isEqualTo("visible");
+                assertThat(empty.selectedTables()).isEmpty();
+                assertThat(empty.tables()).isEmpty();
+                assertThat(empty.reason()).isNull();
+                assertThat(session.remainingTableBudget()).isEqualTo(10);
+            }
+            assertThat(script.queries).hasSize(3);
+            assertThat(script.queries).noneSatisfy(query -> assertThat(query.sql).contains("DATA_LENGTH"));
+            script.verifyClosed();
+        }
+    }
+
+    @Test
+    void scopeKindDuplicateDatabaseAndCallerBoundsAreCheckedBeforeQuery() throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            f.databases = List.of("allowed");
+            CapacityScript script = new CapacityScript().add();
+            try (var session = script.access().open(f.request())) {
+                assertThatThrownBy(() -> session.database("outside", 1)).isInstanceOf(SQLFeatureNotSupportedException.class);
+                assertThatThrownBy(() -> session.database("allowed", 0)).isInstanceOf(SQLFeatureNotSupportedException.class);
+                assertThatThrownBy(() -> session.database("allowed", 1001)).isInstanceOf(SQLFeatureNotSupportedException.class);
+                assertThat(script.queries).isEmpty();
+                session.database("allowed", 1);
+                assertThatThrownBy(() -> session.database("allowed", 1)).isInstanceOf(SQLFeatureNotSupportedException.class);
+                assertThat(script.queries).hasSize(1);
+            }
+        }
+        try (Fixture f = new Fixture()) {
+            f.databases = List.of("allowed");
+            CapacityScript script = new CapacityScript();
+            try (var session = script.access().open(f.request())) {
+                assertThatThrownBy(() -> session.database("allowed", 1)).isInstanceOf(SQLFeatureNotSupportedException.class);
+                assertThat(script.queries).isEmpty();
+            }
+        }
+    }
+
+    @Test
+    void canonicalCaseFromServerIsPinnedAndCannotBeCountedTwiceThroughScopeAliases() throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            f.databases = List.of("DATABASE", "database");
+            CapacityScript script = new CapacityScript().add(new String[]{"database"}).add(new String[]{"database", "Case"})
+                    .add(new String[]{"database", "Case", "InnoDB", "1", "2"}).add(new String[]{"database"});
+            try (var session = script.access().open(f.request())) {
+                var result = session.database("DATABASE", 10);
+                assertThat(result.canonicalName()).isEqualTo("database");
+                assertThat(script.queries.get(1).parameters.get(1)).isEqualTo("database");
+                assertThat(script.queries.get(2).sql).contains("CAST(TABLE_SCHEMA AS BINARY)", "CAST(TABLE_NAME AS BINARY)");
+                assertThatThrownBy(() -> session.database("database", 9)).isInstanceOf(SQLFeatureNotSupportedException.class);
+            }
+            assertThat(script.queries).hasSize(4);
+        }
+    }
+
+    @Test
+    void deniedStatisticsKeepSelectedNamesAndTheirBudgetWhileOtherDatabaseRemainsReadable() throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            f.databases = List.of("first", "second");
+            CapacityScript script = new CapacityScript().add(new String[]{"first"}).add(new String[]{"first", "selected"})
+                    .fail(new SQLException("denied private-user private-host", "42000", 1142))
+                    .add(new String[]{"second"}).add(new String[]{"second", "allowed"})
+                    .add(new String[]{"second", "allowed", "InnoDB", "1", "2"});
+            try (var session = script.access().open(f.request())) {
+                var denied = session.database("first", 2);
+                assertThat(denied.selectedTables()).containsExactly("selected");
+                assertThat(denied.reason()).isEqualTo(MetricContract.MissingReason.UNAUTHORIZED);
+                assertThat(denied.tables()).isEmpty();
+                assertThat(session.remainingTableBudget()).isEqualTo(1);
+                var available = session.database("second", 1);
+                assertThat(available.tables()).hasSize(1);
+                assertThat(available.reason()).isNull();
+            }
+            script.verifyClosed();
+        }
+    }
+
+    @Test
+    void deniedNameLookupConsumesNoSelectedRowsAndCanContinueWithAnotherDatabase() throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            f.databases = List.of("first", "second");
+            CapacityScript script = new CapacityScript().add(new String[]{"first"})
+                    .fail(new SQLException("private permission text", "42000", 1142))
+                    .add(new String[]{"second"}).add();
+            try (var session = script.access().open(f.request())) {
+                assertThat(session.database("first", 2).reason()).isEqualTo(MetricContract.MissingReason.UNAUTHORIZED);
+                assertThat(session.remainingTableBudget()).isEqualTo(2);
+                assertThat(session.database("second", 2).reason()).isNull();
+            }
+            script.verifyClosed();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"wrong-schema", "duplicate", "unselected", "oversized-number"})
+    void malformedStatisticsCannotEscapeSelectedSchemaOrNameList(String error) throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            f.databases = List.of("database");
+            CapacityScript script = new CapacityScript().add(new String[]{"database"}).add(new String[]{"database", "selected"});
+            switch (error) {
+                case "wrong-schema" -> script.add(new String[]{"other", "selected", "InnoDB", "1", "2"});
+                case "duplicate" -> script.add(new String[]{"database", "selected", "InnoDB", "1", "2"}, new String[]{"database", "selected", "InnoDB", "1", "2"});
+                case "unselected" -> script.add(new String[]{"database", "outside", "InnoDB", "1", "2"});
+                case "oversized-number" -> script.add(new String[]{"database", "selected", "InnoDB", "1".repeat(21), "2"});
+                default -> throw new AssertionError("Unknown test");
+            }
+            try (var session = script.access().open(f.request())) {
+                var result = session.database("database", 2);
+                assertThat(result.reason()).isEqualTo(MetricContract.MissingReason.INVALID_VALUE);
+                assertThat(result.tables()).isEmpty();
+                assertThat(result.selectedTables()).containsExactly("selected");
+            }
+            script.verifyClosed();
+        }
+    }
+
+    @Test
+    void droppedTableBetweenPhasesRemainsASelectedMissingObservation() throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            f.databases = List.of("database");
+            CapacityScript script = new CapacityScript().add(new String[]{"database"}).add(new String[]{"database", "dropped"}).add();
+            try (var session = script.access().open(f.request())) {
+                var result = session.database("database", 2);
+                assertThat(result.selectedTables()).containsExactly("dropped");
+                assertThat(result.tables()).isEmpty();
+                assertThat(session.remainingTableBudget()).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
+    void phaseDeadlineStopsDynamicStatisticsAndRetainsBudgetWithoutQueryTimeoutThreads() throws Exception {
+        try (Fixture f = new Fixture(MetricContract.CollectionKind.CAPACITY)) {
+            f.databases = List.of("database");
+            CapacityScript script = new CapacityScript().add(new String[]{"database"}).add(new String[]{"database", "selected"});
+            script.onExecute = sql -> { if (sql.equals(MysqlMonitoringConnections.TABLE_NAMES)) f.ticker.set(TimeUnit.SECONDS.toNanos(5)); };
+            try (var session = script.access().open(f.request())) {
+                var result = session.database("database", 2);
+                assertThat(result.reason()).isEqualTo(MetricContract.MissingReason.TIMEOUT);
+                assertThat(script.queries).hasSize(2);
+            }
+            script.verifyClosed();
+        }
+    }
+
+    private static ResultSet rows(String[]... records) throws SQLException {
+        ResultSet result = mock(ResultSet.class);
+        AtomicInteger index = new AtomicInteger(-1);
+        when(result.next()).thenAnswer(invocation -> index.incrementAndGet() < records.length);
+        when(result.getString(anyInt())).thenAnswer(invocation -> records[index.get()][invocation.<Integer>getArgument(0) - 1]);
+        return result;
+    }
+
+    private static final class CapacityScript {
+        private final Connection connection = mock(Connection.class);
+        private final List<Object> results = new ArrayList<>();
+        private final List<Query> queries = new ArrayList<>();
+        private Consumer<String> onExecute = sql -> {};
+        private CapacityScript() throws SQLException {
+            when(connection.prepareStatement(anyString())).thenAnswer(invocation -> {
+                String sql = invocation.getArgument(0);
+                Query query = new Query(sql);
+                int sequence = queries.size();
+                queries.add(query);
+                if (sequence >= results.size()) throw new AssertionError("Unexpected SQL query");
+                Object scripted = results.get(sequence);
+                doAnswer(call -> { query.parameters.put(call.getArgument(0), call.getArgument(1)); return null; }).when(query.statement).setString(anyInt(), anyString());
+                doAnswer(call -> { query.parameters.put(call.getArgument(0), call.getArgument(1)); return null; }).when(query.statement).setInt(anyInt(), anyInt());
+                when(query.statement.executeQuery()).thenAnswer(call -> {
+                    onExecute.accept(sql);
+                    if (scripted instanceof SQLException failure) throw failure;
+                    query.rows = rows((String[][]) scripted);
+                    return query.rows;
+                });
+                return query.statement;
+            });
+        }
+        private CapacityScript add(String[]... rows) { results.add(rows); return this; }
+        private CapacityScript fail(SQLException failure) { results.add(failure); return this; }
+        private MysqlMonitoringConnections access() { return new MysqlMonitoringConnections(host -> connection); }
+        private void verifyClosed() throws SQLException {
+            for (Query query : queries) {
+                verify(query.statement).close();
+                verify(query.statement, never()).setMaxRows(anyInt());
+                verify(query.statement, never()).setQueryTimeout(anyInt());
+                verify(query.statement, never()).cancel();
+                if (query.rows != null) verify(query.rows).close();
+            }
+            verify(connection).abort(any());
+        }
+    }
+    private static final class Query {
+        private final String sql;
+        private final PreparedStatement statement = mock(PreparedStatement.class);
+        private final Map<Integer, Object> parameters = new LinkedHashMap<>();
+        private ResultSet rows;
+        private Query(String sql) { this.sql = sql; }
+    }
+
     private static final class Fixture implements AutoCloseable {
         private final DataSource business = mock(DataSource.class);
         private final AtomicLong ticker = new AtomicLong();
         private final ThreadPoolExecutor cleanup = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(8), new ThreadPoolExecutor.AbortPolicy());
-        private final CollectionControl control = new CollectionControl(new Object(), () -> true, Clock.systemUTC(), ticker::get,
-                TimeUnit.SECONDS.toNanos(5), cleanup, new MonitoringCounterStore(1, 8), "mysql", "dataSource",
-                MetricContract.CollectionKind.ORDINARY, Duration.ofSeconds(15), business);
+        private final CollectionControl control;
+        private final MetricContract.CollectionKind kind;
+        private List<String> databases = List.of();
         private final Map<String, Object> settings = new LinkedHashMap<>(Map.of(
                 "endpoint", "jdbc:mysql://127.0.0.1/test?sslMode=REQUIRED", "username", "resolved-user",
                 "password", "resolved-secret", "properties", Map.of()));
 
+        private Fixture() { this(MetricContract.CollectionKind.ORDINARY); }
+        private Fixture(MetricContract.CollectionKind kind) {
+            this.kind = kind;
+            control = new CollectionControl(new Object(), () -> true, Clock.systemUTC(), ticker::get,
+                    TimeUnit.SECONDS.toNanos(5), cleanup, new MonitoringCounterStore(1, 8), "mysql", "dataSource",
+                    kind, Duration.ofSeconds(kind == MetricContract.CollectionKind.CAPACITY ? 60 : 15), business);
+        }
+
         private CollectionRequest request() {
             Instant now = Instant.now();
-            return new CollectionRequest("mysql", "dataSource", "dataSource", MetricContract.CollectionKind.ORDINARY,
-                    1, 1, now, now.plusSeconds(5), new MonitoringTarget.Scope(List.of(), List.of(), List.of(), List.of(), List.of()),
+            return new CollectionRequest("mysql", "dataSource", "dataSource", kind,
+                    1, 1, now, now.plusSeconds(5), new MonitoringTarget.Scope(databases, List.of(), List.of(), List.of(), List.of()),
                     business, settings, control);
         }
 

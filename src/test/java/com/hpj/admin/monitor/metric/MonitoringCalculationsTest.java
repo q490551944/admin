@@ -33,7 +33,8 @@ class MonitoringCalculationsTest {
     @ParameterizedTest
     @EnumSource(Calculation.class)
     void everyCounterCalculationStartsWithWaitingAndBuildsABaseline(Calculation kind) {
-        CounterSample current = kind == RATE || kind == DELTA ? sample(0, "100") : sample(0, "100", "100");
+        CounterSample current = kind == RATE || kind == DELTA ? sample(0, "100")
+                : kind == MYSQL_HIT_PERCENT_WITH_UPTIME ? sample(0, "100", "100", "100") : sample(0, "100", "100");
         missing(MonitoringCalculations.evaluate(kind, null, current, PERIOD), MissingReason.WAITING_SAMPLE, REPLACE);
     }
 
@@ -120,6 +121,21 @@ class MonitoringCalculationsTest {
     }
 
     @Test
+    void mysqlHitPercentageRebuildsAfterAnObservedRestartEvenWhenBothReadCountersCaughtUp() {
+        var previous = sample(0, "10", "100", "86400");
+        missing(calculate(MYSQL_HIT_PERCENT_WITH_UPTIME, previous, sample(15, "12", "120", "10")),
+                MissingReason.WAITING_SAMPLE, REPLACE);
+        numeric(calculate(MYSQL_HIT_PERCENT_WITH_UPTIME, previous, sample(15, "12", "120", "86415")), "90", REPLACE);
+        missing(calculate(MYSQL_HIT_PERCENT_WITH_UPTIME, previous, sample(15, "10", "100", "86415")),
+                MissingReason.NO_REQUESTS, REPLACE);
+        numeric(calculate(MYSQL_HIT_PERCENT_WITH_UPTIME, previous, sample(15, "30", "120", "86415")), "0", REPLACE);
+        missing(calculate(MYSQL_HIT_PERCENT_WITH_UPTIME, previous, sample(15, "40", "120", "86415")),
+                MissingReason.INVALID_VALUE, REPLACE);
+        missing(calculate(MYSQL_HIT_PERCENT_WITH_UPTIME, previous, sample(15, "12", "120", (String) null)),
+                MissingReason.INVALID_VALUE, KEEP);
+    }
+
+    @Test
     void noRequestsIsDifferentFromANumericZeroHitPercent() {
         missing(calculate(REDIS_HIT_PERCENT, sample(0, "100", "10"), sample(15, "100", "10")),
                 MissingReason.NO_REQUESTS, REPLACE);
@@ -131,8 +147,11 @@ class MonitoringCalculationsTest {
     void processCpuKeepsFractionalSecondsAndCanExceedOneCore() {
         numeric(calculate(CPU_SINGLE_CORE_PERCENT, sample(0, "10", "5"), sample(15, "25", "20")), "200", REPLACE);
         numeric(calculate(CPU_SINGLE_CORE_PERCENT, sample(0, "10.1", "5.2"), sample(15, "10.4", "5.65")), "5", REPLACE);
-        // The contract accepts exactly the two process counters, preventing accidental child-counter summation.
-        assertThatThrownBy(() -> new CounterSample(START, EPOCH, List.of(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ONE)))
+        // This calculation still accepts exactly two process counters; the third slot belongs only to MySQL uptime.
+        missing(calculate(CPU_SINGLE_CORE_PERCENT, sample(0, "10", "5"), sample(15, "25", "20", "7")),
+                MissingReason.INVALID_VALUE, KEEP);
+        assertThatThrownBy(() -> new CounterSample(START, EPOCH,
+                List.of(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ONE, BigDecimal.ONE)))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

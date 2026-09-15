@@ -38,6 +38,11 @@ jobs:
         run: >-
           bash mvnw -B -Dtest=MonitoringMysqlAdapterIntegrationTest
           -Dmonitor.test.type=mysql test
+      - name: Verify MySQL configured database capacity, native permissions and table bounds
+        if: matrix.type == 'mysql'
+        run: >-
+          bash mvnw -B -Dtest=MonitoringMysqlCapacityIntegrationTest
+          -Dmonitor.test.type=mysql test
       - name: Verify Redis native metrics, INFO permissions and runtime client isolation
         if: matrix.type == 'redis'
         run: >-

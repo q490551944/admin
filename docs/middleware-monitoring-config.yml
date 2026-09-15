@@ -14,6 +14,7 @@ monitor:
   allowed-user-ids: [] # Empty denies every user. Use existing positive user IDs when granting access.
   limits:
     databases: 20
+    tables: 1000 # Shared MySQL capacity metadata budget across all configured databases per collection.
     topics: 100
     consumer-groups: 100
     buckets: 20

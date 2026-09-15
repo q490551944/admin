@@ -56,6 +56,7 @@ public class MonitoringProperties {
     @Setter
     public static class Limits {
         private int databases = 20;
+        private int tables = 1000;
         private int topics = 100;
         private int consumerGroups = 100;
         private int buckets = 20;
@@ -82,7 +83,7 @@ public class MonitoringProperties {
         require(allowedUserIds != null && allowedUserIds.stream().allMatch(id -> id != null && id > 0),
                 "allowed-user-ids must contain positive user IDs");
         require(limits != null, "limits are required");
-        for (int limit : List.of(limits.databases, limits.topics, limits.consumerGroups, limits.buckets,
+        for (int limit : List.of(limits.databases, limits.tables, limits.topics, limits.consumerGroups, limits.buckets,
                 limits.indices, limits.partitions, limits.nodes, limits.logDirectories)) {
             require(limit > 0 && limit <= 100_000, "limits must be between 1 and 100000");
         }

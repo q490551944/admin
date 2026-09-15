@@ -40,6 +40,7 @@
 | `DELTA` | 本周期计数差 | 100→130：30 |
 | `REDIS_HIT_PERCENT` | `[hits, misses]` 增量中 hits 的比例 | 增量 10、10：50% |
 | `MYSQL_HIT_PERCENT` | `1 - physicalReads / logicalReads` 的增量比率 | 增量 2、20：90% |
+| `MYSQL_HIT_PERCENT_WITH_UPTIME` | 同上，附带第三个原生 Uptime 计数识别观察到的重启 | 读计数均增加但 Uptime 回退：等待新样本 |
 | `CPU_SINGLE_CORE_PERCENT` | `[process user seconds, process system seconds]` 的增量之和 / 墙钟秒数 × 100 | 增量 15、15，墙钟 15 秒：200% |
 | `percent` | 容量或配置限额的分子 / 正分母 × 100 | 0/100：0%；10/0：不适用；缺失输入：无效值 |
 

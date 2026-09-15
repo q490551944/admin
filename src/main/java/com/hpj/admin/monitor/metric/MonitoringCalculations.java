@@ -23,7 +23,7 @@ public final class MonitoringCalculations {
 
     public enum Calculation {
         RATE(1), DELTA(1), RATE_WITH_UPTIME(2), DELTA_WITH_UPTIME(2),
-        REDIS_HIT_PERCENT(2), MYSQL_HIT_PERCENT(2), CPU_SINGLE_CORE_PERCENT(2);
+        REDIS_HIT_PERCENT(2), MYSQL_HIT_PERCENT(2), MYSQL_HIT_PERCENT_WITH_UPTIME(3), CPU_SINGLE_CORE_PERCENT(2);
 
         private final int counterCount;
 
@@ -36,6 +36,7 @@ public final class MonitoringCalculations {
      * The epoch is an immutable, server-only token for the connection/service generation.
      * Redis uses [hits, misses], MySQL [physical reads, logical reads], CPU [process user seconds, process system seconds].
      * Uptime-aware rate/delta use [counter, native uptime seconds] so a restart also invalidates a rising counter.
+     * Uptime-aware MySQL hit percentage uses [physical reads, logical reads, native uptime seconds].
      * A null counter is an explicit missing native value and is rejected by evaluate, without replacing a good baseline.
      */
     @JsonIgnoreType
@@ -45,7 +46,7 @@ public final class MonitoringCalculations {
             Objects.requireNonNull(at, "sample time");
             Objects.requireNonNull(epoch, "sample epoch");
             Objects.requireNonNull(counters, "sample counters");
-            if (counters.size() > 2) throw new IllegalArgumentException("At most two counters are supported");
+            if (counters.size() > 3) throw new IllegalArgumentException("At most three counters are supported");
             counters = Collections.unmodifiableList(new ArrayList<>(counters));
         }
 
@@ -93,7 +94,7 @@ public final class MonitoringCalculations {
             case RATE, RATE_WITH_UPTIME -> numeric(first.divide(elapsed, PRECISION), BaselineAction.REPLACE);
             case DELTA, DELTA_WITH_UPTIME -> numeric(first, BaselineAction.REPLACE);
             case REDIS_HIT_PERCENT -> ratio(first, first.add(deltas.get(1)), false);
-            case MYSQL_HIT_PERCENT -> ratio(first, deltas.get(1), true);
+            case MYSQL_HIT_PERCENT, MYSQL_HIT_PERCENT_WITH_UPTIME -> ratio(first, deltas.get(1), true);
             case CPU_SINGLE_CORE_PERCENT -> numeric(first.add(deltas.get(1)).multiply(HUNDRED)
                     .divide(elapsed, PRECISION), BaselineAction.REPLACE);
         };
