@@ -33,6 +33,11 @@ jobs:
         run: >-
           bash mvnw -B -Dtest=MonitoringConnectionResolutionIntegrationTest
           -Dmonitor.test.type=redis test
+      - name: Verify MySQL native metrics and business pool isolation
+        if: matrix.type == 'mysql'
+        run: >-
+          bash mvnw -B -Dtest=MonitoringMysqlAdapterIntegrationTest
+          -Dmonitor.test.type=mysql test
       - uses: actions/upload-artifact@v4
         if: always()
         with:

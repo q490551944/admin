@@ -11,6 +11,8 @@ import com.hpj.admin.monitor.metric.MonitoringAdapterRegistry;
 import com.hpj.admin.monitor.metric.MonitoringCounterStore;
 import com.hpj.admin.monitor.metric.MonitoringSnapshotStore;
 import com.hpj.admin.monitor.scheduling.MonitoringScheduler;
+import com.hpj.admin.monitor.mysql.MysqlMonitoringAdapter;
+import com.hpj.admin.monitor.mysql.MysqlMonitoringConnections;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -25,6 +27,11 @@ import java.time.Clock;
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(MonitoringProperties.class)
 public class MonitoringConfiguration {
+    @Bean
+    MysqlMonitoringAdapter mysqlMonitoringAdapter(MonitoringProperties properties) {
+        return new MysqlMonitoringAdapter(properties, new MysqlMonitoringConnections(), Clock.systemUTC());
+    }
+
     @Bean
     MonitoringResponseProjector monitoringResponseProjector() {
         return new MonitoringResponseProjector();
