@@ -43,6 +43,11 @@ jobs:
         run: >-
           bash mvnw -B -Dtest=MonitoringRedisAdapterIntegrationTest
           -Dmonitor.test.type=redis test
+      - name: Verify Kafka scoped metadata, native ACL failures and read-only collection
+        if: matrix.type == 'kafka'
+        run: >-
+          bash mvnw -B -Dtest=MonitoringKafkaAdapterIntegrationTest
+          -Dmonitor.test.type=kafka test
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -82,6 +82,7 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final String type;
+    private final boolean kafkaAuthorizer;
     private final String id = "monitor-" + UUID.randomUUID().toString().replace("-", "");
     private final String resourceName = "mon_" + UUID.randomUUID().toString().replace("-", "");
     private final String password = UUID.randomUUID().toString().replace("-", "");
@@ -96,7 +97,15 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
     private boolean closed;
 
     private MonitoringTestEnvironment(String type) {
+        this(type, false);
+    }
+
+    private MonitoringTestEnvironment(String type, boolean kafkaAuthorizer) {
         this.type = normalizeType(type);
+        this.kafkaAuthorizer = kafkaAuthorizer;
+        if (kafkaAuthorizer && !this.type.equals("kafka")) {
+            throw new IllegalArgumentException("Kafka authorization fixture requires Kafka");
+        }
         this.username = switch (this.type) {
             case "mysql", "mongodb" -> "root";
             case "redis" -> "default";
@@ -126,7 +135,15 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
     }
 
     public static MonitoringTestEnvironment start(String type) {
-        MonitoringTestEnvironment environment = new MonitoringTestEnvironment(type);
+        return start(new MonitoringTestEnvironment(type));
+    }
+
+    /** Fixed opt-in mode for ACL tests; default environments retain their original behavior. */
+    public static MonitoringTestEnvironment startKafkaWithAuthorizer() {
+        return start(new MonitoringTestEnvironment("kafka", true));
+    }
+
+    private static MonitoringTestEnvironment start(MonitoringTestEnvironment environment) {
         try {
             Files.createDirectories(environment.logDirectory);
             environment.container.start();
@@ -265,7 +282,14 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
             case "minio" -> instance.withEnv("MINIO_ROOT_USER", username)
                     .withEnv("MINIO_ROOT_PASSWORD", password)
                     .withCommand("server", "/data", "--console-address", ":9001");
-            default -> { /* Kafka's official module configures its isolated KRaft node. */ }
+            case "kafka" -> {
+                // No superuser: explicit DENY rules must affect the test's anonymous client.
+                // The empty ACL set preserves normal fixture readiness and setup permissions.
+                if (kafkaAuthorizer) instance
+                        .withEnv("KAFKA_AUTHORIZER_CLASS_NAME", "org.apache.kafka.metadata.authorizer.StandardAuthorizer")
+                        .withEnv("KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND", "true");
+            }
+            default -> throw new IllegalStateException("Unsupported fixture type");
         }
         return instance;
     }
@@ -572,6 +596,7 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("id", id);
         report.put("type", type);
+        if (kafkaAuthorizer) report.put("authorization", "native-standard-authorizer");
         report.put("image", image());
         report.put("resourceName", resourceName());
         report.put("status", status);
