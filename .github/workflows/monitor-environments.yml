@@ -38,6 +38,11 @@ jobs:
         run: >-
           bash mvnw -B -Dtest=MonitoringMysqlAdapterIntegrationTest
           -Dmonitor.test.type=mysql test
+      - name: Verify Redis native metrics, INFO permissions and runtime client isolation
+        if: matrix.type == 'redis'
+        run: >-
+          bash mvnw -B -Dtest=MonitoringRedisAdapterIntegrationTest
+          -Dmonitor.test.type=redis test
       - uses: actions/upload-artifact@v4
         if: always()
         with:
