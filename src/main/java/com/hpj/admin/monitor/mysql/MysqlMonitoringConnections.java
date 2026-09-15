@@ -1,5 +1,6 @@
 package com.hpj.admin.monitor.mysql;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreType;
 import com.hpj.admin.monitor.metric.CollectionControl;
 import com.hpj.admin.monitor.metric.CollectionRequest;
 import com.hpj.admin.monitor.metric.MetricContract.MissingReason;
@@ -20,11 +21,14 @@ import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLTimeoutException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -39,11 +43,22 @@ import java.util.concurrent.atomic.AtomicReference;
  * threads are created by this layer. Closing the owned socket cancels connect, handshake and query I/O.
  */
 public class MysqlMonitoringConnections {
+    public static final int MAX_DATABASES = 100;
+    public static final int MAX_TABLES = 1000;
     static final String PROBE = "SELECT 1";
-    static final List<String> STATUS_NAMES = List.of("Threads_connected", "Threads_running", "Questions", "Slow_queries", "Uptime");
-    static final List<String> VARIABLE_NAMES = List.of("max_connections", "server_uuid");
-    static final String STATUS = "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Threads_running','Questions','Slow_queries','Uptime')";
-    static final String VARIABLES = "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('max_connections','server_uuid')";
+    static final List<String> STATUS_NAMES = List.of("Threads_connected", "Threads_running", "Questions", "Slow_queries", "Uptime",
+            "Innodb_buffer_pool_bytes_data", "Innodb_buffer_pool_reads", "Innodb_buffer_pool_read_requests");
+    static final List<String> VARIABLE_NAMES = List.of("max_connections", "server_uuid", "innodb_buffer_pool_size");
+    static final String STATUS = "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Threads_running','Questions','Slow_queries','Uptime',"
+            + "'Innodb_buffer_pool_bytes_data','Innodb_buffer_pool_reads','Innodb_buffer_pool_read_requests')";
+    static final String VARIABLES = "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('max_connections','server_uuid','innodb_buffer_pool_size')";
+    static final String DATABASE = "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ? LIMIT 2";
+    static final String TABLE_NAMES = "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES "
+            + "WHERE TABLE_SCHEMA = ? AND CAST(TABLE_SCHEMA AS BINARY) = CAST(? AS BINARY) AND TABLE_TYPE = 'BASE TABLE' "
+            + "ORDER BY CAST(TABLE_NAME AS BINARY) LIMIT ?";
+    static final String TABLE_SIZES_PREFIX = "SELECT TABLE_SCHEMA, TABLE_NAME, ENGINE, DATA_LENGTH, INDEX_LENGTH "
+            + "FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND CAST(TABLE_SCHEMA AS BINARY) = CAST(? AS BINARY) "
+            + "AND TABLE_TYPE = 'BASE TABLE' AND CAST(TABLE_NAME AS BINARY) IN (";
     private static final ThreadLocal<Attempt> CONNECTING = new ThreadLocal<>();
     private final Connector connector;
 
@@ -58,7 +73,28 @@ public class MysqlMonitoringConnections {
         void probe() throws SQLException;
         Map<String, String> globalStatus() throws SQLException;
         Map<String, String> globalVariables() throws SQLException;
+        default DatabaseCapacity database(String declaredName, int remainingRows) throws SQLException {
+            throw new SQLFeatureNotSupportedException("MySQL capacity operation unavailable", "0A000");
+        }
+        default int remainingTableBudget() { return MAX_TABLES; }
         @Override void close() throws SQLException;
+    }
+
+    @JsonIgnoreType
+    public record TableSize(String schema, String table, String engine, String dataLength, String indexLength) { }
+
+    /** Names are retained when the second-phase statistics query fails, so its budget cannot be reused. */
+    @JsonIgnoreType
+    public record DatabaseCapacity(boolean visible, String canonicalName, List<String> selectedTables,
+                                   List<TableSize> tables, boolean truncated, MissingReason reason) {
+        public DatabaseCapacity(boolean visible, String canonicalName, List<String> selectedTables,
+                                List<TableSize> tables, boolean truncated) {
+            this(visible, canonicalName, selectedTables, tables, truncated, null);
+        }
+        public DatabaseCapacity {
+            selectedTables = List.copyOf(selectedTables);
+            tables = List.copyOf(tables);
+        }
     }
 
     public Session open(CollectionRequest request) throws SQLException {
@@ -73,7 +109,7 @@ public class MysqlMonitoringConnections {
             attempt.accept(connection);
             checkActive(request.control());
             opened = true;
-            return new NativeSession(attempt, connection);
+            return new NativeSession(attempt, connection, request);
         } catch (SQLException failure) {
             throw sanitized(failure, request.control());
         } catch (CollectionControl.InactiveCollectionException inactive) {
@@ -328,7 +364,14 @@ public class MysqlMonitoringConnections {
     private static final class NativeSession implements Session {
         private final Attempt attempt;
         private final Connection connection;
-        private NativeSession(Attempt attempt, Connection connection) { this.attempt = attempt; this.connection = connection; }
+        private final CollectionRequest request;
+        private final Set<String> requestedDatabases = new HashSet<>();
+        private final Set<String> canonicalDatabases = new HashSet<>();
+        private int remainingTables = MAX_TABLES;
+        private boolean capacityBudgetStarted;
+        private NativeSession(Attempt attempt, Connection connection, CollectionRequest request) {
+            this.attempt = attempt; this.connection = connection; this.request = request;
+        }
 
         private void prepare() throws SQLException {
             checkActive(attempt.control);
@@ -348,6 +391,103 @@ public class MysqlMonitoringConnections {
 
         @Override public Map<String, String> globalStatus() throws SQLException { return read(STATUS, STATUS_NAMES); }
         @Override public Map<String, String> globalVariables() throws SQLException { return read(VARIABLES, VARIABLE_NAMES); }
+
+        @Override public int remainingTableBudget() { return remainingTables; }
+
+        @Override public DatabaseCapacity database(String declaredName, int remainingRows) throws SQLException {
+            checkActive(attempt.control);
+            if (request.kind() != com.hpj.admin.monitor.metric.MetricContract.CollectionKind.CAPACITY
+                    || !validDatabase(declaredName) || remainingRows < 1 || remainingRows > MAX_TABLES
+                    || !request.scope().databases().stream().distinct().limit(MAX_DATABASES).toList().contains(declaredName)
+                    || !requestedDatabases.add(declaredName)) throw unsupported();
+            if (!capacityBudgetStarted) {
+                remainingTables = remainingRows;
+                capacityBudgetStarted = true;
+            }
+            int limit = Math.min(remainingRows, remainingTables);
+            if (limit == 0) throw unsupported();
+            String canonical = visibleDatabase(declaredName);
+            if (canonical == null) return new DatabaseCapacity(false, null, List.of(), List.of(), false);
+            if (!canonicalDatabases.add(canonical)) throw unsupported();
+            List<String> selected = new ArrayList<>();
+            List<TableSize> sizes = new ArrayList<>();
+            boolean truncated = false;
+            try {
+                prepare();
+                // Only static dictionary-backed names are requested before the global table budget is applied.
+                try (var statement = connection.prepareStatement(TABLE_NAMES)) {
+                    statement.setString(1, canonical);
+                    statement.setString(2, canonical);
+                    statement.setInt(3, limit + 1);
+                    try (var result = statement.executeQuery()) {
+                        Set<String> seen = new HashSet<>();
+                        while (result.next()) {
+                            checkActive(attempt.control);
+                            String schema = result.getString(1), table = result.getString(2);
+                            if (!canonical.equals(schema) || !validTable(table) || !seen.add(table)) throw invalidCapacity();
+                            if (selected.size() == limit) {
+                                truncated = true;
+                                // A sentinel is never sent to the dynamic statistics query. No further names fit.
+                                remainingTables = 0;
+                                if (result.next()) throw invalidCapacity();
+                                break;
+                            }
+                            selected.add(table);
+                            remainingTables--;
+                        }
+                    }
+                }
+                checkActive(attempt.control);
+                if (!selected.isEmpty()) {
+                    prepare();
+                    String placeholders = String.join(",", Collections.nCopies(selected.size(), "CAST(? AS BINARY)"));
+                    String sql = TABLE_SIZES_PREFIX + placeholders + ") LIMIT ?";
+                    try (var statement = connection.prepareStatement(sql)) {
+                        statement.setString(1, canonical);
+                        statement.setString(2, canonical);
+                        for (int i = 0; i < selected.size(); i++) statement.setString(i + 3, selected.get(i));
+                        statement.setInt(selected.size() + 3, selected.size() + 1);
+                        Set<String> allowedTables = new HashSet<>(selected);
+                        try (var result = statement.executeQuery()) {
+                            Set<String> seen = new HashSet<>();
+                            while (result.next()) {
+                                checkActive(attempt.control);
+                                String schema = result.getString(1), table = result.getString(2);
+                                if (!canonical.equals(schema) || !allowedTables.contains(table) || !seen.add(table)
+                                        || sizes.size() >= selected.size()) throw invalidCapacity();
+                                String engine = result.getString(3), data = result.getString(4), index = result.getString(5);
+                                if (engine != null && (engine.length() > 64 || engine.chars().anyMatch(Character::isISOControl))
+                                        || !boundedSize(data) || !boundedSize(index)) throw invalidCapacity();
+                                sizes.add(new TableSize(schema, table, engine, data, index));
+                            }
+                        }
+                    }
+                }
+                checkActive(attempt.control);
+                return new DatabaseCapacity(true, canonical, selected, sizes, truncated);
+            } catch (SQLException failure) {
+                // Preserve already-selected names even when stats are denied; these names consumed the task budget.
+                return new DatabaseCapacity(true, canonical, selected, List.of(), truncated, capacityReason(sanitized(failure, attempt.control)));
+            }
+        }
+
+        private String visibleDatabase(String declaredName) throws SQLException {
+            try {
+                prepare();
+                String canonical = null;
+                try (var statement = connection.prepareStatement(DATABASE)) {
+                    statement.setString(1, declaredName);
+                    try (var result = statement.executeQuery()) {
+                        if (result.next()) {
+                            canonical = result.getString(1);
+                            if (!validDatabase(canonical) || !canonical.equalsIgnoreCase(declaredName) || result.next()) throw invalidCapacity();
+                        }
+                    }
+                }
+                checkActive(attempt.control);
+                return canonical;
+            } catch (SQLException failure) { throw sanitized(failure, attempt.control); }
+        }
 
         private Map<String, String> read(String sql, List<String> names) throws SQLException {
             try {
@@ -369,5 +509,25 @@ public class MysqlMonitoringConnections {
         }
 
         @Override public void close() throws SQLException { attempt.close(); }
+    }
+
+    static boolean validDatabase(String name) {
+        return validTable(name) && !name.contains(".") && !name.contains("/") && !name.contains("\\");
+    }
+    private static boolean validTable(String name) {
+        return name != null && !name.isBlank() && name.length() <= 64 && !name.endsWith(" ")
+                && name.chars().noneMatch(Character::isISOControl) && name.chars().noneMatch(c -> Character.isSurrogate((char) c));
+    }
+    private static boolean boundedSize(String value) { return value == null || value.length() <= 20; }
+    private static SQLException invalidCapacity() { return new SQLException("Invalid MySQL capacity response", "22000"); }
+    private static MissingReason capacityReason(SQLException failure) {
+        String state = failure.getSQLState();
+        if (failure instanceof SQLTimeoutException || "HYT00".equals(state) || "HYT01".equals(state)) return MissingReason.TIMEOUT;
+        if (failure instanceof SQLFeatureNotSupportedException || state != null && state.startsWith("0A")) return MissingReason.UNSUPPORTED;
+        if (state != null && state.startsWith("22")) return MissingReason.INVALID_VALUE;
+        if (state != null && state.startsWith("28") || "42000".equals(state) && Set.of(1044, 1142, 1143, 1227).contains(failure.getErrorCode())) {
+            return MissingReason.UNAUTHORIZED;
+        }
+        return MissingReason.FAILED;
     }
 }

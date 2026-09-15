@@ -48,6 +48,7 @@ class MonitoringPropertiesTest {
             assertThat(properties.getOrdinaryConcurrency()).isEqualTo(8);
             assertThat(properties.getCapacityConcurrency()).isEqualTo(2);
             assertThat(properties.getMaxTargets()).isEqualTo(20);
+            assertThat(properties.getLimits().getTables()).isEqualTo(1000);
         });
     }
 
@@ -62,6 +63,7 @@ class MonitoringPropertiesTest {
                 Map.entry("monitor.capacity-interval", "2m"),
                 Map.entry("monitor.allowed-user-ids[0]", "42"),
                 Map.entry("monitor.limits.databases", "1"),
+                Map.entry("monitor.limits.tables", "25"),
                 Map.entry("monitor.limits.topics", "1"),
                 Map.entry("monitor.limits.consumer-groups", "1"),
                 Map.entry("monitor.limits.buckets", "1"),
@@ -103,6 +105,7 @@ class MonitoringPropertiesTest {
         assertThat(properties.getTargets().get(3).getScope().getIndices()).containsExactly("products");
         assertThat(properties.getTargets().get(3).getScope().getDatabases()).isEmpty();
         assertThat(properties.getLimits().getPartitions()).isEqualTo(10);
+        assertThat(properties.getLimits().getTables()).isEqualTo(25);
         assertThat(properties.getLimits().getNodes()).isEqualTo(2);
         assertThat(properties.getLimits().getLogDirectories()).isEqualTo(3);
     }
@@ -134,6 +137,8 @@ class MonitoringPropertiesTest {
                 invalid("negative user ID", p -> p.setAllowedUserIds(List.of(-1L))),
                 invalid("missing user list", p -> p.setAllowedUserIds(null)),
                 invalid("zero database limit", p -> p.getLimits().setDatabases(0)),
+                invalid("zero table limit", p -> p.getLimits().setTables(0)),
+                invalid("overlarge table limit", p -> p.getLimits().setTables(100001)),
                 invalid("overlarge partition limit", p -> p.getLimits().setPartitions(100001)),
                 invalid("negative node limit", p -> p.getLimits().setNodes(-1)),
                 invalid("missing limits", p -> p.setLimits(null)),

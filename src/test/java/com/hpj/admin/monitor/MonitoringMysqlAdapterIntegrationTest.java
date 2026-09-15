@@ -86,7 +86,8 @@ class MonitoringMysqlAdapterIntegrationTest {
                     assertThat(first.status()).isEqualTo(CollectionStatus.PARTIAL);
                     assertThat(metric(first, "mysql.questions.rate").missingReason()).isEqualTo(MissingReason.WAITING_SAMPLE);
                     assertThat(metric(first, "mysql.slow_queries.delta").missingReason()).isEqualTo(MissingReason.WAITING_SAMPLE);
-                    assertThat(collector.counters.seriesCount(target.display().id())).isEqualTo(2);
+                    assertThat(metric(first, "mysql.innodb.buffer_pool.hit.percent").missingReason()).isEqualTo(MissingReason.WAITING_SAMPLE);
+                    assertThat(collector.counters.seriesCount(target.display().id())).isEqualTo(3);
                     await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> assertThat(clientIds(observer)).isEqualTo(connections));
 
                     // These deliberately slow SELECTs change native Questions/Slow_queries without changing table data.
@@ -96,10 +97,16 @@ class MonitoringMysqlAdapterIntegrationTest {
                                 assertThat(result.next()).isTrue();
                                 assertThat(result.getInt(1)).isZero();
                             }
+                            // Owned workload creates InnoDB logical reads while preserving the stored rows.
+                            for (int read = 0; read < 25; read++) {
+                                try (var rows = statement.executeQuery("SELECT payload FROM `" + environment.resourceName() + "`.fixture WHERE id=1")) {
+                                    assertThat(rows.next()).isTrue();
+                                }
+                            }
                         }
                     }
                     CollectionResult second = collector.collect(target);
-                    assertThat(second.status()).isEqualTo(CollectionStatus.SUCCESS);
+                    assertThat(second.status()).isEqualTo(CollectionStatus.PARTIAL);
                     assertNativeGauges(second, collector.connections.observations.get(1));
                     NativeObservation initial = collector.connections.observations.get(0);
                     NativeObservation latest = collector.connections.observations.get(1);
@@ -114,6 +121,13 @@ class MonitoringMysqlAdapterIntegrationTest {
                     assertThat(slowDelta).isGreaterThanOrEqualTo(BigDecimal.valueOf(3));
                     assertThat(value(second, "mysql.slow_queries.delta")).isEqualByComparingTo(slowDelta);
                     assertThat(metric(second, "mysql.questions.rate").definition().unit()).isEqualTo(Unit.COUNT_PER_SECOND);
+                    BigDecimal physicalReads = number(latest.status, "Innodb_buffer_pool_reads")
+                            .subtract(number(initial.status, "Innodb_buffer_pool_reads"));
+                    BigDecimal logicalReads = number(latest.status, "Innodb_buffer_pool_read_requests")
+                            .subtract(number(initial.status, "Innodb_buffer_pool_read_requests"));
+                    assertThat(logicalReads).isPositive();
+                    assertThat(value(second, "mysql.innodb.buffer_pool.hit.percent")).isEqualByComparingTo(
+                            logicalReads.subtract(physicalReads).multiply(BigDecimal.valueOf(100)).divide(logicalReads, MathContext.DECIMAL128));
 
                     assertThat(collector.connections.observations).hasSize(2);
                     assertThat(collector.connections.closed).isEqualTo(2);
@@ -169,13 +183,25 @@ class MonitoringMysqlAdapterIntegrationTest {
         assertThat(value(result, "mysql.connections.max")).isEqualByComparingTo(number(observation.variables, "max_connections"));
         assertThat(value(result, "mysql.threads.running")).isEqualByComparingTo(number(observation.status, "Threads_running"));
         assertThat(value(result, "mysql.slow_queries.total")).isEqualByComparingTo(number(observation.status, "Slow_queries"));
-        assertThat(result.metrics()).hasSize(7).allSatisfy(metric -> {
+        assertThat(result.metrics()).hasSize(12);
+        assertThat(result.metrics().subList(0, 7)).allSatisfy(metric -> {
             assertThat(metric.definition().scope().kind()).isEqualTo(ScopeKind.PROCESS);
             if (!metric.definition().key().equals("mysql.probe.duration")
                     && !metric.definition().key().equals("mysql.questions.rate")) {
                 assertThat(metric.definition().unit()).isEqualTo(Unit.COUNT);
             }
         });
+        assertThat(value(result, "mysql.innodb.buffer_pool.configured.bytes"))
+                .isEqualByComparingTo(number(observation.variables, "innodb_buffer_pool_size"));
+        assertThat(value(result, "mysql.innodb.buffer_pool.data.bytes"))
+                .isEqualByComparingTo(number(observation.status, "Innodb_buffer_pool_bytes_data"));
+        assertThat(result.metrics()).filteredOn(sample -> sample.definition().key().startsWith("mysql.innodb.buffer_pool."))
+                .hasSize(3).allSatisfy(sample -> assertThat(sample.definition().scope().kind()).isEqualTo(ScopeKind.CACHE));
+        for (String key : List.of("mysql.process.cpu.percent", "mysql.process.memory.bytes")) {
+            assertThat(metric(result, key).value()).isNull();
+            assertThat(metric(result, key).missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(metric(result, key).definition().scope().kind()).isEqualTo(ScopeKind.PROCESS);
+        }
     }
 
     private static MetricSample metric(CollectionResult result, String key) {
