@@ -44,6 +44,7 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.wait.strategy.AbstractWaitStrategy;
 import org.testcontainers.kafka.KafkaContainer;
+import org.testcontainers.images.builder.Transferable;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -283,6 +284,46 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
                     .credentials(username, password).httpClient(minioHttpClient).build();
         }
         return minioClient;
+    }
+
+    /** Setup only: a native IAM user limited to one owned bucket; removed with this disposable container. */
+    public MinioReadOnlyCredentials minioReadOnlyCredentials() {
+        requireType("minio");
+        return operation("prepare restricted MinIO account", () -> {
+            String access = "reader" + UUID.randomUUID().toString().replace("-", "").substring(0, 14);
+            String secret = UUID.randomUUID().toString().replace("-", "");
+            String policy = "monitor" + UUID.randomUUID().toString().replace("-", "");
+            String path = "/tmp/" + policy + ".json";
+            byte[] document = JSON.writeValueAsBytes(Map.of("Version", "2012-10-17", "Statement", List.of(
+                    Map.of("Effect", "Allow", "Action", List.of("s3:GetBucketLocation", "s3:ListBucket"),
+                            "Resource", List.of("arn:aws:s3:::" + resourceName())))));
+            container.copyFileToContainer(Transferable.of(document, 0600), path);
+            // The pinned official MinIO image bundles /usr/bin/mc. Arguments are passed without a shell.
+            minioSetupCommand("alias", "set", "owned", "http://127.0.0.1:9000", username, password);
+            minioSetupCommand("admin", "user", "add", "owned", access, secret);
+            minioSetupCommand("admin", "policy", "create", "owned", policy, path);
+            minioSetupCommand("admin", "policy", "attach", "owned", policy, "--user", access);
+            return new MinioReadOnlyCredentials(access, secret);
+        });
+    }
+
+    private void minioSetupCommand(String... arguments) throws Exception {
+        String[] command = new String[arguments.length + 1];
+        command[0] = "/usr/bin/mc";
+        System.arraycopy(arguments, 0, command, 1, arguments.length);
+        try {
+            var outcome = container.execInContainer(command);
+            if (outcome.getExitCode() != 0) throw new IllegalStateException("Owned MinIO account setup failed");
+        } catch (Exception failure) {
+            if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+            // An exec transport error can include command arguments. Never propagate account credentials.
+            throw new IllegalStateException("Owned MinIO account setup failed");
+        }
+    }
+
+    /** Opaque test-only credentials; never print record fields in diagnostics. */
+    public record MinioReadOnlyCredentials(String accessKey, String secretKey) {
+        @Override public String toString() { return "MinioReadOnlyCredentials[REDACTED]"; }
     }
 
     public void prepareData() { operation("prepare", this::prepare); }
