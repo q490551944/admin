@@ -15,6 +15,8 @@ import com.hpj.admin.monitor.mysql.MysqlMonitoringAdapter;
 import com.hpj.admin.monitor.mysql.MysqlMonitoringConnections;
 import com.hpj.admin.monitor.redis.RedisMonitoringAdapter;
 import com.hpj.admin.monitor.redis.RedisMonitoringConnections;
+import com.hpj.admin.monitor.kafka.KafkaMonitoringAdapter;
+import com.hpj.admin.monitor.kafka.KafkaMonitoringConnections;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -29,6 +31,11 @@ import java.time.Clock;
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(MonitoringProperties.class)
 public class MonitoringConfiguration {
+    @Bean
+    KafkaMonitoringAdapter kafkaMonitoringAdapter(MonitoringProperties properties) {
+        return new KafkaMonitoringAdapter(properties, new KafkaMonitoringConnections(), Clock.systemUTC());
+    }
+
     @Bean
     RedisMonitoringAdapter redisMonitoringAdapter(MonitoringProperties properties) {
         return new RedisMonitoringAdapter(properties, new RedisMonitoringConnections(), Clock.systemUTC());
