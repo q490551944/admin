@@ -17,6 +17,8 @@ import com.hpj.admin.monitor.redis.RedisMonitoringAdapter;
 import com.hpj.admin.monitor.redis.RedisMonitoringConnections;
 import com.hpj.admin.monitor.kafka.KafkaMonitoringAdapter;
 import com.hpj.admin.monitor.kafka.KafkaMonitoringConnections;
+import com.hpj.admin.monitor.mongodb.MongoMonitoringAdapter;
+import com.hpj.admin.monitor.mongodb.MongoMonitoringConnections;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -31,6 +33,11 @@ import java.time.Clock;
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(MonitoringProperties.class)
 public class MonitoringConfiguration {
+    @Bean
+    MongoMonitoringAdapter mongoMonitoringAdapter(MonitoringProperties properties) {
+        return new MongoMonitoringAdapter(properties, new MongoMonitoringConnections(), Clock.systemUTC());
+    }
+
     @Bean
     KafkaMonitoringAdapter kafkaMonitoringAdapter(MonitoringProperties properties) {
         return new KafkaMonitoringAdapter(properties, new KafkaMonitoringConnections(), Clock.systemUTC());
