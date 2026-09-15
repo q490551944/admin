@@ -19,6 +19,8 @@ import com.hpj.admin.monitor.kafka.KafkaMonitoringAdapter;
 import com.hpj.admin.monitor.kafka.KafkaMonitoringConnections;
 import com.hpj.admin.monitor.mongodb.MongoMonitoringAdapter;
 import com.hpj.admin.monitor.mongodb.MongoMonitoringConnections;
+import com.hpj.admin.monitor.elasticsearch.ElasticsearchMonitoringAdapter;
+import com.hpj.admin.monitor.elasticsearch.ElasticsearchMonitoringConnections;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -33,6 +35,11 @@ import java.time.Clock;
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(MonitoringProperties.class)
 public class MonitoringConfiguration {
+    @Bean
+    ElasticsearchMonitoringAdapter elasticsearchMonitoringAdapter(MonitoringProperties properties) {
+        return new ElasticsearchMonitoringAdapter(properties, new ElasticsearchMonitoringConnections(), Clock.systemUTC());
+    }
+
     @Bean
     MongoMonitoringAdapter mongoMonitoringAdapter(MonitoringProperties properties) {
         return new MongoMonitoringAdapter(properties, new MongoMonitoringConnections(), Clock.systemUTC());
