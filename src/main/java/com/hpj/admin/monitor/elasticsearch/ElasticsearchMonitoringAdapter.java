@@ -9,6 +9,7 @@ import com.hpj.admin.monitor.metric.MonitoringAdapter;
 import com.hpj.admin.monitor.metric.MonitoringCalculations;
 
 import java.math.BigDecimal;
+import java.math.MathContext;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -31,6 +32,7 @@ import static com.hpj.admin.monitor.metric.MonitoringCalculations.Calculation.RA
 /** Fixed read-only observations. Native allocation health, index copies and node pools keep separate scopes. */
 public final class ElasticsearchMonitoringAdapter implements MonitoringAdapter {
     private static final int MAX_METRICS = 4500;
+    private static final int MAX_CAPACITY_METRICS = 500;
     private static final int FIXED_METRICS = 24;
     private static final int MAX_SHARD_ROWS = 2000;
     private static final List<String> POOLS = List.of("search", "search_coordination", "write");
@@ -49,13 +51,15 @@ public final class ElasticsearchMonitoringAdapter implements MonitoringAdapter {
     @Override public CollectionResult collect(CollectionRequest request) {
         Instant started = atLeast(request.scheduledAt());
         boolean capacity = request.kind() == CollectionKind.CAPACITY;
+        int metricLimit = capacity ? MAX_CAPACITY_METRICS : MAX_METRICS;
+        int indexMetrics = capacity ? 3 : 6;
         List<String> configured = new ArrayList<>(new LinkedHashSet<>(request.scope().indices()));
         int indexLimit = Math.min(ElasticsearchMonitoringConnections.MAX_NAMES,
-                Math.min(properties.getLimits().getIndices(), (MAX_METRICS - FIXED_METRICS) / 6));
+                Math.min(properties.getLimits().getIndices(), (metricLimit - FIXED_METRICS) / indexMetrics));
         List<String> selected = configured.subList(0, Math.min(configured.size(), indexLimit));
         List<String> requested = selected.stream().filter(ElasticsearchMonitoringAdapter::validIndex).toList();
         int nodeLimit = Math.min(ElasticsearchMonitoringConnections.MAX_NAMES, Math.min(properties.getLimits().getNodes(),
-                (MAX_METRICS - FIXED_METRICS - selected.size() * 6) / POOLS.size()));
+                (metricLimit - FIXED_METRICS - selected.size() * indexMetrics) / (capacity ? 10 : 12)));
         Observations observed = new Observations();
         observed.truncated = selected.size() < configured.size();
         Read health = null, pools = null, stats = null, before = null, after = null;
@@ -83,6 +87,9 @@ public final class ElasticsearchMonitoringAdapter implements MonitoringAdapter {
                         List<String> known = nodes;
                         before = read(request, () -> session.nodeStarts(known), pools.at());
                     }
+                } else {
+                    pools = read(request, session::nodeFilesystems, started);
+                    nodes = nodes(pools, nodeLimit, observed);
                 }
                 if (!requested.isEmpty()) {
                     stats = read(request, () -> session.indexStats(requested, request.kind()),
@@ -125,7 +132,14 @@ public final class ElasticsearchMonitoringAdapter implements MonitoringAdapter {
             metrics.add(latency == null ? MetricSample.missing(probeDefinition(cluster), health.reason() == null ? fallback : health.reason(), health.at()) : latency);
             appendHealth(metrics, health, cluster, observed);
             appendPools(metrics, pools, nodes, observed);
+            appendResources(metrics, pools, nodes);
+        } else {
+            appendFilesystems(metrics, pools, nodes, (metricLimit - FIXED_METRICS - selected.size() * indexMetrics - nodes.size() * 6) / 4, observed);
         }
+        Scope nodeSummary = new Scope(ScopeKind.CONFIGURED_SCOPE, request.targetId(), null);
+        for (String field : List.of("total", "successful", "failed")) metrics.add(gauge(def("elasticsearch.nodes." + field, "原生节点" + switch (field) {
+            case "total" -> "请求数"; case "successful" -> "响应数"; default -> "失败数";
+        }, Unit.COUNT, nodeSummary, "nodes stats._nodes." + field, "当前节点请求的原生完整性；展示节点数另列，失败不伪装为零资源"), pools, capacity, "_nodes", field));
         boolean exactResponse = requested.isEmpty() || exactIndices(stats, requested);
         boolean shardsComplete = requested.isEmpty() || complete(stats, "_shards");
         if (!requested.isEmpty() && (!exactResponse || !shardsComplete)) observed.problem(stats.reason() == null ? MissingReason.UNSUPPORTED : stats.reason());
@@ -163,9 +177,109 @@ public final class ElasticsearchMonitoringAdapter implements MonitoringAdapter {
                 && !sample.definition().key().endsWith("coverage.complete"));
         CollectionStatus status = reason == null ? observed.truncated ? CollectionStatus.PARTIAL : CollectionStatus.SUCCESS
                 : anyNative ? CollectionStatus.PARTIAL : failureStatus(reason);
-        boolean inventoryComplete = !observed.truncated && (capacity || pools.reason() == null && complete(pools, "_nodes")
-                && equalsNumber(pools, nodes.size(), "_nodes", "successful"));
+        boolean inventoryComplete = observed.inventoryComplete && pools.reason() == null && complete(pools, "_nodes") && (capacity || !observed.truncated);
         return new CollectionResult(status, started, finished, metrics, capacity ? null : probe, inventoryComplete, reason);
+    }
+
+    private void appendResources(List<MetricSample> metrics, Read read, List<String> nodes) {
+        for (String node : nodes) {
+            Scope process = new Scope(ScopeKind.PROCESS, "elasticsearch", node), heap = new Scope(ScopeKind.JVM_HEAP, "heap", node);
+            Scope os = new Scope(ScopeKind.NODE_REPORTED_OS, "os", node);
+            metrics.add(resource(def("elasticsearch.process.cpu.percent", "节点进程 CPU 使用率", Unit.PERCENT, process,
+                    "nodes stats.process.cpu.percent", "所选节点进程报告的 CPU 百分比；不是 admin JVM 或宿主机 CPU"), read, false, true, "nodes", node, "process", "cpu", "percent"));
+            metrics.add(resource(def("elasticsearch.os.cpu.percent", "节点报告 OS CPU 使用率", Unit.PERCENT, os,
+                    "nodes stats.os.cpu.percent", "节点报告的 OS 范围，可能受容器影响；不推定为宿主机"), read, false, true, "nodes", node, "os", "cpu", "percent"));
+            for (String field : List.of("heap_used_in_bytes", "heap_max_in_bytes")) metrics.add(resource(def("elasticsearch.jvm." + (field.contains("used") ? "heap.used.bytes" : "heap.maximum.bytes"),
+                    field.contains("used") ? "节点 JVM 堆使用字节" : "节点 JVM 堆上限", Unit.BYTES, heap, "nodes stats.jvm.mem." + field,
+                    "仅此节点 JVM heap，与 OS 内存和文件系统分开"), read, false, false, "nodes", node, "jvm", "mem", field));
+            metrics.add(resourceRatio(def("elasticsearch.jvm.heap.used.percent", "节点 JVM 堆使用比例", Unit.PERCENT, heap,
+                    "同一原生 nodes stats 的 heap_used_in_bytes / heap_max_in_bytes", "堆字节 / 堆上限 × 100；缺失或零上限不计算"),
+                    resourceNumber(read, "nodes", node, "jvm", "mem", "heap_used_in_bytes"), resourceNumber(read, "nodes", node, "jvm", "mem", "heap_max_in_bytes"), read.at(), false));
+            for (String field : List.of("total", "used", "free")) metrics.add(resource(def("elasticsearch.os.memory." + field + ".bytes", "节点报告 OS 内存" + switch (field) {
+                case "total" -> "总量"; case "used" -> "已用"; default -> "空闲";
+            }, Unit.BYTES, os, "nodes stats.os.mem." + field + "_in_bytes", "节点报告的 OS 内存，可能是容器视角；不是 JVM heap 或宿主机实测"), read, false, false, "nodes", node, "os", "mem", field + "_in_bytes"));
+            metrics.add(resourceRatio(def("elasticsearch.os.memory.used.percent", "节点报告 OS 内存使用比例", Unit.PERCENT, os,
+                    "同一原生 nodes stats 的 os.mem.used_in_bytes / total_in_bytes", "节点报告范围；零总量不计算"),
+                    resourceNumber(read, "nodes", node, "os", "mem", "used_in_bytes"), resourceNumber(read, "nodes", node, "os", "mem", "total_in_bytes"), read.at(), false));
+        }
+    }
+
+    private void appendFilesystems(List<MetricSample> metrics, Read read, List<String> nodes, int pathBudget, Observations observed) {
+        int remaining = Math.min(properties.getLimits().getLogDirectories(), Math.max(0, pathBudget));
+        int nodesLeft = nodes.size();
+        observed.problem(read.reason());
+        for (String node : nodes) {
+            Scope total = new Scope(ScopeKind.FILESYSTEM, "native-total", node);
+            NativeNumber size = resourceNumber(read, "nodes", node, "fs", "total", "total_in_bytes");
+            NativeNumber free = resourceNumber(read, "nodes", node, "fs", "total", "free_in_bytes");
+            NativeNumber available = resourceNumber(read, "nodes", node, "fs", "total", "available_in_bytes");
+            for (String field : List.of("total", "free", "available")) metrics.add(resource(def("elasticsearch.filesystem." + field + ".bytes", "节点文件系统" + switch (field) {
+                case "total" -> "原生总量"; case "free" -> "原生空闲"; default -> "原生可用";
+            }, Unit.BYTES, total, "nodes stats.fs.total." + field + "_in_bytes", "原生 file stores 合计，采用 Elasticsearch 的共享路径去重结果；不自行累加 fs.data 或跨节点求和"), read, true, false, "nodes", node, "fs", "total", field + "_in_bytes"));
+            MissingReason missing = size.reason() != null ? size.reason() : free.reason();
+            if (missing == null && free.value().compareTo(size.value()) > 0) missing = MissingReason.INVALID_VALUE;
+            NativeNumber used = new NativeNumber(missing == null ? size.value().subtract(free.value()) : null, missing);
+            metrics.add(sample(def("elasticsearch.filesystem.used.bytes", "节点文件系统已用字节", Unit.BYTES, total,
+                    "同一 nodes stats.fs.total 的 total_in_bytes - free_in_bytes", "原生去重 file stores 已用量；与索引 Lucene store 大小分开，available 不等于 free"), used.value(), used.reason(), read.at(), true));
+            metrics.add(resourceRatio(def("elasticsearch.filesystem.used.percent", "节点文件系统使用比例", Unit.PERCENT, total,
+                    "同一原生 fs.total 的 (total - free) / total", "零总量、缺失或不一致字段不计算，不从索引 store 推导"), used, size, read.at(), true));
+            NativeValue data = field(read, "nodes", node, "fs", "data");
+            boolean complete = data.reason() == null && data.value().isArray();
+            if (!complete) { observed.problem(data.reason() == null ? MissingReason.INVALID_VALUE : data.reason()); observed.inventoryComplete = false; }
+            int allowance = nodesLeft == 0 ? 0 : (remaining + nodesLeft - 1) / nodesLeft;
+            int count = complete ? Math.min(data.value().size(), allowance) : 0;
+            if (complete && count < data.value().size()) { observed.truncated = true; complete = false; }
+            Set<String> paths = new HashSet<>();
+            for (int index = 0; index < count; index++) {
+                JsonNode value = data.value().get(index);
+                JsonNode path = value.path("path");
+                if (!safeNativeText(path) || !paths.add(path.textValue())) { observed.problem(MissingReason.INVALID_VALUE); complete = false; observed.inventoryComplete = false; continue; }
+                Scope scope = new Scope(ScopeKind.FILESYSTEM, "data-path-" + digest(List.of(path.textValue())), node);
+                Read row = new Read(value, null, read.at());
+                NativeNumber pathSize = resourceNumber(row, "total_in_bytes"), pathFree = resourceNumber(row, "free_in_bytes"), pathAvailable = resourceNumber(row, "available_in_bytes");
+                boolean readable = pathSize.reason() == null && pathFree.reason() == null && pathAvailable.reason() == null;
+                boolean coherent = readable && pathFree.value().compareTo(pathSize.value()) <= 0 && pathAvailable.value().compareTo(pathFree.value()) <= 0;
+                complete &= coherent;
+                if (readable && !coherent) observed.problem(MissingReason.INVALID_VALUE);
+                for (String field : List.of("total", "free", "available")) metrics.add(resource(def("elasticsearch.data_path." + field + ".bytes", "数据路径报告的" + field + "字节", Unit.BYTES, scope,
+                        "nodes stats.fs.data." + field + "_in_bytes", "此匿名数据路径所在 file store 的原生值；多个路径可能共享卷，绝不累加这些行"), row, true, false, field + "_in_bytes"));
+                JsonNode mount = value.path("mount"), type = value.path("type");
+                boolean identity = safeNativeText(mount) && safeNativeText(type);
+                complete &= identity;
+                metrics.add(sample(def("elasticsearch.data_path.volume.reference", "数据路径原生卷引用", Unit.TEXT, scope,
+                        "同节点 fs.data 的 mount 与 type 摘要", "仅在此节点内关联原生挂载，原始目录和设备路径不公开；不证明不同节点共享同卷"),
+                        identity ? "volume-" + digest(List.of(mount.textValue(), type.textValue())) : null, identity ? null : MissingReason.UNSUPPORTED, read.at(), true));
+                remaining--;
+            }
+            nodesLeft--;
+            boolean consistent = missing == null && available.reason() == null && available.value().compareTo(free.value()) <= 0;
+            if (!consistent && size.reason() == null && free.reason() == null && available.reason() == null) observed.problem(MissingReason.INVALID_VALUE);
+            metrics.add(success(def("elasticsearch.node.filesystem.coverage.complete", "节点文件系统数据路径完整", Unit.BOOLEAN, new Scope(ScopeKind.NODE, node, node),
+                    "原生 nodes stats fs.total 与有界 fs.data", "容量字段可读且一致、路径有效且未因预算省略时为真"), complete && consistent, read.at(), true));
+        }
+    }
+
+    private static boolean safeNativeText(JsonNode value) {
+        return value != null && value.isTextual() && !value.textValue().isBlank() && value.textValue().length() <= 4096
+                && value.textValue().chars().noneMatch(Character::isISOControl);
+    }
+    private static NativeNumber resourceNumber(Read read, String... path) {
+        NativeValue value = field(read, path);
+        if (value.reason() != null) return new NativeNumber(null, value.reason());
+        if (value.value().isIntegralNumber() && value.value().canConvertToLong() && value.value().longValue() == -1) return new NativeNumber(null, MissingReason.UNSUPPORTED);
+        return number(read, path);
+    }
+    private MetricSample resource(Definition definition, Read read, boolean capacity, boolean percent, String... path) {
+        NativeNumber value = resourceNumber(read, path);
+        MissingReason reason = value.reason();
+        if (percent && reason == null && value.value().compareTo(BigDecimal.valueOf(100)) > 0) reason = MissingReason.INVALID_VALUE;
+        return sample(definition, value.value(), reason, read.at(), capacity);
+    }
+    private MetricSample resourceRatio(Definition definition, NativeNumber used, NativeNumber total, Instant at, boolean capacity) {
+        MissingReason reason = used.reason() != null ? used.reason() : total.reason();
+        if (reason == null && total.value().signum() == 0) reason = MissingReason.NOT_APPLICABLE;
+        if (reason == null && used.value().compareTo(total.value()) > 0) reason = MissingReason.INVALID_VALUE;
+        return sample(definition, reason == null ? used.value().multiply(BigDecimal.valueOf(100)).divide(total.value(), MathContext.DECIMAL64) : null, reason, at, capacity);
     }
 
     private void appendHealth(List<MetricSample> metrics, Read health, Scope scope, Observations observed) {
@@ -190,6 +304,7 @@ public final class ElasticsearchMonitoringAdapter implements MonitoringAdapter {
         NativeValue values = field(pools, "nodes");
         if (values.reason() != null || !values.value().isObject()) {
             observed.problem(values.reason() == null ? MissingReason.INVALID_VALUE : values.reason());
+            observed.inventoryComplete = false;
             return List.of();
         }
         List<String> selected = new ArrayList<>();
@@ -198,12 +313,13 @@ public final class ElasticsearchMonitoringAdapter implements MonitoringAdapter {
         while (entries.hasNext() && inspected < limit) {
             String id = entries.next();
             inspected++;
-            if (validNode(id)) selected.add(id); else observed.problem(MissingReason.INVALID_VALUE);
+            if (validNode(id)) selected.add(id); else { observed.problem(MissingReason.INVALID_VALUE); observed.inventoryComplete = false; }
         }
         observed.truncated |= entries.hasNext();
         if (!complete(pools, "_nodes") || !equalsNumber(pools, selected.size(), "_nodes", "successful") && !observed.truncated) {
             observed.problem(MissingReason.UNSUPPORTED);
         }
+        if (!complete(pools, "_nodes") || !equalsNumber(pools, values.value().size(), "_nodes", "successful")) observed.inventoryComplete = false;
         return List.copyOf(selected);
     }
 
@@ -320,12 +436,12 @@ public final class ElasticsearchMonitoringAdapter implements MonitoringAdapter {
         metrics.add(success(def("elasticsearch.indices.configured", "配置索引数", Unit.COUNT, scope, source, "连接自身配置的去重索引数；空范围不读取全部索引"), configured, at, capacity));
         metrics.add(success(def("elasticsearch.indices.requested", "纳入请求范围索引数", Unit.COUNT, scope, source, "通过具体名称校验且纳入预算的索引数；连接失败时可能尚未发出"), requested, at, capacity));
         metrics.add(success(def("elasticsearch.indices.observed", "本次响应索引数", Unit.COUNT, scope, source, "只计精确匹配配置名称的索引响应；不输出 alias 或 data stream 展开的额外索引"), observed.indices, at, capacity));
-        if (!capacity) metrics.add(success(def("elasticsearch.nodes.observed", "已展示线程池节点数", Unit.COUNT, scope, source, "此次 nodes stats 内通过身份校验并纳入预算的节点数，不是集群总节点数"), nodes, at, false));
+        metrics.add(success(def("elasticsearch.nodes.observed", "已展示节点数", Unit.COUNT, scope, source, "此次 nodes stats 内通过身份校验并纳入预算的节点数，不是集群总节点数"), nodes, at, capacity));
         metrics.add(success(def("elasticsearch.coverage.complete", "本次配置范围完整", Unit.BOOLEAN, scope, source, "所有本次端点及指标均可读且无截断；不代表配置外索引或集群资源健康"), observed.reason == null && !observed.truncated, at, capacity));
         metrics.add(success(def("elasticsearch.coverage.truncated", "本次触及条目预算", Unit.BOOLEAN, scope, source, "索引、节点或内部 shard 证据超出预算时为真，不能解释为原生分页"), observed.truncated, at, capacity));
         metrics.add(success(def("elasticsearch.limits.indices", "有效索引上限", Unit.COUNT, scope, source, "配置索引上限与总 series 预算的较小值"), indexLimit, at, capacity));
-        metrics.add(success(def("elasticsearch.limits.nodes", "有效节点上限", Unit.COUNT, scope, source, "预留索引行后，节点配置与剩余三池 series 预算的较小值"), nodeLimit, at, capacity));
-        metrics.add(success(def("elasticsearch.limits.metrics", "单次指标上限", Unit.COUNT, scope, source, "本适配器保留共享快照预算余量，最多 4500 个 series"), MAX_METRICS, at, capacity));
+        metrics.add(success(def("elasticsearch.limits.nodes", "有效节点上限", Unit.COUNT, scope, source, "预留索引后，节点配置与普通资源/容量路径序列预算的较小值"), nodeLimit, at, capacity));
+        metrics.add(success(def("elasticsearch.limits.metrics", "单次指标上限", Unit.COUNT, scope, source, "普通最多 4500 条、容量最多 500 条，共享快照预算"), capacity ? MAX_CAPACITY_METRICS : MAX_METRICS, at, capacity));
     }
 
     private Read read(CollectionRequest request, NativeRead operation, Instant previous) {
@@ -425,6 +541,7 @@ public final class ElasticsearchMonitoringAdapter implements MonitoringAdapter {
     private static final class Observations {
         private MissingReason reason;
         private boolean truncated;
+        private boolean inventoryComplete = true;
         private int indices;
         private void problem(MissingReason next) {
             if (next != null && (reason == null || reason == MissingReason.WAITING_SAMPLE && next != MissingReason.WAITING_SAMPLE)) reason = next;

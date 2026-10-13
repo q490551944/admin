@@ -167,7 +167,9 @@ class MonitoringElasticsearchConnectionsTest {
             f.json = "{\"indices\":{}}";
             session.indexStats(List.of("configured-index"), CollectionKind.ORDINARY);
             assertThat(f.sent.stream().map(Request::getEndpoint)).containsExactly(
-                    "/_nodes/stats/thread_pool", "/_nodes/" + NODE + "/jvm", "/configured-index/_stats/docs,indexing,search");
+                    "/_nodes/stats/thread_pool,process,os,jvm", "/_nodes/" + NODE + "/jvm", "/configured-index/_stats/docs,indexing,search");
+            assertThat(f.sent.get(0).getOptions().getParameters().get("filter_path")).contains("process.cpu.percent", "os.mem", "jvm.mem");
+            assertThat(f.sent.get(0).getOptions().getParameters().get("timeout")).endsWith("ms");
             assertThat(f.sent.get(1).getOptions().getParameters().get("filter_path")).contains("_nodes").contains("start_time_in_millis");
             assertThat(f.sent.get(2).getOptions().getParameters()).containsEntry("level", "shards").containsEntry("expand_wildcards", "none");
             assertFailure(() -> session.indexStats(List.of("outside-index"), CollectionKind.ORDINARY), MissingReason.UNSUPPORTED, false);
@@ -198,6 +200,22 @@ class MonitoringElasticsearchConnectionsTest {
             assertThat(f.sent).hasSize(1);
             assertThat(f.sent.get(0).getEndpoint()).isEqualTo("/configured-index/_stats/store");
             assertThat(f.sent.get(0).getOptions().getParameters()).containsEntry("level", "indices");
+        }
+    }
+
+    @Test
+    void filesystemEndpointIsCapacityOnlyWithNativeNodeTimeoutAndBoundedFields() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.kind = CollectionKind.CAPACITY;
+            try (var session = f.access().open(f.request())) { session.nodeFilesystems(); }
+            assertThat(f.sent).hasSize(1);
+            assertThat(f.sent.get(0).getEndpoint()).isEqualTo("/_nodes/stats/fs");
+            assertThat(f.sent.get(0).getOptions().getParameters().get("filter_path")).isEqualTo("_nodes,nodes.*.fs.total,nodes.*.fs.data");
+            assertThat(f.sent.get(0).getOptions().getParameters().get("timeout")).endsWith("ms");
+        }
+        try (Fixture f = new Fixture(); var session = f.access().open(f.request())) {
+            assertFailure(session::nodeFilesystems, MissingReason.UNSUPPORTED, false);
+            assertThat(f.sent).isEmpty();
         }
     }
 
