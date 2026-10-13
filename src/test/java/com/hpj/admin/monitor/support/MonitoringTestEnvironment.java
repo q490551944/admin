@@ -362,6 +362,15 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
     }
 
     public void prepareData() { operation("prepare", this::prepare); }
+    /** Fault injection is restricted to the Redis container this fixture created. */
+    public void pauseRedis() {
+        requireType("redis");
+        operation("pause owned Redis", () -> { DockerClientFactory.instance().client().pauseContainerCmd(container.getContainerId()).exec(); return null; });
+    }
+    public void resumeRedis() {
+        requireType("redis");
+        operation("resume owned Redis", () -> { DockerClientFactory.instance().client().unpauseContainerCmd(container.getContainerId()).exec(); return null; });
+    }
     public void cleanupData() {
         if (!closed) { operation("cleanup", this::cleanup); }
     }

@@ -30,6 +30,11 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - name: Prepare private control token for the owned monitor runtime fixture
+        run: |
+          task_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$task_token"
+          echo "MONITOR_E2E_CONTROL_TOKEN=$task_token" >> "$GITHUB_ENV"
       - name: Database, WebSocket and performance gates
         run: >-
           bash mvnw -B '-Dtest=Chat*Test,Monitoring*Test,*ConnectionInspectorTest'

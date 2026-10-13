@@ -71,6 +71,11 @@ jobs:
         run: >-
           bash mvnw -B -Dtest=MonitoringMinioAdapterIntegrationTest
           -Dmonitor.test.type=minio test
+      - name: Verify real native sources through scheduler, shared snapshots and authenticated API
+        run: |
+          export MONITOR_E2E_CONTROL_TOKEN="$(openssl rand -hex 32)"
+          echo "::add-mask::$MONITOR_E2E_CONTROL_TOKEN"
+          bash mvnw -B -Dtest=MonitoringRuntimePipelineIntegrationTest,MonitoringRuntimeBudgetIntegrationTest -Dmonitor.test.type=${{ matrix.type }} test
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -78,3 +83,4 @@ jobs:
           path: |
             target/surefire-reports
             target/monitor-environments
+            target/monitor-runtime-*.json
