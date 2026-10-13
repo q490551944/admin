@@ -4,7 +4,8 @@
   "scripts": {
     "test": "node --test src/test/js/chat-security.test.cjs src/test/js/monitor-session.test.cjs src/test/js/monitor-overview.test.cjs src/test/js/monitor-details.test.cjs",
     "test:e2e": "node scripts/run-chat-e2e.cjs",
-    "test:monitor:e2e": "node scripts/run-monitor-e2e.cjs"
+    "test:monitor:e2e": "node scripts/run-monitor-e2e.cjs",
+    "test:monitor:runtime:e2e": "node scripts/run-monitor-runtime-e2e.cjs"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1"

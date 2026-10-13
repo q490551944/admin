@@ -31,6 +31,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.net.CookieManager;
 import java.net.CookiePolicy;
 import java.net.URI;
+import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -39,6 +40,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -77,6 +79,9 @@ public final class MonitoringRuntimeFixture implements AutoCloseable {
     private final List<MonitoringTestEnvironment> environments = new ArrayList<>();
     private final Set<String> paused = new HashSet<>();
     private DefaultClientResources redisResources;
+    OwnedRedisProxy redisProxy;
+    final CountDownLatch browserFinish = new CountDownLatch(1);
+    private boolean browserMode, closed;
     public ConfigurableApplicationContext context;
     public String baseURL;
     public ObjectMapper json;
@@ -89,10 +94,15 @@ public final class MonitoringRuntimeFixture implements AutoCloseable {
     }
 
     public static MonitoringRuntimeFixture start(List<String> types, int redisTargets, boolean periodic) throws Exception {
+        return start(types, redisTargets, periodic, false);
+    }
+    static MonitoringRuntimeFixture startBrowser() throws Exception { return start(List.of("mysql", "redis"), 1, true, true); }
+    private static MonitoringRuntimeFixture start(List<String> types, int redisTargets, boolean periodic, boolean browserMode) throws Exception {
         if (types.isEmpty() || types.stream().distinct().count() != types.size() || redisTargets < 1 || redisTargets > 20) throw new IllegalArgumentException("Invalid owned runtime fixture types/count");
         for (String type : types) MonitoringTestEnvironment.normalizeType(type);
         if (redisTargets > 1 && !types.equals(List.of("redis"))) throw new IllegalArgumentException("Twenty-target mode owns only Redis fixtures");
         var fixture = new MonitoringRuntimeFixture();
+        fixture.browserMode = browserMode;
         try {
             if (types.contains("redis")) fixture.redisResources = DefaultClientResources.builder().ioThreadPoolSize(2).computationThreadPoolSize(2).build();
             for (String type : types) for (int index = 0; index < (type.equals("redis") ? redisTargets : 1); index++) fixture.add(type, index);
@@ -116,7 +126,8 @@ public final class MonitoringRuntimeFixture implements AutoCloseable {
                 source = pool; clients.add(pool);
             }
             case "redis" -> {
-                var standalone = new RedisStandaloneConfiguration(environment.host(), environment.port()); standalone.setPassword(environment.password());
+                if (browserMode) redisProxy = new OwnedRedisProxy(new InetSocketAddress(environment.host(), environment.port()));
+                var standalone = new RedisStandaloneConfiguration(environment.host(), browserMode ? redisProxy.port() : environment.port()); standalone.setPassword(environment.password());
                 var configuration = LettuceClientConfiguration.builder().clientResources(redisResources).commandTimeout(Duration.ofSeconds(3)).build();
                 var factory = new LettuceConnectionFactory(standalone, configuration);
                 clients.add(factory::destroy); factory.afterPropertiesSet(); factory.start();
@@ -145,6 +156,10 @@ public final class MonitoringRuntimeFixture implements AutoCloseable {
         settings.put("server.address", "127.0.0.1"); settings.put("server.port", 0); settings.put("server.servlet.context-path", ""); settings.put("server.ssl.enabled", false);
         settings.put("chat.enabled", false); settings.put("monitor.enabled", true); settings.put("monitor.allowed-user-ids[0]", 1);
         settings.put("runtime.periodic", periodic);
+        // Acceptance always exercises the PRD defaults, even if the launching shell has monitor overrides.
+        settings.putAll(Map.of("monitor.ordinary-interval", "15s", "monitor.capacity-interval", "60s",
+                "monitor.refresh-interval", "15s", "monitor.collection-timeout", "5s", "monitor.service-ttl", "45s",
+                "monitor.metric-ttl-multiplier", 3, "monitor.ordinary-concurrency", 8, "monitor.capacity-concurrency", 2, "monitor.max-targets", 20));
         settings.put("logging.level.root", "WARN");
         Path ready = Files.createTempDirectory(Path.of("target"), "monitor-runtime-").resolve("ready.json");
         settings.put("monitor.e2e.ready-file", ready.toAbsolutePath().toString());
@@ -164,11 +179,14 @@ public final class MonitoringRuntimeFixture implements AutoCloseable {
         Map<String, MinioMetricsAuthorization> authorizations = new HashMap<>();
         for (Source source : sources) if (source.environment().type().equals("minio")) authorizations.put(source.beanName() + "Authorization",
                 new MinioMetricsAuthorization(source.client(), source.environment().httpEndpoint(), source.environment().minioMetricsBearer(), Set.of(MinioMonitoringConnections.MetricsEndpoint.NODE, MinioMonitoringConnections.MetricsEndpoint.CLUSTER)));
-        var app = new SpringApplication(MonitoringE2eApplication.class, RuntimeConfiguration.class);
+        var app = new SpringApplication(browserMode
+                ? new Class<?>[]{MonitoringE2eApplication.class, RuntimeConfiguration.class, MonitoringRuntimeE2eApplication.Controls.class}
+                : new Class<?>[]{MonitoringE2eApplication.class, RuntimeConfiguration.class});
         app.setDefaultProperties(Map.of("spring.config.location", "classpath:/chat-test.yml"));
         app.addInitializers(application -> {
             application.getEnvironment().getPropertySources().addFirst(new MapPropertySource("owned-runtime-isolation", settings));
             application.getBeanFactory().registerSingleton("runtimeLedger", ledger);
+            application.getBeanFactory().registerSingleton("ownedRuntimeFixture", this);
             for (Source source : sources) application.getBeanFactory().registerSingleton(source.beanName(), source.client());
             authorizations.forEach((name, value) -> application.getBeanFactory().registerSingleton(name, value));
         });
@@ -218,7 +236,9 @@ public final class MonitoringRuntimeFixture implements AutoCloseable {
             return json.readTree(response.body());
         }
     }
-    @Override public void close() throws Exception {
+    @Override public synchronized void close() throws Exception {
+        if (closed) return;
+        closed = true;
         boolean failed = false;
         for (String id : List.copyOf(paused)) try { resumeRedis(id); } catch (Exception failure) { failed = true; }
         if (context != null) {
@@ -226,6 +246,7 @@ public final class MonitoringRuntimeFixture implements AutoCloseable {
             try { context.close(); } catch (Exception failure) { failed = true; }
         }
         for (int index = clients.size() - 1; index >= 0; index--) try { clients.get(index).close(); } catch (Exception failure) { failed = true; }
+        if (redisProxy != null) try { redisProxy.close(); } catch (Exception failure) { failed = true; }
         if (redisResources != null) try { redisResources.shutdown().get(5, TimeUnit.SECONDS); } catch (Exception failure) { failed = true; }
         for (int index = environments.size() - 1; index >= 0; index--) try { environments.get(index).close(); } catch (Exception failure) { failed = true; }
         if (failed) throw new IllegalStateException("Owned monitoring runtime cleanup failed; see sanitized fixture logs");
