@@ -48,15 +48,26 @@ public final class KafkaMonitoringAdapter implements MonitoringAdapter {
                     true, MissingReason.NOT_APPLICABLE);
         }
         List<String> configured = new ArrayList<>(new LinkedHashSet<>(request.scope().topics()));
-        int topicLimit = Math.min(properties.getLimits().getTopics(), (MAX_METRICS - BASE_METRICS) / TOPIC_METRICS);
+        List<String> configuredGroups = new ArrayList<>(new LinkedHashSet<>(request.scope().consumerGroups()));
+        int groupScopeMetrics = configuredGroups.isEmpty() ? 0 : KafkaCommittedLag.SCOPE_METRICS;
+        int topicLimit = Math.min(properties.getLimits().getTopics(), (MAX_METRICS - BASE_METRICS - groupScopeMetrics) / TOPIC_METRICS);
         List<String> selected = configured.subList(0, Math.min(configured.size(), topicLimit));
         List<String> requested = selected.stream().filter(KafkaMonitoringAdapter::validTopic).toList();
+        int remainingMetrics = MAX_METRICS - BASE_METRICS - groupScopeMetrics - selected.size() * TOPIC_METRICS;
+        int groupLimit = Math.min(properties.getLimits().getConsumerGroups(), Math.max(0,
+                (remainingMetrics - PARTITION_METRICS) / (KafkaCommittedLag.GROUP_METRICS + KafkaCommittedLag.PARTITION_METRICS)));
+        List<String> selectedGroups = configuredGroups.subList(0, Math.min(configuredGroups.size(), groupLimit));
+        List<String> requestedGroups = selectedGroups.stream().filter(KafkaCommittedLag::validGroup).toList();
         int partitionLimit = Math.min(properties.getLimits().getPartitions(),
-                (MAX_METRICS - BASE_METRICS - selected.size() * TOPIC_METRICS) / PARTITION_METRICS);
+                (remainingMetrics - selectedGroups.size() * KafkaCommittedLag.GROUP_METRICS)
+                        / (PARTITION_METRICS + selectedGroups.size() * KafkaCommittedLag.PARTITION_METRICS));
         Scope clusterScope = new Scope(ScopeKind.CLUSTER, request.targetId(), null);
         Scope configuredScope = new Scope(ScopeKind.CONFIGURED_SCOPE, request.targetId(), null);
         ClusterRead cluster = null;
         Map<String, TopicRead> topics = Map.of();
+        LagRead lag = null;
+        KafkaCommittedLag.Partitions lagPartitions = null;
+        MissingReason lagFailure = null;
         MissingReason operationFailure = null;
         MetricSample latency = null;
         ServiceProbe probe = null;
@@ -89,6 +100,16 @@ public final class KafkaMonitoringAdapter implements MonitoringAdapter {
                     request.control().checkActive();
                 }
                 topicsAt = atLeast(clusterAt);
+                if (!selectedGroups.isEmpty()) {
+                    lagPartitions = KafkaCommittedLag.partitions(selected, topics, partitionLimit, selected.size() < configured.size());
+                    if (!requestedGroups.isEmpty() && !lagPartitions.requested().isEmpty()) {
+                        request.control().checkActive();
+                        try { lag = session.readCommittedLag(requestedGroups, lagPartitions.requested()); }
+                        catch (Failure failure) { lagFailure = failure.reason(); }
+                        request.control().checkActive();
+                    }
+                    topicsAt = atLeast(topicsAt);
+                }
             }
         } catch (Failure failure) {
             operationFailure = failure.reason();
@@ -106,7 +127,7 @@ public final class KafkaMonitoringAdapter implements MonitoringAdapter {
                 operationFailure == null ? MissingReason.FAILED : operationFailure, clusterScope, finished, finished);
         Observations observations = new Observations();
         observations.problem(operationFailure);
-        observations.truncated = selected.size() < configured.size();
+        observations.truncated = selected.size() < configured.size() || selectedGroups.size() < configuredGroups.size();
         List<MetricSample> metrics = new ArrayList<>();
         metrics.add(latency == null ? MetricSample.missing(probeDefinition(clusterScope),
                 probe.reason() == null ? MissingReason.FAILED : probe.reason(), clusterAt) : latency);
@@ -128,6 +149,20 @@ public final class KafkaMonitoringAdapter implements MonitoringAdapter {
                 continue;
             }
             appendTopic(metrics, read.topic(), topicScope, partitionLimit, finished, observations);
+        }
+        if (!configuredGroups.isEmpty()) {
+            if (lagPartitions == null) lagPartitions = KafkaCommittedLag.partitions(selected, topics, partitionLimit, selected.size() < configured.size());
+            var outcome = new KafkaCommittedLag(properties).append(metrics, selectedGroups, lagPartitions, lag,
+                    lagFailure == null ? operationFailure : lagFailure, finished);
+            observations.problem(outcome.reason());
+            observations.inventoryComplete &= outcome.inventoryComplete();
+            String source = "服务端配置消费组范围与本次指标预算";
+            metrics.add(success(def("kafka.groups.configured", "配置消费组数", Unit.COUNT, configuredScope, source,
+                    "服务端显式配置的去重消费组数；不枚举或加入消费组"), configuredGroups.size(), finished));
+            metrics.add(success(def("kafka.groups.requested", "纳入请求范围消费组数", Unit.COUNT, configuredScope, source,
+                    "通过名称校验且纳入本次预算的消费组数；空 topic/分区范围不发出位点请求"), requestedGroups.size(), finished));
+            metrics.add(success(def("kafka.limits.groups", "有效消费组展示上限", Unit.COUNT, configuredScope, source,
+                    "消费组配置上限与固定指标、分区笛卡尔积预算允许组数的较小值"), groupLimit, finished));
         }
         appendScope(metrics, configuredScope, configured.size(), requested.size(), topicLimit, partitionLimit, finished, observations);
         MissingReason reason = observations.reason;
@@ -291,7 +326,7 @@ public final class KafkaMonitoringAdapter implements MonitoringAdapter {
                 properties.getOrdinaryInterval().multipliedBy(properties.getMetricTtlMultiplier()));
     }
     private Instant atLeast(Instant previous) { Instant now = clock.instant(); return now.isBefore(previous) ? previous : now; }
-    private static boolean validTopic(String topic) {
+    static boolean validTopic(String topic) {
         return topic != null && topic.matches("[a-zA-Z0-9._-]{1,249}") && !topic.equals(".") && !topic.equals("..");
     }
     private static boolean validClusterId(String identity) {
@@ -309,6 +344,7 @@ public final class KafkaMonitoringAdapter implements MonitoringAdapter {
             case UNSUPPORTED, NOT_APPLICABLE -> CollectionStatus.UNSUPPORTED;
             case BUSY -> CollectionStatus.BUSY;
             case WAITING_SAMPLE, NO_REQUESTS -> CollectionStatus.WAITING;
+            case NO_COMMITTED_OFFSET, PARTIAL_SCOPE -> CollectionStatus.PARTIAL;
             default -> CollectionStatus.FAILED;
         };
     }

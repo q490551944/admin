@@ -13,6 +13,7 @@ monitor:
       connection-source: spring.kafka
       scope:
         topics: [orders, payments]
+        consumer-groups: [billing]
 ```
 
 仅服务端配置的 topics 进入统计和输出，空列表不枚举全部主题。API 读取调度快照，刷新页面不会增加 Kafka 查询。普通周期、预算及有效期沿用公共默认值：15 秒、含排队的 5 秒、指标及服务探测 45 秒。
@@ -43,7 +44,27 @@ monitor:
 
 标准 DNS 等底层阻塞可能晚于预算退出，期间继续占用原工作槽，不启动替代任务。退出确认可证明内部线程已结束；Kafka 自身会吞掉并记录部分内部资源关闭异常，采集器不声称能观测所有这类异常。原生配置日志中的 JAAS/密码使用 Kafka 的隐藏类型，测试会核验；适配器不记录原始设置或带凭据的异常原因。
 
-只调用 `describeCluster` 和限定名称的 `describeTopics`，禁用授权操作枚举，不调用 `listTopics`。当前客户端对旧 broker 可能回退读取全主题元数据以兼容旧协议，但不会自动创建主题，最终只发布配置范围内的名称。本项不承诺未验收版本具有与 Kafka 3.8.0 完全相同的能力。
+只调用 `describeCluster`、限定名称的 `describeTopics` 和下述限定组/分区的位点读取，禁用授权操作枚举，不调用 `listTopics` 或 `listConsumerGroups`。当前客户端对旧 broker 可能回退读取全主题元数据以兼容旧协议，但不会自动创建主题，最终只发布配置范围内的名称。本项不承诺未验收版本具有与 Kafka 3.8.0 完全相同的能力。
+
+## 指定消费组的提交进度差
+
+配置 `consumer-groups` 后，用同一配置 topic 分区的 `listOffsets(latest)` 末端位点减 `listConsumerGroupOffsets` 已提交位点。两个原生批次在等待前均已发出，共享本次剩余预算；按组、分区收集已完成的结果，一个超时不会丢弃其他已经成功的结果。原生提交请求逐组显式传入分区列表，空 topic、空分区或空组范围均不请求位点，不使用 null 范围枚举全部提交。
+
+| 范围 | 指标 |
+| --- | --- |
+| 组/分区 | `kafka.group.partition.end_offset`、`.committed_offset`、`.lag`、`.lag.anomaly` |
+| 配置范围完整组值 | `kafka.group.lag.total`、`.maximum` |
+| 已知分区局部值 | `kafka.group.lag.known.total`、`.known.maximum` |
+| 覆盖与异常 | `kafka.group.partitions.expected`、`.covered`、`kafka.group.coverage.complete`、`kafka.group.lag.anomalies` |
+| 组范围限额 | `kafka.groups.configured`、`.requested`、`kafka.limits.groups` |
+
+这些 COUNT 值是**提交进度差**，不是实际尚未处理的消息总数或处理耗时；末端位点沿用 Admin 默认的 READ_UNCOMMITTED 读取，两次原生读也不构成事务快照。分区范围 ID 为 `消费组/topic#分区号`，不借用节点字段表示消费组。
+
+完整总和与最大值只在所有配置分区均有可用、非负差值且没有条目截断时返回。缺失项使完整值成为 `PARTIAL_SCOPE`；局部小计/最大值只覆盖已成功读取且非负的分区，必须结合覆盖数，不能冒充完整总量。全未知时局部小计也未知。原生零提交位点和零差值保留为零；空配置范围的总和为零、最大值不适用。
+
+`NO_COMMITTED_OFFSET` 专门表示原生返回该分区没有提交位点，不从零开始代算。Kafka 3.6.1 会从结果 Map 省略部分分区错误：省略键标为 `FAILED`，不能据此断言没有提交。组级 ACL 拒绝标为 `UNAUTHORIZED`，末端读取失败独立保留原因。负差保留负数并将 `.lag.anomaly` 设为 true，该分区不计入可用差值覆盖数或局部小计，完整组值保持未知。
+
+期望分区数来自全部配置 topic 的原生元数据，分区展示截断仍保留该分母；任一 topic 清单失败或 topic 被省略时分母未知。组数和组×分区序列也纳入既有 4500 指标预算，达到预算时确定性缩小展示范围并标记截断。采集不加入消费组、不构造消费者、不提交或修改位点。
 
 ## 验证
 
@@ -61,10 +82,11 @@ monitor:
 
 CI 调用相同入口，运行时不可用会失败。真实测试只启动临时容器，通过自有主题、精确 topic ACL 和 AdminClient 验证原生映射、配置范围、截断、主题不存在与局部拒绝；测试准备的写入和授权操作不属于生产采集器。单 broker 场景验证健康 leader/ISR，无 leader 和副本不足的非零分支由契约测试覆盖。
 
-lag 与日志目录由 #32、#33 接续。
+真实位点验收另通过 Admin 在自有临时容器准备已知、无提交及负差的组，设置精确组 ACL，逐项对比原生返回，确认截断范围、资源关闭和采集前后提交 Map 完全不变。所有写入及 ACL 改动均在测试准备/清理阶段，生产连接只提供上述只读操作。日志目录由 #33 接续。
 
 ## 语义依据
 
 - [Kafka 3.6.1 AdminClient 实现](https://github.com/apache/kafka/blob/3.6.1/clients/src/main/java/org/apache/kafka/clients/admin/KafkaAdminClient.java)：超时、关闭等待及限定主题兼容行为。
 - [Kafka 3.8 授权响应](https://github.com/apache/kafka/blob/3.8.0/core/src/main/scala/kafka/server/AuthHelper.scala)：DescribeCluster 与授权操作字段的关系。
 - [Kafka ACL](https://kafka.apache.org/38/security/authorization-and-acls/)：主题的 DESCRIBE 权限。
+- [Kafka 3.6.1 OffsetFetch 结果处理](https://github.com/apache/kafka/blob/3.6.1/clients/src/main/java/org/apache/kafka/clients/admin/internals/ListConsumerGroupOffsetsHandler.java)：null 提交位点及省略分区错误的语义。

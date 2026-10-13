@@ -11,6 +11,7 @@ import com.hpj.admin.monitor.metric.MonitoringSnapshotStore;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartitionInfo;
+import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -461,6 +462,176 @@ class MonitoringKafkaAdapterTest {
         }
     }
 
+    @Test
+    void scopedCommittedProgressUsesSamePartitionOffsetsAndPublishesCompleteTotalsAndCoverage() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.scopeGroups = List.of("readers", "readers");
+            fixture.lag = lag("readers", 4, 3, 5);
+            CollectionResult result = fixture.collect(0);
+            assertThat(result.metrics()).hasSize(61);
+            assertThat(result.status()).isEqualTo(CollectionStatus.SUCCESS);
+            verify(fixture.session).readCommittedLag(List.of("readers"), List.of(tp("events", 0), tp("events", 1), tp("audit", 0)));
+            assertThat(number(result, "kafka.group.partition.lag", "readers/events#0")).isEqualByComparingTo("8");
+            assertThat(number(result, "kafka.group.partition.lag", "readers/events#1")).isEqualByComparingTo("5");
+            assertThat(number(result, "kafka.group.partition.lag", "readers/audit#0")).isEqualByComparingTo("0");
+            assertThat(number(result, "kafka.group.lag.total", "readers")).isEqualByComparingTo("13");
+            assertThat(number(result, "kafka.group.lag.maximum", "readers")).isEqualByComparingTo("8");
+            assertThat(number(result, "kafka.group.partitions.expected", "readers")).isEqualByComparingTo("3");
+            assertThat(number(result, "kafka.group.partitions.covered", "readers")).isEqualByComparingTo("3");
+            assertValue(result, "kafka.group.coverage.complete", "readers", true);
+            assertValue(result, "kafka.group.partition.lag.anomaly", "readers/events#0", false);
+            MetricSample total = metric(result, "kafka.group.lag.total", "readers");
+            assertThat(total.definition().scope().kind()).isEqualTo(ScopeKind.CONSUMER_GROUP);
+            assertThat(total.definition().calculation()).contains("提交进度差", "不代表未处理消息总数或处理耗时");
+            assertThat(total.validUntil()).isEqualTo(START.plusSeconds(45));
+            assertThat(fixture.counters.seriesCount("broker-target")).isZero();
+            assertSafe(result);
+        }
+    }
+
+    @Test
+    void missingCommitAndFailedEndOffsetRemainUnknownAndOnlyReadablePartitionsContributeToSubtotal() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.scopeGroups = List.of("readers");
+            fixture.lag = lag("readers", 4, 3, 5);
+            fixture.collect(0);
+            Map<TopicPartition, OffsetRead> ends = new HashMap<>(fixture.lag.ends());
+            ends.put(tp("audit", 0), new OffsetRead(null, new Failure(MissingReason.TIMEOUT, false)));
+            Map<TopicPartition, OffsetRead> commits = new HashMap<>(fixture.lag.committed().get("readers"));
+            commits.put(tp("events", 1), new OffsetRead(null, new Failure(MissingReason.NO_COMMITTED_OFFSET, false)));
+            fixture.lag = new LagRead(ends, Map.of("readers", commits));
+            CollectionResult result = fixture.collect(15_000);
+            assertThat(result.status()).isEqualTo(CollectionStatus.PARTIAL);
+            assertThat(result.reason()).isEqualTo(MissingReason.NO_COMMITTED_OFFSET);
+            assertThat(metric(result, "kafka.group.partition.lag", "readers/events#1").missingReason()).isEqualTo(MissingReason.NO_COMMITTED_OFFSET);
+            assertThat(metric(result, "kafka.group.partition.lag.anomaly", "readers/events#1").value()).isNull();
+            assertThat(metric(result, "kafka.group.partition.lag", "readers/audit#0").missingReason()).isEqualTo(MissingReason.TIMEOUT);
+            assertThat(metric(result, "kafka.group.lag.total", "readers").missingReason()).isEqualTo(MissingReason.PARTIAL_SCOPE);
+            assertThat(metric(result, "kafka.group.lag.maximum", "readers").value()).isNull();
+            assertThat(number(result, "kafka.group.lag.known.total", "readers")).isEqualByComparingTo("8");
+            assertThat(number(result, "kafka.group.lag.known.maximum", "readers")).isEqualByComparingTo("8");
+            assertThat(number(result, "kafka.group.partitions.expected", "readers")).isEqualByComparingTo("3");
+            assertThat(number(result, "kafka.group.partitions.covered", "readers")).isEqualByComparingTo("1");
+            assertValue(result, "kafka.group.coverage.complete", "readers", false);
+            assertThat(fixture.snapshots.snapshot("broker-target").orElseThrow().metrics())
+                    .filteredOn(stored -> stored.latestAttempt().definition().key().equals("kafka.group.lag.total")).singleElement().satisfies(stored -> {
+                    assertThat(stored.lastSuccess().value()).isEqualTo(new BigDecimal("13"));
+                    assertThat(stored.lastSuccess().sampledAt()).isEqualTo(START);
+            });
+        }
+    }
+
+    @Test
+    void negativeProgressIsKeptAndFlaggedWithoutClampingOrClaimingACompleteTotal() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.scopeGroups = List.of("readers");
+            fixture.lag = lag("readers", 15, 3, 5);
+            CollectionResult result = fixture.collect(0);
+            assertThat(number(result, "kafka.group.partition.lag", "readers/events#0")).isEqualByComparingTo("-3");
+            assertValue(result, "kafka.group.partition.lag.anomaly", "readers/events#0", true);
+            assertThat(result.status()).isEqualTo(CollectionStatus.PARTIAL);
+            assertThat(result.reason()).isEqualTo(MissingReason.INVALID_VALUE);
+            assertThat(number(result, "kafka.group.lag.anomalies", "readers")).isEqualByComparingTo("1");
+            assertThat(number(result, "kafka.group.partitions.covered", "readers")).isEqualByComparingTo("2");
+            assertThat(number(result, "kafka.group.lag.known.total", "readers")).isEqualByComparingTo("5");
+            assertThat(metric(result, "kafka.group.lag.total", "readers").value()).isNull();
+        }
+    }
+
+    @Test
+    void groupPermissionFailuresAndUnexpectedResultKeysDoNotHideReadableGroupsOrLeakOtherScope() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.scopeGroups = List.of("readers", "denied");
+            LagRead good = lag("readers", 4, 3, 5);
+            Map<TopicPartition, OffsetRead> denied = new HashMap<>();
+            good.ends().keySet().forEach(partition -> denied.put(partition, new OffsetRead(null, new Failure(MissingReason.UNAUTHORIZED, false))));
+            Map<TopicPartition, OffsetRead> ends = new HashMap<>(good.ends());
+            ends.put(tp("excluded", 0), new OffsetRead(99L, null));
+            fixture.lag = new LagRead(ends, Map.of("readers", good.committed().get("readers"), "denied", denied,
+                    "excluded-group", Map.of(tp("excluded", 0), new OffsetRead(0L, null))));
+            CollectionResult result = fixture.collect(0);
+            assertThat(number(result, "kafka.group.lag.total", "readers")).isEqualByComparingTo("13");
+            assertThat(metric(result, "kafka.group.partition.committed_offset", "denied/events#0").missingReason()).isEqualTo(MissingReason.UNAUTHORIZED);
+            assertThat(metric(result, "kafka.group.lag.known.total", "denied").value()).isNull();
+            assertThat(number(result, "kafka.group.partitions.covered", "denied")).isEqualByComparingTo("0");
+            assertThat(result.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
+            assertThat(result.metrics()).extracting(sample -> sample.definition().scope().id()).noneMatch(id -> id.contains("excluded"));
+            verify(fixture.session).readCommittedLag(eq(List.of("readers", "denied")), anyList());
+        }
+    }
+
+    @Test
+    void partitionAndGroupLimitsKeepExpectedDenominatorAndRetireOnlyDeterministicOutOfScopeRows() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.scopeGroups = List.of("readers", "workers");
+            fixture.collect(0);
+            fixture.properties.getLimits().setConsumerGroups(1);
+            fixture.properties.getLimits().setPartitions(2);
+            CollectionResult bounded = fixture.collect(15_000);
+            assertThat(number(bounded, "kafka.group.partitions.expected", "readers")).isEqualByComparingTo("3");
+            assertThat(number(bounded, "kafka.group.partitions.covered", "readers")).isEqualByComparingTo("2");
+            assertThat(metric(bounded, "kafka.group.lag.total", "readers").missingReason()).isEqualTo(MissingReason.PARTIAL_SCOPE);
+            assertValue(bounded, "kafka.coverage.truncated", "broker-target", true);
+            verify(fixture.session).readCommittedLag(List.of("readers"), List.of(tp("events", 0), tp("events", 1)));
+            assertThat(fixture.snapshots.snapshot("broker-target").orElseThrow().metrics()).noneMatch(stored ->
+                    stored.latestAttempt().definition().scope().id().startsWith("workers")
+                            || stored.latestAttempt().definition().scope().id().equals("readers/audit#0"));
+            fixture.metadata.put("audit", failed(MissingReason.UNAUTHORIZED));
+            CollectionResult unknownInventory = fixture.collect(30_000);
+            assertThat(metric(unknownInventory, "kafka.group.partitions.expected", "readers").missingReason()).isEqualTo(MissingReason.UNAUTHORIZED);
+            assertThat(unknownInventory.inventoryComplete()).isFalse();
+        }
+    }
+
+    @Test
+    void emptyTopicScopeAndInvalidGroupNamesNeverIssueOffsetsReads() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.scopeTopics = List.of();
+            fixture.scopeGroups = List.of("readers");
+            CollectionResult empty = fixture.collect(0);
+            assertThat(number(empty, "kafka.group.partitions.expected", "readers")).isEqualByComparingTo("0");
+            assertThat(number(empty, "kafka.group.lag.total", "readers")).isEqualByComparingTo("0");
+            assertThat(metric(empty, "kafka.group.lag.maximum", "readers").missingReason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+            verify(fixture.session, never()).readCommittedLag(anyList(), anyList());
+        }
+        try (Fixture fixture = new Fixture()) {
+            fixture.scopeGroups = List.of("unsafe\nname", "x".repeat(256));
+            CollectionResult invalid = fixture.collect(0);
+            assertThat(metric(invalid, "kafka.group.lag.total", "invalid-group#0").missingReason()).isEqualTo(MissingReason.INVALID_VALUE);
+            assertThat(invalid.status()).isEqualTo(CollectionStatus.PARTIAL);
+            verify(fixture.session, never()).readCommittedLag(anyList(), anyList());
+            assertThat(new ObjectMapper().findAndRegisterModules().writeValueAsString(invalid)).doesNotContain("unsafe", "x".repeat(256));
+        }
+    }
+
+    @Test
+    void groupPartitionCartesianProductStaysInside4500SeriesBudgetAndLongTotalsDoNotOverflow() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.properties.getLimits().setConsumerGroups(100_000);
+            fixture.properties.getLimits().setPartitions(100_000);
+            fixture.scopeGroups = IntStream.range(0, 100_000).mapToObj(index -> "readers-" + index).toList();
+            CollectionResult bounded = fixture.collect(0);
+            assertThat(bounded.metrics().size()).isLessThanOrEqualTo(4500);
+            assertValue(bounded, "kafka.coverage.truncated", "broker-target", true);
+            verify(fixture.session).readCommittedLag(argThat(groups -> groups.size() == 372), eq(List.of(tp("events", 0))));
+        }
+        try (Fixture fixture = new Fixture()) {
+            fixture.scopeGroups = List.of("readers");
+            LagRead base = lag("readers", 0, 0, 0);
+            fixture.lag = new LagRead(Map.of(tp("events", 0), new OffsetRead(Long.MAX_VALUE, null),
+                    tp("events", 1), new OffsetRead(Long.MAX_VALUE, null), tp("audit", 0), new OffsetRead(0L, null)), base.committed());
+            CollectionResult result = fixture.collect(0);
+            assertThat(number(result, "kafka.group.lag.total", "readers")).isEqualByComparingTo(new BigDecimal(Long.MAX_VALUE).multiply(BigDecimal.valueOf(2)));
+        }
+    }
+
+    private static TopicPartition tp(String topic, int partition) { return new TopicPartition(topic, partition); }
+    private static LagRead lag(String group, long eventsZero, long eventsOne, long auditZero) {
+        return new LagRead(Map.of(tp("events", 0), new OffsetRead(12L, null), tp("events", 1), new OffsetRead(8L, null),
+                tp("audit", 0), new OffsetRead(5L, null)), Map.of(group, Map.of(tp("events", 0), new OffsetRead(eventsZero, null),
+                tp("events", 1), new OffsetRead(eventsOne, null), tp("audit", 0), new OffsetRead(auditZero, null))));
+    }
+
     private static TopicPartitionInfo partition(int id, Node leader, List<Node> replicas, List<Node> isr) {
         return new TopicPartitionInfo(id, leader, replicas, isr);
     }
@@ -498,6 +669,8 @@ class MonitoringKafkaAdapterTest {
         final Map<String, TopicRead> metadata = new HashMap<>();
         ClusterRead cluster = new ClusterRead(List.of(ZERO, ONE), CLUSTER_ID, null, null);
         List<String> scopeTopics = List.of("events", "audit");
+        List<String> scopeGroups = List.of();
+        LagRead lag;
         final MonitoringCounterStore counters = new MonitoringCounterStore(2, 5000);
         final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(2, 5000, 4);
         final ThreadPoolExecutor cleanup = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
@@ -517,6 +690,20 @@ class MonitoringKafkaAdapterTest {
             when(connections.open(any())).thenReturn(session);
             when(session.describeCluster()).thenAnswer(call -> cluster);
             when(session.describeTopics(anyList())).thenAnswer(call -> Map.copyOf(metadata));
+            when(session.readCommittedLag(anyList(), anyList())).thenAnswer(call -> {
+                if (lag != null) return lag;
+                List<String> groups = call.getArgument(0);
+                List<TopicPartition> partitions = call.getArgument(1);
+                Map<TopicPartition, OffsetRead> ends = new HashMap<>();
+                partitions.forEach(partition -> ends.put(partition, new OffsetRead(10L, null)));
+                Map<String, Map<TopicPartition, OffsetRead>> committed = new HashMap<>();
+                for (String group : groups) {
+                    Map<TopicPartition, OffsetRead> offsets = new HashMap<>();
+                    partitions.forEach(partition -> offsets.put(partition, new OffsetRead(0L, null)));
+                    committed.put(group, offsets);
+                }
+                return new LagRead(ends, committed);
+            });
             snapshots.activate("broker-target", 1);
         }
 
@@ -527,7 +714,7 @@ class MonitoringKafkaAdapterTest {
                     kind, Duration.ofSeconds(15), borrowed);
             controls.add(control);
             return new CollectionRequest("broker-target", "kafkaTemplate", "kafka-binding", kind, 1, sequence++, clock.now,
-                    clock.now.plusSeconds(5), new MonitoringTarget.Scope(List.of(), scopeTopics, List.of(), List.of(), List.of()),
+                    clock.now.plusSeconds(5), new MonitoringTarget.Scope(List.of(), scopeTopics, scopeGroups, List.of(), List.of()),
                     borrowed, Map.of("private-settings", SECRET), control);
         }
 

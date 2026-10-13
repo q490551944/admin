@@ -8,9 +8,16 @@ import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.DescribeClusterOptions;
 import org.apache.kafka.clients.admin.DescribeTopicsOptions;
+import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions;
+import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec;
+import org.apache.kafka.clients.admin.ListOffsetsOptions;
+import org.apache.kafka.clients.admin.ListOffsetsResult;
+import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.types.Password;
 import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.errors.AuthorizationException;
@@ -36,7 +43,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Creates one owned Kafka 3.6.1 AdminClient from the resolved native source. Only metadata reads are exposed.
+ * Creates one owned Kafka 3.6.1 AdminClient from the resolved native source. Only scoped read operations are exposed.
  * DNS, TLS and static PLAIN/SCRAM authentication retain Kafka's native behavior. Opaque code/config providers and
  * refresh mechanisms are declined before native configuration parsing can instantiate them.
  *
@@ -71,6 +78,7 @@ public class KafkaMonitoringConnections {
     public interface Session extends AutoCloseable {
         ClusterRead describeCluster();
         Map<String, TopicRead> describeTopics(List<String> allowedTopics);
+        LagRead readCommittedLag(List<String> allowedGroups, List<TopicPartition> allowedPartitions);
         @Override void close();
     }
 
@@ -81,6 +89,19 @@ public class KafkaMonitoringConnections {
 
     @JsonIgnoreType
     public record TopicRead(TopicDescription topic, Failure failure) { }
+
+    @JsonIgnoreType
+    public record OffsetRead(Long offset, Failure failure) { }
+
+    @JsonIgnoreType
+    public record LagRead(Map<TopicPartition, OffsetRead> ends, Map<String, Map<TopicPartition, OffsetRead>> committed) {
+        public LagRead {
+            ends = Map.copyOf(ends);
+            Map<String, Map<TopicPartition, OffsetRead>> groups = new LinkedHashMap<>();
+            committed.forEach((group, offsets) -> groups.put(group, Map.copyOf(offsets)));
+            committed = Collections.unmodifiableMap(groups);
+        }
+    }
 
     /** Carries classifications only. Native exception text, credential-bearing causes and raw settings stay private. */
     public static final class Failure extends RuntimeException {
@@ -106,7 +127,7 @@ public class KafkaMonitoringConnections {
             attempt.accept(admin);
             checkActive(request.control());
             opened = true;
-            return new NativeSession(attempt, admin, request.scope().topics(), settings.apiTimeoutMillis());
+            return new NativeSession(attempt, admin, request.scope().topics(), request.scope().consumerGroups(), settings.apiTimeoutMillis());
         } catch (RuntimeException failure) {
             throw sanitized(failure);
         } finally {
@@ -299,12 +320,14 @@ public class KafkaMonitoringConnections {
         private final Attempt attempt;
         private final Admin admin;
         private final Set<String> scope;
+        private final Set<String> groups;
         private final long apiTimeout;
 
-        private NativeSession(Attempt attempt, Admin admin, List<String> scope, long apiTimeout) {
+        private NativeSession(Attempt attempt, Admin admin, List<String> scope, List<String> groups, long apiTimeout) {
             this.attempt = attempt;
             this.admin = admin;
             this.scope = Set.copyOf(scope);
+            this.groups = Set.copyOf(groups);
             this.apiTimeout = apiTimeout;
         }
 
@@ -366,6 +389,73 @@ public class KafkaMonitoringConnections {
                 return Collections.unmodifiableMap(output);
             }
         }
+
+        @Override public LagRead readCommittedLag(List<String> allowedGroups, List<TopicPartition> allowedPartitions) {
+            if (allowedGroups == null || allowedPartitions == null
+                    || allowedGroups.stream().anyMatch(group -> group == null || !groups.contains(group))
+                    || allowedPartitions.stream().anyMatch(partition -> partition == null || partition.partition() < 0
+                            || !scope.contains(partition.topic()))) throw unsupported();
+            List<String> requestedGroups = List.copyOf(new LinkedHashSet<>(allowedGroups));
+            List<TopicPartition> partitions = List.copyOf(new LinkedHashSet<>(allowedPartitions));
+            // A null native partition specification means all topics. Never issue either read for an empty scope.
+            if (requestedGroups.isEmpty() || partitions.isEmpty()) return new LagRead(Map.of(), Map.of());
+            Map<String, KafkaFuture<?>> futures = new LinkedHashMap<>();
+            Map<String, Read> failed = new LinkedHashMap<>();
+            try {
+                Map<String, ListConsumerGroupOffsetsSpec> specs = new LinkedHashMap<>();
+                requestedGroups.forEach(group -> specs.put(group, new ListConsumerGroupOffsetsSpec().topicPartitions(partitions)));
+                var result = admin.listConsumerGroupOffsets(specs, new ListConsumerGroupOffsetsOptions().timeoutMs(timeout()));
+                for (int index = 0; index < requestedGroups.size(); index++) {
+                    futures.put("group#" + index, result.partitionsToOffsetAndMetadata(requestedGroups.get(index)));
+                }
+            } catch (RuntimeException failure) {
+                Failure safe = sanitized(failure);
+                for (int index = 0; index < requestedGroups.size(); index++) failed.put("group#" + index, new Read(null, safe));
+            }
+            try {
+                Map<TopicPartition, OffsetSpec> latest = new LinkedHashMap<>();
+                partitions.forEach(partition -> latest.put(partition, OffsetSpec.latest()));
+                var result = admin.listOffsets(latest, new ListOffsetsOptions().timeoutMs(timeout()));
+                for (int index = 0; index < partitions.size(); index++) futures.put("end#" + index, result.partitionResult(partitions.get(index)));
+            } catch (RuntimeException failure) {
+                Failure safe = sanitized(failure);
+                for (int index = 0; index < partitions.size(); index++) failed.put("end#" + index, new Read(null, safe));
+            }
+            // Both native batches have started before waiting. Completed partitions/groups survive another timeout.
+            Map<String, Read> reads = readAll(futures);
+            reads.putAll(failed);
+            Map<TopicPartition, OffsetRead> ends = new LinkedHashMap<>();
+            for (int index = 0; index < partitions.size(); index++) {
+                Read read = reads.get("end#" + index);
+                OffsetRead value = read.failure() != null ? new OffsetRead(null, read.failure())
+                        : read.value() instanceof ListOffsetsResult.ListOffsetsResultInfo info && info.offset() >= 0
+                        ? new OffsetRead(info.offset(), null) : invalidOffset();
+                ends.put(partitions.get(index), value);
+            }
+            Map<String, Map<TopicPartition, OffsetRead>> committed = new LinkedHashMap<>();
+            for (int index = 0; index < requestedGroups.size(); index++) {
+                Read read = reads.get("group#" + index);
+                Map<TopicPartition, OffsetRead> offsets = new LinkedHashMap<>();
+                for (TopicPartition partition : partitions) {
+                    OffsetRead value;
+                    if (read.failure() != null) value = new OffsetRead(null, read.failure());
+                    else if (!(read.value() instanceof Map<?, ?> nativeOffsets)) value = invalidOffset();
+                    else if (!nativeOffsets.containsKey(partition)) {
+                        // Kafka 3.6.1 omits per-partition errors from this result. Do not claim an absent key is zero/no commit.
+                        value = new OffsetRead(null, new Failure(MissingReason.FAILED, false));
+                    } else if (nativeOffsets.get(partition) == null) {
+                        value = new OffsetRead(null, new Failure(MissingReason.NO_COMMITTED_OFFSET, false));
+                    } else if (nativeOffsets.get(partition) instanceof OffsetAndMetadata offset && offset.offset() >= 0) {
+                        value = new OffsetRead(offset.offset(), null);
+                    } else value = invalidOffset();
+                    offsets.put(partition, value);
+                }
+                committed.put(requestedGroups.get(index), offsets);
+            }
+            return new LagRead(ends, committed);
+        }
+
+        private static OffsetRead invalidOffset() { return new OffsetRead(null, new Failure(MissingReason.INVALID_VALUE, false)); }
 
         private Map<String, Read> readAll(Map<String, KafkaFuture<?>> futures) {
             Map<String, Read> reads = new LinkedHashMap<>();
