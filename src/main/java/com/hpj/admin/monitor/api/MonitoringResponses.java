@@ -8,6 +8,7 @@ import com.hpj.admin.monitor.scheduling.MonitoringScheduler.ResolutionState;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import static com.hpj.admin.monitor.metric.MetricContract.*;
 
@@ -18,6 +19,12 @@ public final class MonitoringResponses {
     public enum SchedulingState { ACTIVE, RESOLVING, DISABLED, CONFIGURATION_MISSING }
     public enum CapabilityState { UNKNOWN, OBSERVED }
     public enum Capability { UNKNOWN, AVAILABLE, UNSUPPORTED, UNAUTHORIZED, NOT_APPLICABLE }
+    public enum ValueState { CURRENT, LAST_SUCCESS, EXPIRED, NO_DATA }
+    public record FreshnessRules(long refreshIntervalMillis, long ordinaryIntervalMillis, long capacityIntervalMillis,
+                                 long serviceTtlMillis, int metricTtlMultiplier, boolean expiresAfterValidUntil) { }
+    public record MetricObservation(String source, String bindingId, CollectionKind kind,
+                                    MetricSample latestAttempt, MetricSample lastSuccess, ValueState valueState,
+                                    @JsonFormat(shape = JsonFormat.Shape.STRING) Instant validUntil) { }
 
     public record Binding(String bindingId, String source, MonitoringTarget.Scope scope) { }
     public record DirectoryTarget(String id, MiddlewareType type, String name,
@@ -42,13 +49,17 @@ public final class MonitoringResponses {
         public CatalogResponse { types = List.copyOf(types); }
     }
     public record CollectionObservation(String bindingId, String source, CollectionKind kind,
-                                        CollectionStatus status, MissingReason reason, Attempt lastAttempt) { }
+                                        CollectionStatus status, MissingReason reason, Attempt lastAttempt,
+                                        @JsonFormat(shape = JsonFormat.Shape.STRING) Instant validUntil,
+                                        @JsonFormat(shape = JsonFormat.Shape.STRING) Instant valuesValidUntil, boolean expired) { }
     public record ServiceObservation(String bindingId, String source, ServiceAvailability availability,
-                                     MissingReason reason, ServiceProbe lastObservation) { }
+                                     MissingReason reason, ServiceProbe lastObservation,
+                                     @JsonFormat(shape = JsonFormat.Shape.STRING) Instant validUntil, boolean expired) { }
     public record TargetOverview(DirectoryTarget target, SchedulingState schedulingState,
                                  List<CollectionObservation> collections,
                                  List<ServiceObservation> serviceObservations,
-                                 int metricCount, int missingMetricCount, List<StoredMetric> coreMetrics) {
+                                 int metricCount, int missingMetricCount, List<MetricObservation> coreMetrics,
+                                 ServiceAvailability serviceAvailability, CollectionStatus collectionStatus, boolean exceptional) {
         public TargetOverview {
             collections = List.copyOf(collections);
             serviceObservations = List.copyOf(serviceObservations);
@@ -57,18 +68,19 @@ public final class MonitoringResponses {
     }
     public record SnapshotResponse(@JsonFormat(shape = JsonFormat.Shape.STRING) Instant serverTime,
                                    long generation, ResolutionState resolutionState,
-                                   List<TargetOverview> targets) {
-        public SnapshotResponse { targets = List.copyOf(targets); }
+                                   List<TargetOverview> targets, FreshnessRules freshnessRules,
+                                   Map<ServiceAvailability, Integer> serviceSummary) {
+        public SnapshotResponse { targets = List.copyOf(targets); serviceSummary = Map.copyOf(serviceSummary); }
     }
     public record MetricCapability(String bindingId, String source, CollectionKind kind, Definition definition,
                                    Capability capability, MissingReason latestMissingReason,
                                    @JsonFormat(shape = JsonFormat.Shape.STRING) Instant sampledAt,
                                    @JsonFormat(shape = JsonFormat.Shape.STRING) Instant lastSuccessAt,
-                                   @JsonFormat(shape = JsonFormat.Shape.STRING) Instant validUntil) { }
+                                   @JsonFormat(shape = JsonFormat.Shape.STRING) Instant validUntil, ValueState valueState) { }
     public record DetailResponse(@JsonFormat(shape = JsonFormat.Shape.STRING) Instant serverTime,
                                  long generation, ResolutionState resolutionState,
-                                 TargetOverview target, List<StoredMetric> metrics,
-                                 CapabilityState capabilityState, List<MetricCapability> capabilities) {
+                                 TargetOverview target, List<MetricObservation> metrics,
+                                 CapabilityState capabilityState, List<MetricCapability> capabilities, FreshnessRules freshnessRules) {
         public DetailResponse {
             metrics = List.copyOf(metrics);
             capabilities = List.copyOf(capabilities);

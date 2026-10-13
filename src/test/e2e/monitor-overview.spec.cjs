@@ -12,12 +12,16 @@ function fixture(empty = false) {
       connectionSources: ["existingClient"], memberIds: [id], bindings: [], scope: {} };
     const definition = { key: "probe.duration", label: "连接探测耗时", unit: "MILLISECONDS", scope: { kind: "ENDPOINT", id: "native-endpoint" }, source: "原生只读连接", calculation: "本次连接耗时" };
     const success = { definition, value: 0, missingReason: null, sampledAt: at, lastSuccessAt: at, validUntil: expires };
-    const metric = { source: "existingClient", bindingId: id, kind: "ORDINARY", latestAttempt: success, lastSuccess: success };
+    const metric = { source: "existingClient", bindingId: id, kind: "ORDINARY", latestAttempt: success, lastSuccess: success,
+      valueState: status === "FAILED" ? "LAST_SUCCESS" : "CURRENT", validUntil: expires };
     if (status === "FAILED") metric.latestAttempt = { definition, value: null, missingReason: "TIMEOUT", sampledAt: at, validUntil: at };
     const active = state === "ACTIVE";
     return { target, schedulingState: state, metricCount: active ? 1 : 0, missingMetricCount: status === "FAILED" ? 1 : 0,
-      collections: active ? [{ source: "existingClient", bindingId: id, kind: "ORDINARY", status, lastAttempt: status === "WAITING" ? null : { completedAt: at } }] : [],
-      serviceObservations: active ? [{ source: "existingClient", bindingId: id, availability, lastObservation: availability === "UNKNOWN" ? null : { sampledAt: at, validUntil: expires } }] : [],
+      collections: active ? [{ source: "existingClient", bindingId: id, kind: "ORDINARY", status, validUntil: status === "WAITING" ? null : expires,
+        valuesValidUntil: status === "WAITING" ? null : expires, expired: false,
+        lastAttempt: status === "WAITING" ? null : { status, startedAt: at, completedAt: at } }] : [],
+      serviceObservations: active ? [{ source: "existingClient", bindingId: id, availability, expired: false, validUntil: availability === "UNKNOWN" ? null : expires,
+        lastObservation: availability === "UNKNOWN" ? null : { availability, sampledAt: at, validUntil: expires } }] : [],
       coreMetrics: active && status !== "WAITING" ? [metric] : [] };
   }
   const rows = empty ? [] : [row("mysql-a", "MYSQL", "订单库 · 主连接", "AVAILABLE", "SUCCESS"), row("redis-a", "REDIS", "缓存 A", "DEGRADED", "PARTIAL"),
@@ -25,7 +29,8 @@ function fixture(empty = false) {
     row("mongo-a", "MONGODB", "文档库", "UNKNOWN", "WAITING"), row("es-a", "ELASTICSEARCH", "搜索", "UNKNOWN", "WAITING", "DISABLED"),
     row("minio-a", "MINIO", "对象存储", "UNKNOWN", "WAITING", "CONFIGURATION_MISSING")];
   return { catalog: { generation: 1, serverTime: at, resolutionState: "READY", types: types.map((type, i) => ({ type, name: names[i], targets: rows.filter(row => row.target.type === type).map(row => row.target) })) },
-    snapshot: { generation: 1, serverTime: at, resolutionState: "READY", targets: rows } };
+    snapshot: { generation: 1, serverTime: at, resolutionState: "READY", targets: rows,
+      freshnessRules: { refreshIntervalMillis: 15000, ordinaryIntervalMillis: 15000, capacityIntervalMillis: 60000, serviceTtlMillis: 45000, metricTtlMultiplier: 3, expiresAfterValidUntil: true } } };
 }
 async function routeData(page, data) {
   await page.route(`**${API}/catalog`, route => route.fulfill({ json: data.catalog }));
@@ -81,4 +86,17 @@ test("overview authorization failure clears private data and never renders raw e
   await page.reload(); await expect(page.locator("#status-panel")).toContainText("无查看权限");
   await expect(page.locator("#overview")).not.toBeVisible(); await expect(page.locator("#instance-list .instance-card")).toHaveCount(0);
   await expect(page.locator("body")).not.toContainText("password=secret");
+});
+
+test("backend-projected expired overview keeps the original zero gray and service unknown", async ({ page }) => {
+  const data = fixture(); const row = data.snapshot.targets[0];
+  row.coreMetrics[0].valueState = "EXPIRED";
+  row.serviceObservations[0].availability = "UNKNOWN"; row.serviceObservations[0].expired = true;
+  row.collections[0].status = "STALE"; row.collections[0].expired = true;
+  await routeData(page, data); await login(page);
+  const card = page.locator('[data-target-id="mysql-a"]');
+  await expect(card).toContainText("? 未知"); await expect(card).toContainText("已过期 · 上次成功值");
+  await expect(card.locator('.core-metric[data-value-state="EXPIRED"] .metric-value')).toHaveText("0 ms");
+  expect(await card.locator(".metric-value").evaluate(element => getComputedStyle(element).color)).toBe("rgb(100, 117, 108)");
+  await expect(page.locator('[data-service="UNKNOWN"] strong')).toHaveText("2");
 });
