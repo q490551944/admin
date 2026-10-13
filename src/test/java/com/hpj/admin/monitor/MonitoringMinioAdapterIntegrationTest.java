@@ -274,6 +274,8 @@ class MonitoringMinioAdapterIntegrationTest {
             assertThat(denied.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
             collector.authorizations.clear(); collector.authorizations.add(authorization);
             environment.container.restartMinio();
+            // The observer owns a separate pool; fixture readiness cannot replace its pre-restart sockets.
+            environment.http.connectionPool().evictAll();
             CollectionResult restarted = collector.collect(target);
             // Linux's native service restart uses execve: kernel PID/start time is unchanged but S3 counters reset.
             assertThat(number(metric(restarted, "native.process.start.seconds", null))).isEqualByComparingTo(number(metric(ordinary, "native.process.start.seconds", null)));
@@ -622,9 +624,11 @@ class MonitoringMinioAdapterIntegrationTest {
             try {
                 await().atMost(Duration.ofSeconds(45)).pollInterval(Duration.ofMillis(250)).until(() -> {
                     if (!process.isAlive()) throw new IllegalStateException("Owned MinIO exited before readiness; see sanitized fixture logs");
-                    try (var response = http.newCall(new Request.Builder().url(endpoint + LIVE).head().build()).execute()) {
-                        return response.code() == 200;
-                    } catch (IOException unavailable) { return false; }
+                    // Liveness can succeed before S3 initialization; require the protocol used by fixture setup.
+                    try {
+                        client.listBuckets();
+                        return true;
+                    } catch (Exception unavailable) { return false; }
                 });
                 JSON.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("environment.json").toFile(),
                         Map.of("type", "minio", "mode", "owned-native-process", "port", port,
