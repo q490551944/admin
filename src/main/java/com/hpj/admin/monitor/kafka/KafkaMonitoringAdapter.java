@@ -44,8 +44,7 @@ public final class KafkaMonitoringAdapter implements MonitoringAdapter {
     @Override public CollectionResult collect(CollectionRequest request) {
         Instant started = atLeast(request.scheduledAt());
         if (request.kind() == CollectionKind.CAPACITY) {
-            return new CollectionResult(CollectionStatus.UNSUPPORTED, started, atLeast(started), List.of(), null,
-                    true, MissingReason.NOT_APPLICABLE);
+            return new KafkaLogCapacity(properties, connections, clock).collect(request);
         }
         List<String> configured = new ArrayList<>(new LinkedHashSet<>(request.scope().topics()));
         List<String> configuredGroups = new ArrayList<>(new LinkedHashSet<>(request.scope().consumerGroups()));

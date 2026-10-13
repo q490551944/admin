@@ -16,11 +16,15 @@ import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult;
 import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec;
 import org.apache.kafka.clients.admin.ListOffsetsResult;
+import org.apache.kafka.clients.admin.DescribeLogDirsResult;
+import org.apache.kafka.clients.admin.LogDirDescription;
+import org.apache.kafka.clients.admin.ReplicaInfo;
 import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.config.types.Password;
 import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.errors.ClusterAuthorizationException;
@@ -517,6 +521,72 @@ class MonitoringKafkaConnectionsTest {
             ordered.verify(fixture.admin).listConsumerGroupOffsets(anyMap(), any());
             ordered.verify(fixture.admin).listOffsets(anyMap(), any());
             ordered.verify(fixture.admin).close(Duration.ZERO);
+        }
+    }
+
+    @Test
+    void logDirectoriesUseOnlyBrokersFromPreviouslyReadConfiguredPartitionsWithCurrentRemainingBudget() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            var zero = new Node(0, "private-broker", 9092);
+            var one = new Node(1, "private-broker-one", 9093);
+            var metadata = new TopicDescription("ready", false, List.of(new TopicPartitionInfo(0, zero, List.of(zero, one), List.of(zero, one))));
+            var topicResponse = topics(Map.of("ready", KafkaFuture.completedFuture(metadata)));
+            when(fixture.admin.describeTopics(anyCollection(), any())).thenReturn(topicResponse);
+            var nativeDirs = Map.of("/private/log-dir", new LogDirDescription(null, Map.of(new TopicPartition("ready", 0), new ReplicaInfo(100, 0, false)), 1000, 500));
+            var response = mock(DescribeLogDirsResult.class);
+            when(response.descriptions()).thenReturn(Map.of(0, KafkaFuture.completedFuture(nativeDirs),
+                    1, failed(new ClusterAuthorizationException("private-denial-secret")), 99, KafkaFuture.completedFuture(nativeDirs)));
+            when(fixture.admin.describeLogDirs(anyCollection(), any())).thenReturn(response);
+            try (var session = fixture.access().open(fixture.request())) {
+                session.describeTopics(List.of("ready"));
+                fixture.ticker.set(TimeUnit.MILLISECONDS.toNanos(4750));
+                var result = session.describeLogDirectories(List.of(0, 1), List.of(new TopicPartition("ready", 0)));
+                assertThat(result).containsOnlyKeys(0, 1);
+                assertThat(result.get(0).directories()).isEqualTo(nativeDirs);
+                assertFailure(result.get(1).failure(), MissingReason.UNAUTHORIZED, false);
+            }
+            verify(fixture.admin).describeLogDirs(eq(List.of(0, 1)), argThat(options -> options.timeoutMs() == 250));
+            verify(fixture.admin, never()).describeCluster(any());
+            verify(fixture.admin, never()).listConsumerGroupOffsets(anyMap(), any());
+        }
+    }
+
+    @Test
+    void logDirectoryScopeCannotInventBrokersOrUseUnreadPartitionMetadataAndEmptyScopeNeverQueries() throws Exception {
+        try (Fixture fixture = new Fixture(); var session = fixture.access().open(fixture.request())) {
+            var partition = new TopicPartition("ready", 0);
+            assertThat(session.describeLogDirectories(List.of(), List.of())).isEmpty();
+            assertThatThrownBy(() -> session.describeLogDirectories(List.of(0), List.of(partition)))
+                    .isInstanceOfSatisfying(KafkaMonitoringConnections.Failure.class, failure -> assertFailure(failure, MissingReason.UNSUPPORTED, false));
+            var zero = new Node(0, "private-broker", 9092);
+            var metadata = new TopicDescription("ready", false, List.of(new TopicPartitionInfo(0, zero, List.of(zero), List.of(zero))));
+            var topicResponse = topics(Map.of("ready", KafkaFuture.completedFuture(metadata)));
+            when(fixture.admin.describeTopics(anyCollection(), any())).thenReturn(topicResponse);
+            session.describeTopics(List.of("ready"));
+            for (var partitions : List.of(List.of(new TopicPartition("outside", 0)), List.of(new TopicPartition("ready", 1)), List.of(partition))) {
+                List<Integer> brokers = partitions.equals(List.of(partition)) ? List.of(99) : List.of(0);
+                assertThatThrownBy(() -> session.describeLogDirectories(brokers, partitions))
+                        .isInstanceOfSatisfying(KafkaMonitoringConnections.Failure.class, failure -> assertFailure(failure, MissingReason.UNSUPPORTED, false));
+            }
+            verify(fixture.admin, never()).describeLogDirs(anyCollection(), any());
+        }
+    }
+
+    @Test
+    void unavailableLogDirectoryProtocolIsSanitizedPerRequestedBrokerWithoutAnyClientUpgrade() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            var zero = new Node(0, "private-broker", 9092);
+            var metadata = new TopicDescription("ready", false, List.of(new TopicPartitionInfo(0, zero, List.of(zero), List.of(zero))));
+            var topicResponse = topics(Map.of("ready", KafkaFuture.completedFuture(metadata)));
+            when(fixture.admin.describeTopics(anyCollection(), any())).thenReturn(topicResponse);
+            when(fixture.admin.describeLogDirs(anyCollection(), any())).thenThrow(new UnsupportedVersionException("private-version-detail"));
+            try (var session = fixture.access().open(fixture.request())) {
+                session.describeTopics(List.of("ready"));
+                var result = session.describeLogDirectories(List.of(0), List.of(new TopicPartition("ready", 0)));
+                assertThat(result).containsOnlyKeys(0);
+                assertThat(result.get(0).directories()).isNull();
+                assertFailure(result.get(0).failure(), MissingReason.UNSUPPORTED, false);
+            }
         }
     }
 

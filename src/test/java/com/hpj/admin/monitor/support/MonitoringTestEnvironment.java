@@ -154,6 +154,13 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
         return start(new MonitoringTestEnvironment("kafka", true));
     }
 
+    /** Two fixed directories inside the same owned container filesystem for capacity tests. */
+    public static MonitoringTestEnvironment startKafkaWithLogDirectories() {
+        var environment = new MonitoringTestEnvironment("kafka");
+        environment.container.withEnv("KAFKA_LOG_DIRS", "/tmp/monitor-log-a,/tmp/monitor-log-b");
+        return start(environment);
+    }
+
     /** Fixed HTTPS mode with private localhost trust material; never accepts an external endpoint. */
     public static MonitoringTestEnvironment startElasticsearchWithTls() {
         MonitoringTlsMaterial material;

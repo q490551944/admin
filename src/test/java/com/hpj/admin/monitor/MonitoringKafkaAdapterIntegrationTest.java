@@ -1,5 +1,6 @@
 package com.hpj.admin.monitor;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hpj.admin.common.config.monitor.MonitoringProperties;
 import com.hpj.admin.monitor.connection.MonitoringConnectionResolver;
 import com.hpj.admin.monitor.connection.ResolvedTarget;
@@ -40,6 +41,7 @@ import org.apache.kafka.common.acl.AclPermissionType;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
+import org.apache.kafka.common.errors.ClusterAuthorizationException;
 import org.apache.kafka.common.resource.PatternType;
 import org.apache.kafka.common.resource.ResourcePattern;
 import org.apache.kafka.common.resource.ResourceType;
@@ -375,6 +377,110 @@ class MonitoringKafkaAdapterIntegrationTest {
         }
     }
 
+    @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void nativeCapacityReadsTwoSharedVolumeDirectoriesAndScopedCopiesWithIndependentTtlAndNoWrites() throws Exception {
+        try (MonitoringTestEnvironment environment = MonitoringTestEnvironment.startKafkaWithLogDirectories();
+             AdminClient observer = environment.kafkaAdmin(); Collector collector = new Collector()) {
+            List<String> owned = topicNames(environment);
+            try {
+                prepareTopics(observer, owned);
+                environment.prepareData();
+                AdminState before = state(observer, owned);
+                List<TopicPartition> selected = partitions(observer, owned.subList(0, 2));
+                ResolvedTarget target = resolve(source(environment), "log-capacity", owned.subList(0, 2));
+                CollectionResult capacity = collector.collect(target, CollectionKind.CAPACITY);
+                NativeObservation nativeRead = collector.connections.observations.get(0);
+                assertThat(capacity.status()).isEqualTo(CollectionStatus.SUCCESS);
+                assertThat(capacity.serviceProbe()).isNull();
+                assertThat(nativeRead.cluster).isNull();
+                assertThat(nativeRead.requestedGroups).isEmpty();
+                assertThat(nativeRead.requestedPartitions).containsExactlyInAnyOrderElementsOf(selected);
+                assertThat(nativeRead.directories).hasSize(1);
+                var broker = nativeRead.directories.entrySet().iterator().next();
+                assertThat(broker.getValue().failure()).isNull();
+                assertThat(broker.getValue().directories()).hasSize(2);
+                List<BigDecimal> expectedCopies = new ArrayList<>();
+                List<BigDecimal> totals = new ArrayList<>();
+                List<BigDecimal> usable = new ArrayList<>();
+                for (var directory : broker.getValue().directories().values()) {
+                    assertThat(directory.error()).isNull();
+                    assertThat(directory.totalBytes().isPresent()).isTrue();
+                    assertThat(directory.usableBytes().isPresent()).isTrue();
+                    totals.add(BigDecimal.valueOf(directory.totalBytes().getAsLong()));
+                    usable.add(BigDecimal.valueOf(directory.usableBytes().getAsLong()));
+                    directory.replicaInfos().forEach((partition, info) -> { if (selected.contains(partition)) expectedCopies.add(BigDecimal.valueOf(info.size())); });
+                }
+                assertThat(totals).hasSize(2).allSatisfy(total -> assertThat(total).isPositive());
+                assertThat(totals.get(0)).isEqualByComparingTo(totals.get(1));
+                assertThat(capacity.metrics().stream().filter(sample -> sample.definition().key().equals("kafka.replica.log.bytes")).map(MetricSample::value))
+                        .containsExactlyInAnyOrderElementsOf(expectedCopies);
+                assertThat(capacity.metrics().stream().filter(sample -> sample.definition().key().equals("kafka.log_directory.volume.total.bytes")).map(MetricSample::value))
+                        .containsExactlyInAnyOrderElementsOf(totals);
+                assertThat(capacity.metrics().stream().filter(sample -> sample.definition().key().equals("kafka.log_directory.volume.usable.bytes")).map(MetricSample::value))
+                        .containsExactlyInAnyOrderElementsOf(usable);
+                assertThat(capacity.metrics()).filteredOn(sample -> sample.definition().key().equals("kafka.log_directory.volume.identity.known"))
+                        .hasSize(2).allSatisfy(sample -> assertThat(sample.value()).isEqualTo(false));
+                assertThat(capacity.metrics()).allSatisfy(sample -> {
+                    if (sample.value() != null) assertThat(Duration.between(sample.sampledAt(), sample.validUntil())).isEqualTo(Duration.ofSeconds(180));
+                });
+                assertThat(capacity.metrics()).noneMatch(sample -> sample.definition().scope().id().startsWith(owned.get(2) + "#"));
+                assertThat(new ObjectMapper().findAndRegisterModules().writeValueAsString(capacity)).doesNotContain("/tmp/monitor-log-", environment.bootstrapServers());
+                collector.collect(target);
+                assertThat(collector.snapshots.snapshot(target.display().id()).orElseThrow().metrics())
+                        .filteredOn(stored -> stored.kind() == CollectionKind.CAPACITY)
+                        .allSatisfy(stored -> assertThat(stored.latestAttempt().sampledAt()).isEqualTo(capacity.completedAt()));
+                assertThat(collector.connections.closed).isEqualTo(2);
+                assertThat(state(observer, owned)).isEqualTo(before);
+            } finally { deleteOwnedTopics(observer, owned); }
+        }
+    }
+
+    @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void nativeLogDirectoryAclDenialPreservesPreviousCapacityEvidenceWithoutChangingTopics() throws Exception {
+        try (MonitoringTestEnvironment environment = MonitoringTestEnvironment.startKafkaWithAuthorizer();
+             AdminClient observer = environment.kafkaAdmin(); Collector collector = new Collector()) {
+            List<String> owned = topicNames(environment);
+            AclBinding denial = new AclBinding(new ResourcePattern(ResourceType.CLUSTER, "kafka-cluster", PatternType.LITERAL),
+                    new AccessControlEntry("User:ANONYMOUS", "*", AclOperation.DESCRIBE, AclPermissionType.DENY));
+            boolean created = false;
+            try {
+                prepareTopics(observer, owned);
+                environment.prepareData();
+                AdminState before = state(observer, owned);
+                ResolvedTarget target = resolve(source(environment), "log-acl", owned.subList(0, 2));
+                CollectionResult first = collector.collect(target, CollectionKind.CAPACITY);
+                List<Integer> brokers = collector.connections.observations.get(0).requestedBrokers;
+                observer.createAcls(List.of(denial), new CreateAclsOptions().timeoutMs(NATIVE_TIMEOUT_MS)).all().get(5, TimeUnit.SECONDS);
+                created = true;
+                await().atMost(Duration.ofSeconds(15)).until(() -> logDirectoriesDenied(observer, brokers));
+                CollectionResult denied = collector.collect(target, CollectionKind.CAPACITY);
+                assertThat(denied.status()).isEqualTo(CollectionStatus.UNAUTHORIZED);
+                assertThat(denied.reason()).isEqualTo(MissingReason.UNAUTHORIZED);
+                assertThat(denied.serviceProbe()).isNull();
+                assertThat(denied.inventoryComplete()).isFalse();
+                assertThat(collector.connections.observations.get(1).cluster).isNull();
+                assertThat(collector.snapshots.snapshot(target.display().id()).orElseThrow().metrics())
+                        .filteredOn(stored -> stored.kind() == CollectionKind.CAPACITY && stored.latestAttempt().definition().key().equals("kafka.replica.log.bytes"))
+                        .isNotEmpty().allSatisfy(stored -> assertThat(stored.lastSuccess().sampledAt()).isEqualTo(first.completedAt()));
+                observer.deleteAcls(List.of(denial.toFilter()), new DeleteAclsOptions().timeoutMs(NATIVE_TIMEOUT_MS)).all().get(5, TimeUnit.SECONDS);
+                created = false;
+                await().atMost(Duration.ofSeconds(15)).until(() -> !logDirectoriesDenied(observer, brokers));
+                assertThat(state(observer, owned)).isEqualTo(before);
+                assertThat(collector.connections.closed).isEqualTo(2);
+            } finally {
+                if (created) observer.deleteAcls(List.of(denial.toFilter())).all().get(5, TimeUnit.SECONDS);
+                deleteOwnedTopics(observer, owned);
+            }
+        }
+    }
+
+    private static boolean logDirectoriesDenied(AdminClient observer, List<Integer> brokers) throws Exception {
+        try { observer.describeLogDirs(brokers).allDescriptions().get(5, TimeUnit.SECONDS); return false; }
+        catch (ExecutionException failure) { if (failure.getCause() instanceof ClusterAuthorizationException) return true; throw failure; }
+    }
+
     private static List<TopicPartition> partitions(AdminClient observer, List<String> topics) throws Exception {
         var descriptions = observer.describeTopics(topics).allTopicNames().get(5, TimeUnit.SECONDS);
         List<TopicPartition> partitions = new ArrayList<>();
@@ -582,6 +688,12 @@ class MonitoringKafkaAdapterIntegrationTest {
                     observation.lag = actual.readCommittedLag(groups, partitions);
                     return observation.lag;
                 }
+                @Override public Map<Integer, DirectoriesRead> describeLogDirectories(List<Integer> brokers, List<TopicPartition> partitions) {
+                    observation.requestedBrokers.addAll(brokers);
+                    observation.requestedPartitions.addAll(partitions);
+                    observation.directories = actual.describeLogDirectories(brokers, partitions);
+                    return observation.directories;
+                }
                 @Override public void close() { actual.close(); closed++; }
             };
         }
@@ -593,6 +705,8 @@ class MonitoringKafkaAdapterIntegrationTest {
         final List<String> requestedGroups = new ArrayList<>();
         final List<TopicPartition> requestedPartitions = new ArrayList<>();
         KafkaMonitoringConnections.LagRead lag;
+        final List<Integer> requestedBrokers = new ArrayList<>();
+        Map<Integer, KafkaMonitoringConnections.DirectoriesRead> directories;
     }
 
     private static final class Collector implements AutoCloseable {
@@ -608,6 +722,9 @@ class MonitoringKafkaAdapterIntegrationTest {
         long sequence;
 
         CollectionResult collect(ResolvedTarget target) throws Exception {
+            return collect(target, CollectionKind.ORDINARY);
+        }
+        CollectionResult collect(ResolvedTarget target, CollectionKind kind) throws Exception {
             String id = target.display().id();
             var binding = target.bindings().get(0);
             var source = binding.connection();
@@ -616,8 +733,8 @@ class MonitoringKafkaAdapterIntegrationTest {
             Duration timeout = properties.getCollectionTimeout();
             CollectionControl control = new CollectionControl(lifecycle, () -> true, clock, System::nanoTime,
                     System.nanoTime() + timeout.toNanos(), cleanup, counters, id, source.source(),
-                    CollectionKind.ORDINARY, properties.getOrdinaryInterval(), source.client());
-            CollectionRequest request = new CollectionRequest(id, source.source(), source.source(), CollectionKind.ORDINARY,
+                    kind, kind == CollectionKind.CAPACITY ? properties.getCapacityInterval() : properties.getOrdinaryInterval(), source.client());
+            CollectionRequest request = new CollectionRequest(id, source.source(), source.source(), kind,
                     1, ++sequence, scheduled, scheduled.plus(timeout), binding.scope(), source.client(), source.settings(), control);
             try {
                 CollectionResult result = adapter.collect(request);

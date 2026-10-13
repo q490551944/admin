@@ -82,7 +82,27 @@ monitor:
 
 CI 调用相同入口，运行时不可用会失败。真实测试只启动临时容器，通过自有主题、精确 topic ACL 和 AdminClient 验证原生映射、配置范围、截断、主题不存在与局部拒绝；测试准备的写入和授权操作不属于生产采集器。单 broker 场景验证健康 leader/ISR，无 leader 和副本不足的非零分支由契约测试覆盖。
 
-真实位点验收另通过 Admin 在自有临时容器准备已知、无提交及负差的组，设置精确组 ACL，逐项对比原生返回，确认截断范围、资源关闭和采集前后提交 Map 完全不变。所有写入及 ACL 改动均在测试准备/清理阶段，生产连接只提供上述只读操作。日志目录由 #33 接续。
+真实位点验收另通过 Admin 在自有临时容器准备已知、无提交及负差的组，设置精确组 ACL，逐项对比原生返回，确认截断范围、资源关闭和采集前后提交 Map 完全不变。所有写入及 ACL 改动均在测试准备/清理阶段，生产连接只提供上述只读操作。
+
+## 日志副本与原生卷容量
+
+容量任务采用独立 60 秒周期与 180 秒有效期。只用配置 topic 元数据定位其副本所在 broker，再调用 `describeLogDirs`，不执行集群探测或消费组读取，也不更新普通样本时间。空 topic 范围不连接。现有 Kafka 3.6.1 已提供 `LogDirDescription.totalBytes()` / `usableBytes()`，不升级项目；旧协议的空字段逐项标为 `UNSUPPORTED`，可读日志副本仍保留。
+
+| 范围 | 主要指标 |
+| --- | --- |
+| broker | `kafka.broker.log_directories.discovered` / `.observed`，`.replicas.expected` / `.replicas.current.covered`，`.log_coverage.complete` |
+| 目录 | `kafka.log_directory.scoped_replica.bytes`、`.known_replica.bytes`、`.replicas.observed` / `.replicas.future`、`.coverage.complete` |
+| 分区副本 | `kafka.replica.log.bytes`、`.future`，附 broker ID 和目录标识 |
+| 目录所在卷 | `kafka.log_directory.volume.total.bytes`、`.usable.bytes`、`.identity.known` |
+| 容量覆盖 | `kafka.capacity.topics.configured` / `.requested`、`.partitions.observed`、`.coverage.complete` / `.coverage.truncated`、`.limits.*` |
+
+副本字节来自 `ReplicaInfo.size()` 的日志段大小，current/future 副本分别展示；同一分区在不同 broker 或迁移目录的副本属于不同物理复制行。它不是整盘使用量，不包含全部文件系统开销，也不是排除副本后的逻辑数据大小。API 不支持按 topic 过滤 broker 的原生日志目录响应，内部可能包含其他 topic；发布的副本值只保留配置范围，不枚举其他 broker。目录绝对路径转换为稳定 SHA-256 标识，API 不输出原始路径。
+
+卷值只采用原生 totalBytes/usableBytes。多个目录可能共享卷，原生响应又没有可靠卷身份，因此 `.identity.known` 为 false；不因相同容量推断同卷，不跨目录或 broker 求和，不从副本日志字节推导磁盘使用率。负容量、usable > 有效 total、目录存储错误、权限拒绝均明确表达；合法原生零值保留为零。
+
+容量最多输出 500 条序列，为既有普通采集的最多 4500 条保留空间。有效上限同时受配置和该预算约束：最多 100 个 topic、200 个分区、25 个 broker；目录与副本行共享剩余空间。确定性截断退役已省略行并显示不完整；未知目录/分区清单保留旧证据按原 TTL 过期。原生接口无分页，输出上限不保证原生响应只含这些行。
+
+`kafka.broker.cpu.percent` 和 `.memory.bytes` 明确 `UNSUPPORTED`：当前 Admin 协议不提供 broker 进程资源，不能将 admin 应用或 AdminClient 自身资源代入，也不增加 JMX/Exporter。真实 Kafka 验收在自有容器配置两个共享文件系统的日志目录，对比同一原生响应中的卷与配置副本值，并验证日志目录接口所需集群 DESCRIBE 权限的精确 ACL 拒绝、独立 TTL、关闭和采集前后 topic/提交状态不变。
 
 ## 语义依据
 
@@ -90,3 +110,4 @@ CI 调用相同入口，运行时不可用会失败。真实测试只启动临�
 - [Kafka 3.8 授权响应](https://github.com/apache/kafka/blob/3.8.0/core/src/main/scala/kafka/server/AuthHelper.scala)：DescribeCluster 与授权操作字段的关系。
 - [Kafka ACL](https://kafka.apache.org/38/security/authorization-and-acls/)：主题的 DESCRIBE 权限。
 - [Kafka 3.6.1 OffsetFetch 结果处理](https://github.com/apache/kafka/blob/3.6.1/clients/src/main/java/org/apache/kafka/clients/admin/internals/ListConsumerGroupOffsetsHandler.java)：null 提交位点及省略分区错误的语义。
+- [KIP-827](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=211884837)：DescribeLogDirs v4 的 total/usable 字段属于日志目录所在卷。
