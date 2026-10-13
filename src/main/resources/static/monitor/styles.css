@@ -132,3 +132,9 @@ button.summary-item { color: var(--ink); text-align: left; }
   .target-detail { padding: 18px; }
   .detail-metric-grid { grid-template-columns: 1fr; }
 }
+.resource-context { margin: 18px 0; padding: 12px 16px; border-left: 3px solid var(--green); background: var(--paper); }
+.resource-note { margin: 5px 0; font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.detail-node-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.detail-node-filter[hidden] { display: none; }
+.detail-node-filter select { max-width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: white; font: inherit; }
+.target-detail .overview-heading > button { flex-shrink: 0; white-space: nowrap; }
