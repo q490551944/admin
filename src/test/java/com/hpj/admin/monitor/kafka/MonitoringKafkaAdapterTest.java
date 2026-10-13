@@ -9,6 +9,9 @@ import com.hpj.admin.monitor.metric.CollectionRequest;
 import com.hpj.admin.monitor.metric.MonitoringCounterStore;
 import com.hpj.admin.monitor.metric.MonitoringSnapshotStore;
 import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.clients.admin.LogDirDescription;
+import org.apache.kafka.clients.admin.ReplicaInfo;
+import org.apache.kafka.common.errors.KafkaStorageException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.TopicPartition;
@@ -450,13 +453,14 @@ class MonitoringKafkaAdapterTest {
     }
 
     @Test
-    void capacityIsDeferredWithoutOpeningAnyClientOrCreatingInventory() throws Exception {
+    void emptyConfiguredCapacityScopeDoesNotOpenAnyNativeClient() throws Exception {
         try (Fixture fixture = new Fixture()) {
+            fixture.scopeTopics = List.of();
             CollectionResult result = fixture.adapter.collect(fixture.request(0, CollectionKind.CAPACITY));
             assertThat(result.status()).isEqualTo(CollectionStatus.UNSUPPORTED);
             assertThat(result.reason()).isEqualTo(MissingReason.NOT_APPLICABLE);
             assertThat(result.inventoryComplete()).isTrue();
-            assertThat(result.metrics()).isEmpty();
+            assertThat(result.metrics()).hasSize(9);
             assertThat(result.serviceProbe()).isNull();
             verifyNoInteractions(fixture.connections, fixture.session);
         }
@@ -625,6 +629,143 @@ class MonitoringKafkaAdapterTest {
         }
     }
 
+    @Test
+    void capacityMapsCurrentFutureCopiesAndIndependentVolumesWithoutRefreshingOrdinaryEvidence() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            CollectionResult capacity = fixture.collectCapacity(0);
+            assertThat(capacity.status()).isEqualTo(CollectionStatus.SUCCESS);
+            assertThat(capacity.serviceProbe()).isNull();
+            assertThat(capacity.metrics()).hasSize(59);
+            assertThat(directoryNumber(capacity, "kafka.log_directory.scoped_replica.bytes", "/private/dir-a", 0)).isEqualByComparingTo("100");
+            assertThat(directoryNumber(capacity, "kafka.log_directory.scoped_replica.bytes", "/private/dir-b", 0)).isEqualByComparingTo("20");
+            assertThat(directoryNumber(capacity, "kafka.log_directory.volume.total.bytes", "/private/dir-a", 0)).isEqualByComparingTo("1000");
+            assertThat(directoryNumber(capacity, "kafka.log_directory.volume.total.bytes", "/private/dir-b", 0)).isEqualByComparingTo("1000");
+            assertThat(directoryMetric(capacity, "kafka.log_directory.volume.identity.known", "/private/dir-a", 0).value()).isEqualTo(false);
+            assertThat(directoryNumber(capacity, "kafka.log_directory.replicas.future", "/private/dir-b", 0)).isEqualByComparingTo("1");
+            assertThat(metric(capacity, "kafka.broker.cpu.percent", "broker-0").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(metric(capacity, "kafka.broker.memory.bytes", "broker-1").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            verify(fixture.session).describeLogDirectories(eq(List.of(0, 1)), argThat(partitions -> partitions.containsAll(List.of(tp("events", 0), tp("events", 1), tp("audit", 0))) && partitions.size() == 3));
+            verify(fixture.session, never()).describeCluster();
+            verify(fixture.session, never()).readCommittedLag(anyList(), anyList());
+            fixture.collect(15_000);
+            assertThat(fixture.snapshots.snapshot("broker-target").orElseThrow().metrics())
+                    .filteredOn(stored -> stored.kind() == CollectionKind.CAPACITY && stored.latestAttempt().definition().key().equals("kafka.log_directory.volume.total.bytes"))
+                    .allSatisfy(stored -> {
+                        assertThat(stored.latestAttempt().sampledAt()).isEqualTo(START);
+                        assertThat(stored.latestAttempt().validUntil()).isEqualTo(START.plusSeconds(180));
+                    });
+            assertThat(new ObjectMapper().findAndRegisterModules().writeValueAsString(capacity)).doesNotContain("/private/", "excluded-topic");
+            assertThat(capacity.metrics()).noneMatch(sample -> sample.definition().key().contains("volume.sum") || sample.definition().key().contains("disk.used"));
+        }
+    }
+
+    @Test
+    void legacyEmptyVolumeFieldsDoNotHideKnownReplicaBytesOrInventDiskCapacity() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.directoryReads = Map.of(0, new DirectoriesRead(Map.of("/private/dir-a", new LogDirDescription(null,
+                    Map.of(tp("events", 0), new ReplicaInfo(100, 0, false), tp("events", 1), new ReplicaInfo(0, 0, false)))), null),
+                    1, fixture.directoryReads.get(1));
+            CollectionResult result = fixture.collectCapacity(0);
+            assertThat(result.status()).isEqualTo(CollectionStatus.PARTIAL);
+            assertThat(result.reason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(directoryMetric(result, "kafka.log_directory.volume.total.bytes", "/private/dir-a", 0).missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(directoryMetric(result, "kafka.log_directory.volume.usable.bytes", "/private/dir-a", 0).value()).isNull();
+            assertThat(directoryNumber(result, "kafka.log_directory.scoped_replica.bytes", "/private/dir-a", 0)).isEqualByComparingTo("100");
+            assertValue(result, "kafka.capacity.coverage.complete", "broker-target", true);
+        }
+    }
+
+    @Test
+    void brokerDenialAndDirectoryStorageFailureKeepOtherDirectoriesAndOldUnknownReplicaInventory() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.collectCapacity(0);
+            fixture.directoryReads = Map.of(0, fixture.directoryReads.get(0), 1,
+                    new DirectoriesRead(null, new Failure(MissingReason.UNAUTHORIZED, false)));
+            CollectionResult denied = fixture.collectCapacity(60_000);
+            assertThat(denied.status()).isEqualTo(CollectionStatus.PARTIAL);
+            assertThat(denied.reason()).isEqualTo(MissingReason.UNAUTHORIZED);
+            assertThat(denied.inventoryComplete()).isFalse();
+            assertThat(metric(denied, "kafka.broker.log_directories.discovered", "broker-1").value()).isNull();
+            assertThat(directoryNumber(denied, "kafka.log_directory.scoped_replica.bytes", "/private/dir-a", 0)).isEqualByComparingTo("100");
+            assertThat(fixture.snapshots.snapshot("broker-target").orElseThrow().metrics())
+                    .anyMatch(stored -> stored.kind() == CollectionKind.CAPACITY && "1".equals(stored.latestAttempt().definition().scope().nodeId())
+                            && stored.latestAttempt().definition().key().equals("kafka.replica.log.bytes") && stored.latestAttempt().sampledAt().equals(START));
+        }
+        try (Fixture fixture = new Fixture()) {
+            var dirs = new HashMap<>(fixture.directoryReads.get(0).directories());
+            dirs.put("/private/dir-a", new LogDirDescription(new KafkaStorageException("private-secret-path"), Map.of()));
+            fixture.directoryReads = Map.of(0, new DirectoriesRead(dirs, null), 1, fixture.directoryReads.get(1));
+            CollectionResult partial = fixture.collectCapacity(0);
+            assertThat(directoryMetric(partial, "kafka.log_directory.scoped_replica.bytes", "/private/dir-a", 0).missingReason()).isEqualTo(MissingReason.FAILED);
+            assertThat(directoryNumber(partial, "kafka.log_directory.scoped_replica.bytes", "/private/dir-b", 0)).isEqualByComparingTo("20");
+            assertThat(partial.inventoryComplete()).isFalse();
+            assertSafe(partial);
+        }
+    }
+
+    @Test
+    void invalidReplicaBytesAndVolumeRelationshipsStayUnknownWhileValidFieldsRemainIndependent() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.directoryReads = Map.of(0, new DirectoriesRead(Map.of("/private/dir-a", new LogDirDescription(null,
+                    Map.of(tp("events", 0), new ReplicaInfo(-1, 0, false)), -2, 500)), null), 1, fixture.directoryReads.get(1));
+            CollectionResult result = fixture.collectCapacity(0);
+            assertThat(directoryMetric(result, "kafka.log_directory.known_replica.bytes", "/private/dir-a", 0).missingReason()).isEqualTo(MissingReason.INVALID_VALUE);
+            assertThat(directoryMetric(result, "kafka.log_directory.volume.total.bytes", "/private/dir-a", 0).missingReason()).isEqualTo(MissingReason.INVALID_VALUE);
+            assertThat(directoryNumber(result, "kafka.log_directory.volume.usable.bytes", "/private/dir-a", 0)).isEqualByComparingTo("500");
+        }
+        try (Fixture fixture = new Fixture()) {
+            fixture.directoryReads = Map.of(0, new DirectoriesRead(Map.of("/private/dir-a", new LogDirDescription(null,
+                    Map.of(tp("events", 0), new ReplicaInfo(0, 0, false), tp("events", 1), new ReplicaInfo(0, 0, false)), 1, 2)), null),
+                    1, fixture.directoryReads.get(1));
+            CollectionResult result = fixture.collectCapacity(0);
+            assertThat(directoryNumber(result, "kafka.log_directory.scoped_replica.bytes", "/private/dir-a", 0)).isZero();
+            assertThat(directoryNumber(result, "kafka.log_directory.volume.total.bytes", "/private/dir-a", 0)).isEqualByComparingTo("1");
+            assertThat(directoryMetric(result, "kafka.log_directory.volume.usable.bytes", "/private/dir-a", 0).missingReason()).isEqualTo(MissingReason.INVALID_VALUE);
+        }
+    }
+
+    @Test
+    void deterministicDirectoryLimitRetiresOmittedRowsAndLeavesKnownReplicaSubtotalExplicitlyPartial() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.collectCapacity(0);
+            fixture.properties.getLimits().setLogDirectories(1);
+            CollectionResult bounded = fixture.collectCapacity(60_000);
+            assertThat(bounded.inventoryComplete()).isTrue();
+            assertValue(bounded, "kafka.capacity.coverage.truncated", "broker-target", true);
+            assertThat(directoryMetric(bounded, "kafka.log_directory.scoped_replica.bytes", "/private/dir-a", 0).missingReason()).isEqualTo(MissingReason.PARTIAL_SCOPE);
+            assertThat(directoryNumber(bounded, "kafka.log_directory.known_replica.bytes", "/private/dir-a", 0)).isEqualByComparingTo("100");
+            assertThat(fixture.snapshots.snapshot("broker-target").orElseThrow().metrics())
+                    .noneMatch(stored -> stored.kind() == CollectionKind.CAPACITY && stored.latestAttempt().definition().scope().id().equals(KafkaLogCapacity.directoryId("/private/dir-b")));
+        }
+    }
+
+    @Test
+    void capacityAndOrdinaryCartesianLimitsFitTheSame5000SeriesSnapshot() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.scopeTopics = List.of("events");
+            fixture.metadata.put("events", topic("events", IntStream.range(0, 200).mapToObj(index -> partition(index, ZERO, List.of(ZERO), List.of(ZERO))).toArray(TopicPartitionInfo[]::new)));
+            fixture.properties.getLimits().setConsumerGroups(100_000);
+            fixture.properties.getLimits().setLogDirectories(100_000);
+            fixture.scopeGroups = IntStream.range(0, 100_000).mapToObj(index -> "readers-" + index).toList();
+            Map<TopicPartition, ReplicaInfo> copies = new HashMap<>();
+            IntStream.range(0, 200).forEach(index -> copies.put(tp("events", index), new ReplicaInfo(10, 0, false)));
+            Map<String, LogDirDescription> dirs = new HashMap<>();
+            IntStream.range(0, 100).forEach(index -> dirs.put("/private/dir-" + index, new LogDirDescription(null, copies, 1000, 500)));
+            fixture.directoryReads = Map.of(0, new DirectoriesRead(dirs, null));
+            CollectionResult ordinary = fixture.collect(0);
+            CollectionResult capacity = fixture.collectCapacity(60_000);
+            assertThat(ordinary.metrics().size()).isLessThanOrEqualTo(4500);
+            assertThat(capacity.metrics()).hasSize(500);
+            assertThat(fixture.snapshots.snapshot("broker-target").orElseThrow().metrics().size()).isLessThanOrEqualTo(5000);
+            assertValue(capacity, "kafka.capacity.coverage.truncated", "broker-target", true);
+        }
+    }
+
+    private static MetricSample directoryMetric(CollectionResult result, String key, String path, int broker) {
+        return result.metrics().stream().filter(sample -> sample.definition().key().equals(key)
+                && sample.definition().scope().id().equals(KafkaLogCapacity.directoryId(path)) && sample.definition().scope().nodeId().equals(Integer.toString(broker))).findFirst().orElseThrow();
+    }
+    private static BigDecimal directoryNumber(CollectionResult result, String key, String path, int broker) { return (BigDecimal) directoryMetric(result, key, path, broker).value(); }
     private static TopicPartition tp(String topic, int partition) { return new TopicPartition(topic, partition); }
     private static LagRead lag(String group, long eventsZero, long eventsOne, long auditZero) {
         return new LagRead(Map.of(tp("events", 0), new OffsetRead(12L, null), tp("events", 1), new OffsetRead(8L, null),
@@ -671,6 +812,7 @@ class MonitoringKafkaAdapterTest {
         List<String> scopeTopics = List.of("events", "audit");
         List<String> scopeGroups = List.of();
         LagRead lag;
+        Map<Integer, DirectoriesRead> directoryReads;
         final MonitoringCounterStore counters = new MonitoringCounterStore(2, 5000);
         final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(2, 5000, 4);
         final ThreadPoolExecutor cleanup = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
@@ -687,9 +829,16 @@ class MonitoringKafkaAdapterTest {
             metadata.put("events", topic("events", partition(0, ZERO, List.of(ZERO, ONE), List.of(ZERO, ONE)),
                     partition(1, null, List.of(ZERO, ONE), List.of(ZERO))));
             metadata.put("audit", topic("audit", partition(0, ONE, List.of(ONE), List.of(ONE))));
+            directoryReads = Map.of(0, new DirectoriesRead(Map.of(
+                    "/private/dir-a", new LogDirDescription(null, Map.of(tp("events", 0), new ReplicaInfo(100, 0, false), tp("events", 1), new ReplicaInfo(0, 0, false),
+                            tp("excluded-topic", 0), new ReplicaInfo(9999, 0, false)), 1000, 400),
+                    "/private/dir-b", new LogDirDescription(null, Map.of(tp("events", 0), new ReplicaInfo(20, 0, true)), 1000, 400)), null),
+                    1, new DirectoriesRead(Map.of("/private/dir-a", new LogDirDescription(null, Map.of(tp("events", 0), new ReplicaInfo(120, 0, false),
+                            tp("events", 1), new ReplicaInfo(5, 0, false), tp("audit", 0), new ReplicaInfo(30, 0, false)), 2000, 900)), null));
             when(connections.open(any())).thenReturn(session);
             when(session.describeCluster()).thenAnswer(call -> cluster);
             when(session.describeTopics(anyList())).thenAnswer(call -> Map.copyOf(metadata));
+            when(session.describeLogDirectories(anyList(), anyList())).thenAnswer(call -> directoryReads);
             when(session.readCommittedLag(anyList(), anyList())).thenAnswer(call -> {
                 if (lag != null) return lag;
                 List<String> groups = call.getArgument(0);
@@ -711,7 +860,7 @@ class MonitoringKafkaAdapterTest {
             clock.now = START.plusMillis(millis);
             CollectionControl control = new CollectionControl(new Object(), () -> true, clock, ticker::get,
                     ticker.get() + Duration.ofSeconds(5).toNanos(), cleanup, counters, "broker-target", "kafka-binding",
-                    kind, Duration.ofSeconds(15), borrowed);
+                    kind, kind == CollectionKind.CAPACITY ? properties.getCapacityInterval() : properties.getOrdinaryInterval(), borrowed);
             controls.add(control);
             return new CollectionRequest("broker-target", "kafkaTemplate", "kafka-binding", kind, 1, sequence++, clock.now,
                     clock.now.plusSeconds(5), new MonitoringTarget.Scope(List.of(), scopeTopics, scopeGroups, List.of(), List.of()),
@@ -720,6 +869,13 @@ class MonitoringKafkaAdapterTest {
 
         CollectionResult collect(long millis) {
             CollectionRequest request = request(millis, CollectionKind.ORDINARY);
+            CollectionResult result = adapter.collect(request);
+            assertThat(request.control().complete(request, result, snapshots)).isEqualTo(MonitoringSnapshotStore.Acceptance.ACCEPTED);
+            return result;
+        }
+
+        CollectionResult collectCapacity(long millis) {
+            CollectionRequest request = request(millis, CollectionKind.CAPACITY);
             CollectionResult result = adapter.collect(request);
             assertThat(request.control().complete(request, result, snapshots)).isEqualTo(MonitoringSnapshotStore.Acceptance.ACCEPTED);
             return result;

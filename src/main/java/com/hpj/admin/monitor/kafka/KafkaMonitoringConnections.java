@@ -13,6 +13,8 @@ import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec;
 import org.apache.kafka.clients.admin.ListOffsetsOptions;
 import org.apache.kafka.clients.admin.ListOffsetsResult;
 import org.apache.kafka.clients.admin.OffsetSpec;
+import org.apache.kafka.clients.admin.DescribeLogDirsOptions;
+import org.apache.kafka.clients.admin.LogDirDescription;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.KafkaFuture;
@@ -79,6 +81,7 @@ public class KafkaMonitoringConnections {
         ClusterRead describeCluster();
         Map<String, TopicRead> describeTopics(List<String> allowedTopics);
         LagRead readCommittedLag(List<String> allowedGroups, List<TopicPartition> allowedPartitions);
+        Map<Integer, DirectoriesRead> describeLogDirectories(List<Integer> allowedBrokers, List<TopicPartition> allowedPartitions);
         @Override void close();
     }
 
@@ -101,6 +104,11 @@ public class KafkaMonitoringConnections {
             committed.forEach((group, offsets) -> groups.put(group, Map.copyOf(offsets)));
             committed = Collections.unmodifiableMap(groups);
         }
+    }
+
+    @JsonIgnoreType
+    public record DirectoriesRead(Map<String, LogDirDescription> directories, Failure failure) {
+        public DirectoriesRead { if (directories != null) directories = Collections.unmodifiableMap(new LinkedHashMap<>(directories)); }
     }
 
     /** Carries classifications only. Native exception text, credential-bearing causes and raw settings stay private. */
@@ -233,6 +241,7 @@ public class KafkaMonitoringConnections {
     }
 
     private static Failure unsupported() { return new Failure(MissingReason.UNSUPPORTED, false); }
+    static Failure classify(Throwable failure) { return sanitized(failure); }
 
     private static Failure sanitized(Throwable failure) {
         for (int depth = 0; failure != null && depth < 32; depth++) {
@@ -321,6 +330,7 @@ public class KafkaMonitoringConnections {
         private final Admin admin;
         private final Set<String> scope;
         private final Set<String> groups;
+        private final Map<String, TopicDescription> knownTopics = new LinkedHashMap<>();
         private final long apiTimeout;
 
         private NativeSession(Attempt attempt, Admin admin, List<String> scope, List<String> groups, long apiTimeout) {
@@ -367,6 +377,7 @@ public class KafkaMonitoringConnections {
             if (allowedTopics == null || allowedTopics.stream().anyMatch(topic -> topic == null || !scope.contains(topic))) throw unsupported();
             List<String> requestedNames = List.copyOf(new LinkedHashSet<>(allowedTopics));
             if (requestedNames.isEmpty()) return Map.of();
+            requestedNames.forEach(knownTopics::remove);
             try {
                 var result = admin.describeTopics(requestedNames,
                         new DescribeTopicsOptions().timeoutMs(timeout()).includeAuthorizedOperations(false));
@@ -379,6 +390,7 @@ public class KafkaMonitoringConnections {
                     if (read.failure() != null) output.put(name, new TopicRead(null, read.failure()));
                     else if (read.value() instanceof TopicDescription description && name.equals(description.name())) {
                         output.put(name, new TopicRead(description, null));
+                        knownTopics.put(name, description);
                     } else output.put(name, new TopicRead(null, new Failure(MissingReason.INVALID_VALUE, false)));
                 }
                 return Collections.unmodifiableMap(output);
@@ -453,6 +465,47 @@ public class KafkaMonitoringConnections {
                 committed.put(requestedGroups.get(index), offsets);
             }
             return new LagRead(ends, committed);
+        }
+
+        @Override public Map<Integer, DirectoriesRead> describeLogDirectories(List<Integer> allowedBrokers, List<TopicPartition> allowedPartitions) {
+            if (allowedBrokers == null || allowedPartitions == null
+                    || allowedPartitions.stream().anyMatch(partition -> partition == null || partition.partition() < 0 || !scope.contains(partition.topic()))) throw unsupported();
+            List<Integer> brokers = List.copyOf(new LinkedHashSet<>(allowedBrokers));
+            if (brokers.isEmpty()) return Map.of();
+            Set<Integer> permitted = new LinkedHashSet<>();
+            for (TopicPartition partition : allowedPartitions) {
+                TopicDescription topic = knownTopics.get(partition.topic());
+                if (topic == null || topic.partitions() == null || partition.partition() >= topic.partitions().size()) throw unsupported();
+                var metadata = topic.partitions().get(partition.partition());
+                if (metadata == null || metadata.partition() != partition.partition() || metadata.replicas() == null) throw unsupported();
+                // Match capacity's bounded replica prefix; do not traverse a huge native list just to authorize a read.
+                for (int index = 0; index < Math.min(metadata.replicas().size(), KafkaLogCapacity.MAX_REPLICA_NODES); index++) {
+                    Node node = metadata.replicas().get(index);
+                    if (node != null && node.id() >= 0) permitted.add(node.id());
+                }
+            }
+            if (brokers.stream().anyMatch(broker -> broker == null || broker < 0 || !permitted.contains(broker))) throw unsupported();
+            Map<Integer, DirectoriesRead> output = new LinkedHashMap<>();
+            try {
+                var result = admin.describeLogDirs(brokers, new DescribeLogDirsOptions().timeoutMs(timeout()));
+                Map<String, KafkaFuture<?>> futures = new LinkedHashMap<>();
+                brokers.forEach(broker -> futures.put("broker#" + broker, result.descriptions().get(broker)));
+                Map<String, Read> reads = readAll(futures);
+                for (Integer broker : brokers) {
+                    Read read = reads.get("broker#" + broker);
+                    if (read.failure() != null) output.put(broker, new DirectoriesRead(null, read.failure()));
+                    else if (read.value() instanceof Map<?, ?> directories && directories.entrySet().stream().allMatch(entry ->
+                            entry.getKey() instanceof String && entry.getValue() instanceof LogDirDescription)) {
+                        @SuppressWarnings("unchecked") Map<String, LogDirDescription> typed = (Map<String, LogDirDescription>) directories;
+                        output.put(broker, new DirectoriesRead(typed, null));
+                    } else output.put(broker, new DirectoriesRead(null, new Failure(MissingReason.INVALID_VALUE, false)));
+                }
+                return Collections.unmodifiableMap(output);
+            } catch (RuntimeException failure) {
+                Failure safe = sanitized(failure);
+                brokers.forEach(broker -> output.put(broker, new DirectoriesRead(null, safe)));
+                return Collections.unmodifiableMap(output);
+            }
         }
 
         private static OffsetRead invalidOffset() { return new OffsetRead(null, new Failure(MissingReason.INVALID_VALUE, false)); }
