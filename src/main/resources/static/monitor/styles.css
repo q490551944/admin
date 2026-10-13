@@ -60,7 +60,7 @@ footer { margin: 0 6%; padding: 24px 0; border-top: 1px solid var(--line); color
 body[data-page="index"] .layout { align-items: start; gap: 36px; padding: 42px 0; }
 body[data-page="index"] .intro-note { margin-top: 24px; }
 body[data-page="index"] .card { padding: 26px; }
-body[data-page="index"] .card-kicker, body[data-page="index"] .back-link { display: none; }
+body[data-page="index"] .card-kicker, body[data-page="index"] #shell:has(.status[data-kind="success"]) .back-link { display: none; }
 body[data-page="index"] #status-title { font-size: 18px; }
 body[data-page="index"] .identity { margin-top: 12px; padding: 12px; }
 body[data-page="index"] .actions:has(button:not([hidden])) { margin-top: 14px; }
