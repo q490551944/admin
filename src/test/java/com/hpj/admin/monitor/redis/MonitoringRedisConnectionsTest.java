@@ -83,7 +83,7 @@ class MonitoringRedisConnectionsTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"all", "default", "keyspace", "cpu", "memory", "commandstats", "stats\r\nCONFIG GET *", "STATS", ""})
+    @ValueSource(strings = {"all", "default", "keyspace", "commandstats", "stats\r\nCONFIG GET *", "STATS", ""})
     @NullSource
     void rejectsUnapprovedInfoSectionsBeforeSendingAnyCommand(String section) throws Exception {
         try (Fixture fixture = new Fixture()) {
@@ -92,6 +92,20 @@ class MonitoringRedisConnectionsTest {
                 assertFailure(() -> session.info(section), MissingReason.UNSUPPORTED, false);
                 assertThat(socket.commands()).isEmpty();
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"memory", "cpu"})
+    void resourceSectionsUseOnlyFixedNativeInfoCommands(String section) throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            FakeSocket socket = new FakeSocket(bulk("native_field:1\r\n"));
+            try (var session = fixture.access(socket).open(fixture.request())) {
+                assertThat(session.info(section)).isEqualTo("native_field:1\r\n");
+            }
+            assertThat(socket.commands()).isEqualTo(resp("INFO", section));
+            assertThat(socket.closed).isTrue();
+            verifyNoInteractions(fixture.business);
         }
     }
 

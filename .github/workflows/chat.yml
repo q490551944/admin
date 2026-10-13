@@ -41,15 +41,7 @@ jobs:
       - run: npm test
       - run: npx playwright install --with-deps chromium
       - name: Install isolated MinIO test server
-        shell: bash
-        run: |
-          minio_image=quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-          minio_container=$(docker create --platform linux/amd64 "$minio_image")
-          trap 'docker rm "$minio_container" >/dev/null' EXIT
-          docker cp "$minio_container:/usr/bin/minio" "$RUNNER_TEMP/minio"
-          chmod +x "$RUNNER_TEMP/minio"
-          "$RUNNER_TEMP/minio" --version
-          echo "MINIO_BIN=$RUNNER_TEMP/minio" >> "$GITHUB_ENV"
+        run: bash scripts/prepare-minio-test.sh binary
       - name: Three-user browser E2E with real MinIO
         run: npm run test:e2e
       - name: Monitoring login browser E2E with chat disabled

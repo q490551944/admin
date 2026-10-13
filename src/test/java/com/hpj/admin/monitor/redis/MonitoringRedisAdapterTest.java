@@ -44,7 +44,7 @@ class MonitoringRedisAdapterTest {
     private static final String HITS = "redis.keyspace.hits.delta";
     private static final List<String> DERIVED = List.of(RATE, HITS, "redis.keyspace.misses.delta", HIT,
             "redis.keys.evicted.delta", "redis.keys.expired.delta");
-    private static final List<String> SECTIONS = List.of("server", "clients", "stats", "persistence", "replication");
+    private static final List<String> SECTIONS = List.of("server", "clients", "stats", "persistence", "replication", "memory", "cpu");
 
     @Test
     void firstSampleExposesFixedNativeInventoryAndWaitsOnlyForDerivedCounters() throws Exception {
@@ -54,7 +54,7 @@ class MonitoringRedisAdapterTest {
             assertThat(result.status()).isEqualTo(CollectionStatus.PARTIAL);
             assertThat(result.reason()).isEqualTo(MissingReason.WAITING_SAMPLE);
             assertThat(result.inventoryComplete()).isTrue();
-            assertThat(result.metrics()).hasSize(21);
+            assertThat(result.metrics()).hasSize(26);
             assertThat(result.metrics()).extracting(sample -> sample.definition().scope().kind()).containsOnly(ScopeKind.PROCESS);
             assertThat(result.metrics()).extracting(sample -> sample.definition().scope().id()).containsOnly("cache");
             assertThat(result.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
@@ -80,7 +80,8 @@ class MonitoringRedisAdapterTest {
             assertThat(metric(result, HITS).definition().unit()).isEqualTo(Unit.COUNT);
             DERIVED.forEach(key -> assertThat(metric(result, key).missingReason()).as(key).isEqualTo(MissingReason.WAITING_SAMPLE));
             assertThat(metric(result, "redis.clients.connected").validUntil()).isEqualTo(START.plusSeconds(45));
-            assertThat(fixture.counters.seriesCount("cache")).isEqualTo(6);
+            assertThat(metric(result, "redis.cpu.single_core.percent").missingReason()).isEqualTo(MissingReason.WAITING_SAMPLE);
+            assertThat(fixture.counters.seriesCount("cache")).isEqualTo(7);
             var ordered = inOrder(fixture.session);
             ordered.verify(fixture.session).ping();
             for (String section : SECTIONS) ordered.verify(fixture.session).info(section);
@@ -337,7 +338,7 @@ class MonitoringRedisAdapterTest {
             assertThat(result.status()).isEqualTo(CollectionStatus.PARTIAL);
             assertThat(result.reason()).isEqualTo(MissingReason.UNAUTHORIZED);
             assertThat(result.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
-            assertThat(result.metrics().subList(1, 21)).extracting(MetricSample::missingReason).containsOnly(MissingReason.UNAUTHORIZED);
+            assertThat(result.metrics().subList(1, 26)).extracting(MetricSample::missingReason).containsOnly(MissingReason.UNAUTHORIZED);
             assertThat(value(result, "redis.probe.duration")).isGreaterThanOrEqualTo(BigDecimal.ZERO);
             for (String section : SECTIONS) verify(fixture.session).info(section);
         }
@@ -433,15 +434,145 @@ class MonitoringRedisAdapterTest {
     }
 
     @Test
-    void capacityHasNoInventoryOrProbeAndNeverOpensAConnection() throws Exception {
+    void capacityReadsOnlyPersistenceWithItsOwnTtlAndDoesNotRefreshAServiceProbe() throws Exception {
         try (Fixture fixture = new Fixture()) {
-            CollectionResult result = fixture.adapter.collect(fixture.request(0, CollectionKind.CAPACITY));
-            assertThat(result.status()).isEqualTo(CollectionStatus.UNSUPPORTED);
-            assertThat(result.reason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+            CollectionResult result = fixture.collect(0, CollectionKind.CAPACITY);
+            assertThat(result.status()).isEqualTo(CollectionStatus.SUCCESS);
+            assertThat(result.reason()).isNull();
             assertThat(result.inventoryComplete()).isTrue();
-            assertThat(result.metrics()).isEmpty();
+            assertThat(result.metrics()).hasSize(1);
+            assertThat(value(result, "redis.aof.current.bytes")).isEqualByComparingTo("321");
+            assertThat(metric(result, "redis.aof.current.bytes").definition().unit()).isEqualTo(Unit.BYTES);
+            assertThat(metric(result, "redis.aof.current.bytes").validUntil()).isEqualTo(START.plusSeconds(180));
             assertThat(result.serviceProbe()).isNull();
-            verifyNoInteractions(fixture.connections, fixture.session);
+            verify(fixture.session).info("persistence");
+            verify(fixture.session).close();
+            verifyNoMoreInteractions(fixture.session);
+            CollectionResult ordinary = fixture.collect(15_000);
+            assertThat(ordinary.metrics()).noneMatch(sample -> sample.definition().key().equals("redis.aof.current.bytes"));
+            assertThat(metric(ordinary, "redis.memory.used.bytes").validUntil()).isEqualTo(START.plusSeconds(60));
+            var stored = fixture.snapshots.snapshot("cache").orElseThrow().metrics().stream()
+                    .filter(sample -> sample.latestAttempt().definition().key().equals("redis.aof.current.bytes"))
+                    .findFirst().orElseThrow();
+            assertThat(stored.lastSuccess().sampledAt()).isEqualTo(START);
+            assertThat(stored.lastSuccess().validUntil()).isEqualTo(START.plusSeconds(180));
+        }
+    }
+
+    @Test
+    void memoryGaugesKeepTheirNativeScopesAndZeroLimitIsExplicitlyNotApplicable() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            CollectionResult result = fixture.collect(0);
+            assertThat(value(result, "redis.memory.used.bytes")).isEqualByComparingTo("3072");
+            assertThat(value(result, "redis.memory.rss.bytes")).isEqualByComparingTo("8192");
+            assertThat(value(result, "redis.memory.maxmemory.bytes")).isEqualByComparingTo("4096");
+            assertThat(value(result, "redis.memory.used.percent")).isEqualByComparingTo("75");
+            for (String key : List.of("redis.memory.used.bytes", "redis.memory.rss.bytes", "redis.memory.maxmemory.bytes")) {
+                assertThat(metric(result, key).definition().unit()).isEqualTo(Unit.BYTES);
+                assertThat(metric(result, key).definition().scope().kind()).isEqualTo(ScopeKind.PROCESS);
+            }
+            fixture.memory.put("maxmemory", "0");
+            CollectionResult unlimited = fixture.collect(15_000);
+            assertThat(value(unlimited, "redis.memory.maxmemory.bytes")).isZero();
+            assertThat(metric(unlimited, "redis.memory.maxmemory.bytes").definition().calculation()).contains("未设置上限");
+            assertThat(metric(unlimited, "redis.memory.used.percent").missingReason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+            assertThat(metric(unlimited, "redis.memory.used.percent").value()).isNull();
+            fixture.memory.put("maxmemory", "1024");
+            assertThat(value(fixture.collect(30_000), "redis.memory.used.percent")).isEqualByComparingTo("300");
+        }
+    }
+
+    @Test
+    void cpuUsesFractionalProcessTimeAllowsMultipleCoresAndIgnoresChildren() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.cpu.put("used_cpu_user_children", "5000");
+            fixture.cpu.put("used_cpu_sys_children", "5000");
+            fixture.collect(0);
+            fixture.cpu.put("used_cpu_user", "50.500000");
+            fixture.cpu.put("used_cpu_sys", "25.250000");
+            fixture.cpu.put("used_cpu_user_children", "999999");
+            fixture.cpu.put("used_cpu_sys_children", "999999");
+            CollectionResult loaded = fixture.collect(15_000);
+            assertThat(value(loaded, "redis.cpu.single_core.percent")).isEqualByComparingTo("300");
+            assertThat(metric(loaded, "redis.cpu.single_core.percent").definition().unit()).isEqualTo(Unit.PERCENT);
+            assertThat(metric(loaded, "redis.cpu.single_core.percent").definition().label()).contains("单核");
+            assertThat(metric(loaded, "redis.cpu.single_core.percent").definition().calculation()).contains("100%");
+            fixture.cpu.put("used_cpu_user", "51.250000");
+            fixture.cpu.put("used_cpu_sys", "25.750000");
+            assertThat(value(fixture.collect(17_500), "redis.cpu.single_core.percent")).isEqualByComparingTo("50");
+        }
+    }
+
+    @Test
+    void cpuRestartAndResetReestablishBaselinesWithoutNegativeValuesOrSpikes() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.collect(0);
+            fixture.cpu.replaceAll((field, ignored) -> "0.000000");
+            assertThat(metric(fixture.collect(15_000), "redis.cpu.single_core.percent").missingReason())
+                    .isEqualTo(MissingReason.WAITING_SAMPLE);
+            fixture.cpu.put("used_cpu_user", "1.500000");
+            fixture.cpu.put("used_cpu_sys", "0.750000");
+            assertThat(value(fixture.collect(30_000), "redis.cpu.single_core.percent")).isEqualByComparingTo("15");
+            fixture.server.put("run_id", "f".repeat(40));
+            fixture.cpu.put("used_cpu_user", "100.000000");
+            assertThat(metric(fixture.collect(45_000), "redis.cpu.single_core.percent").missingReason())
+                    .isEqualTo(MissingReason.WAITING_SAMPLE);
+            fixture.cpu.put("used_cpu_user", "103.000000");
+            assertThat(value(fixture.collect(60_000), "redis.cpu.single_core.percent")).isEqualByComparingTo("20");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"-1", "+1", "NaN", "Infinity", "1e3", " 1", "1 ", "", "1.1234567890"})
+    void malformedCpuDoesNotReplaceTheLastGoodBaseline(String invalid) throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.collect(0);
+            fixture.cpu.put("used_cpu_user", invalid);
+            assertThat(metric(fixture.collect(15_000), "redis.cpu.single_core.percent").missingReason())
+                    .isEqualTo(MissingReason.INVALID_VALUE);
+            fixture.cpu.put("used_cpu_user", "50.5");
+            assertThat(value(fixture.collect(30_000), "redis.cpu.single_core.percent")).isEqualByComparingTo("100");
+        }
+    }
+
+    @Test
+    void unavailableResourceSectionsPreserveExistingMetricsAndExplainEachMissingValue() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.cpu.remove("used_cpu_sys");
+            fixture.memory.remove("used_memory_rss");
+            CollectionResult missing = fixture.collect(0);
+            assertThat(metric(missing, "redis.cpu.single_core.percent").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(metric(missing, "redis.memory.rss.bytes").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(value(missing, "redis.memory.used.bytes")).isEqualByComparingTo("3072");
+            when(fixture.session.info("memory")).thenThrow(new RedisMonitoringConnections.Failure(MissingReason.UNAUTHORIZED, false));
+            when(fixture.session.info("cpu")).thenThrow(new RedisMonitoringConnections.Failure(MissingReason.UNAUTHORIZED, false));
+            CollectionResult denied = fixture.collect(15_000);
+            assertThat(denied.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
+            assertThat(value(denied, "redis.clients.connected")).isEqualByComparingTo("4");
+            assertThat(denied.metrics().subList(21, 26)).extracting(MetricSample::missingReason).containsOnly(MissingReason.UNAUTHORIZED);
+        }
+    }
+
+    @Test
+    void aofDisabledMissingInvalidAndDeniedAreDistinctFromAReadableZero() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.persistence.put("aof_enabled", "0");
+            assertThat(metric(fixture.collect(0, CollectionKind.CAPACITY), "redis.aof.current.bytes").missingReason())
+                    .isEqualTo(MissingReason.NOT_APPLICABLE);
+            fixture.persistence.put("aof_enabled", "1");
+            fixture.persistence.remove("aof_current_size");
+            assertThat(metric(fixture.collect(60_000, CollectionKind.CAPACITY), "redis.aof.current.bytes").missingReason())
+                    .isEqualTo(MissingReason.UNSUPPORTED);
+            fixture.persistence.put("aof_current_size", "-1");
+            assertThat(metric(fixture.collect(120_000, CollectionKind.CAPACITY), "redis.aof.current.bytes").missingReason())
+                    .isEqualTo(MissingReason.INVALID_VALUE);
+            fixture.persistence.put("aof_current_size", "0");
+            assertThat(value(fixture.collect(180_000, CollectionKind.CAPACITY), "redis.aof.current.bytes")).isZero();
+            when(fixture.session.info("persistence")).thenThrow(new RedisMonitoringConnections.Failure(MissingReason.UNAUTHORIZED, false));
+            CollectionResult denied = fixture.collect(240_000, CollectionKind.CAPACITY);
+            assertThat(denied.status()).isEqualTo(CollectionStatus.UNAUTHORIZED);
+            assertThat(metric(denied, "redis.aof.current.bytes").missingReason()).isEqualTo(MissingReason.UNAUTHORIZED);
+            assertThat(denied.serviceProbe()).isNull();
         }
     }
 
@@ -481,10 +612,12 @@ class MonitoringRedisAdapterTest {
                 "keyspace_misses", "20", "evicted_keys", "2", "expired_keys", "8"));
         final Map<String, String> persistence = new HashMap<>(Map.of("loading", "0", "rdb_bgsave_in_progress", "0",
                 "rdb_last_bgsave_status", "ok", "aof_enabled", "1", "aof_rewrite_in_progress", "0",
-                "aof_last_bgrewrite_status", "err", "aof_last_write_status", "ok"));
+                "aof_last_bgrewrite_status", "err", "aof_last_write_status", "ok", "aof_current_size", "321"));
         final Map<String, String> replication = new HashMap<>(Map.of("role", "master"));
+        final Map<String, String> memory = new HashMap<>(Map.of("used_memory", "3072", "used_memory_rss", "8192", "maxmemory", "4096"));
+        final Map<String, String> cpu = new HashMap<>(Map.of("used_cpu_user", "20.500000", "used_cpu_sys", "10.250000"));
         final Map<String, Map<String, String>> sections = Map.of("server", server, "clients", clients, "stats", stats,
-                "persistence", persistence, "replication", replication);
+                "persistence", persistence, "replication", replication, "memory", memory, "cpu", cpu);
         final MonitoringCounterStore counters = new MonitoringCounterStore(2, 40);
         final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(2, 40, 4);
         final ThreadPoolExecutor cleanup = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
@@ -513,7 +646,7 @@ class MonitoringRedisAdapterTest {
             clock.now = START.plusMillis(millis);
             CollectionControl control = new CollectionControl(new Object(), () -> true, clock, ticker::get,
                     ticker.get() + Duration.ofSeconds(5).toNanos(), cleanup, counters,
-                    "cache", "primary-cache", kind, Duration.ofSeconds(15), borrowed);
+                    "cache", "primary-cache", kind, kind == CollectionKind.ORDINARY ? Duration.ofSeconds(15) : Duration.ofSeconds(60), borrowed);
             controls.add(control);
             return new CollectionRequest("cache", "redisTemplate", "primary-cache", kind, 1, sequence++,
                     clock.now, clock.now.plusSeconds(5), new MonitoringTarget.Scope(List.of(), List.of(), List.of(), List.of(), List.of()),
@@ -521,7 +654,11 @@ class MonitoringRedisAdapterTest {
         }
 
         CollectionResult collect(long millis) {
-            CollectionRequest request = request(millis, CollectionKind.ORDINARY);
+            return collect(millis, CollectionKind.ORDINARY);
+        }
+
+        CollectionResult collect(long millis, CollectionKind kind) {
+            CollectionRequest request = request(millis, kind);
             CollectionResult result = adapter.collect(request);
             assertThat(request.control().complete(request, result, snapshots)).isEqualTo(MonitoringSnapshotStore.Acceptance.ACCEPTED);
             return result;
