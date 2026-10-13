@@ -78,6 +78,19 @@ class MonitoringSchedulerTest {
             assertThat(h.adapter.capacityPeak).hasValue(2);
             assertThat(h.scheduler.diagnostics().workerThreads()).isLessThanOrEqualTo(10);
             assertThat(h.scheduler.diagnostics().ordinaryQueued()).isZero();
+            // Capacity requests start slightly later. Wait for their cancellation before manually ending
+            // operations, otherwise natural termination can unregister their not-yet-claimed close callback.
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+                for (String id : List.of("target0", "target1")) {
+                    assertThat(h.snapshots.snapshot(id).orElseThrow().attempts())
+                            .filteredOn(attempt -> attempt.kind() == CollectionKind.CAPACITY)
+                            .singleElement().satisfies(attempt -> {
+                                assertThat(attempt.status()).isEqualTo(CollectionStatus.FAILED);
+                                assertThat(attempt.reason()).isEqualTo(MissingReason.TIMEOUT);
+                            });
+                }
+                assertThat(h.operations).allSatisfy(operation -> assertThat(operation.closeEntered.getCount()).isZero());
+            });
             h.operations.forEach(OwnedOperation::releaseForTestCleanup);
             h.awaitNoActiveOperations();
             await().untilAsserted(() -> assertThat(h.operations).allSatisfy(operation -> {
