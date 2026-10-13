@@ -45,6 +45,66 @@ class MonitoringMinioConnectionsTest {
     private static final String REGION = "<LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">eu-west-1</LocationConstraint>";
 
     @Test
+    void metricsRequireSeparateOwnerOriginAndEndpointAuthorizationAndNeverUseS3Signing() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.location = "minio_node_process_resident_memory_bytes 123\n";
+            var access = f.access();
+            assertThat(access.metricsEnabled(f.request())).isFalse();
+            try (var session = access.open(f.request())) { assertThatThrownBy(() -> session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE)).isInstanceOf(MinioMonitoringConnections.Failure.class); }
+            assertThat(f.sent).isEmpty();
+            f.authorizations.add(new MinioMetricsAuthorization(f.owner, "http://127.0.0.1:39000", "metrics-token", Set.of(MinioMonitoringConnections.MetricsEndpoint.NODE)));
+            assertThat(access.metricsEnabled(f.request())).isTrue();
+            try (var session = access.open(f.request())) {
+                assertThat(session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE).body()).contains("123");
+                assertThatThrownBy(() -> session.metrics(MinioMonitoringConnections.MetricsEndpoint.CLUSTER)).isInstanceOf(MinioMonitoringConnections.Failure.class);
+                session.health(LIVE);
+            }
+            assertThat(f.sent).extracting(Request::method).containsExactly("GET", "HEAD");
+            assertThat(f.sent.get(0).url().encodedPath()).isEqualTo("/minio/v2/metrics/node");
+            assertThat(f.sent.get(0).header("Authorization")).isEqualTo("Bearer metrics-token");
+            assertThat(f.sent.get(0).header("x-amz-date")).isNull();
+            assertThat(f.sent.get(1).header("Authorization")).isNull();
+            assertThat(f.control.isCleanupComplete()).isTrue();
+            assertThat(f.authorizations.get(0).toString()).doesNotContain("metrics-token", "39000");
+        }
+    }
+
+    @Test
+    void staleAmbiguousOrWrongOwnerMetricsAuthorizationIsNotUsed() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.authorizations.add(new MinioMetricsAuthorization(new Object(), "http://127.0.0.1:39000", "token", Set.of(MinioMonitoringConnections.MetricsEndpoint.NODE)));
+            f.authorizations.add(new MinioMetricsAuthorization(f.owner, "http://127.0.0.1:39001", "token", Set.of(MinioMonitoringConnections.MetricsEndpoint.NODE)));
+            assertThat(f.access().metricsEnabled(f.request())).isFalse();
+            var matching = new MinioMetricsAuthorization(f.owner, "http://127.0.0.1:39000", "token", Set.of(MinioMonitoringConnections.MetricsEndpoint.NODE));
+            f.authorizations.add(matching); f.authorizations.add(matching);
+            assertThat(f.access().metricsEnabled(f.request())).isFalse();
+            assertThat(f.sent).isEmpty();
+        }
+    }
+
+    @Test
+    void nativeMetricsBodyLimitAndDeniedHttpStatusCloseOnlyOwnedResponses() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.authorizations.add(new MinioMetricsAuthorization(f.owner, "http://127.0.0.1:39000", "token", Set.of(MinioMonitoringConnections.MetricsEndpoint.NODE)));
+            f.location = "x".repeat(MinioMonitoringConnections.MAX_METRICS_BYTES + 1);
+            try (var session = f.access().open(f.request())) {
+                assertThatThrownBy(() -> session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE)).isInstanceOfSatisfying(MinioMonitoringConnections.Failure.class, failure -> assertThat(failure.reason()).isEqualTo(MissingReason.INVALID_VALUE));
+            }
+            f.unknownLength = true;
+            try (var session = f.access().open(f.request())) {
+                assertThatThrownBy(() -> session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE)).isInstanceOfSatisfying(MinioMonitoringConnections.Failure.class, failure -> assertThat(failure.reason()).isEqualTo(MissingReason.INVALID_VALUE));
+            }
+            f.status = 403;
+            try (var session = f.access().open(f.request())) {
+                var result = session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE);
+                assertThat(result.status()).isEqualTo(403); assertThat(result.body()).isEmpty();
+            }
+            assertThat(f.closedBodies.get()).isEqualTo(3);
+            assertThat(f.control.isCleanupComplete()).isTrue();
+        }
+    }
+
+    @Test
     void healthAndScopedBucketUseOnlyFixedRequestsAndCredentialsStayOffHealth() throws Exception {
         try (Fixture f = new Fixture(); var session = f.access().open(f.request())) {
             assertThat(session.health(LIVE).status()).isEqualTo(200);
@@ -365,6 +425,8 @@ class MonitoringMinioConnectionsTest {
         private Runnable onExecute = () -> {};
         private CountDownLatch releaseExecute;
         private boolean closeFailure;
+        private boolean unknownLength;
+        private final List<MinioMetricsAuthorization> authorizations = new ArrayList<>();
 
         private Fixture() { this(new ChatProperties()); }
         private Fixture(Object owner) {
@@ -401,7 +463,7 @@ class MonitoringMinioConnectionsTest {
                             });
                             ResponseBody body = new ResponseBody() {
                                 @Override public MediaType contentType() { return MediaType.parse("application/xml"); }
-                                @Override public long contentLength() { return bytes.length; }
+                                @Override public long contentLength() { return unknownLength ? -1 : bytes.length; }
                                 @Override public BufferedSource source() { return source; }
                             };
                             return new Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
@@ -411,7 +473,7 @@ class MonitoringMinioConnectionsTest {
                     doAnswer(invocation -> { cancelled.set(true); return null; }).when(call).cancel();
                     return call;
                 };
-            });
+            }, () -> authorizations);
         }
         private CollectionRequest request() {
             Instant now = control.now();

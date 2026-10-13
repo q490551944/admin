@@ -23,6 +23,7 @@ import com.hpj.admin.monitor.elasticsearch.ElasticsearchMonitoringAdapter;
 import com.hpj.admin.monitor.elasticsearch.ElasticsearchMonitoringConnections;
 import com.hpj.admin.monitor.minio.MinioMonitoringAdapter;
 import com.hpj.admin.monitor.minio.MinioMonitoringConnections;
+import com.hpj.admin.monitor.minio.MinioMetricsAuthorization;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -38,8 +39,10 @@ import java.time.Clock;
 @EnableConfigurationProperties(MonitoringProperties.class)
 public class MonitoringConfiguration {
     @Bean
-    MinioMonitoringAdapter minioMonitoringAdapter(MonitoringProperties properties) {
-        return new MinioMonitoringAdapter(properties, new MinioMonitoringConnections(), Clock.systemUTC());
+    MinioMonitoringAdapter minioMonitoringAdapter(MonitoringProperties properties, ConfigurableListableBeanFactory beanFactory) {
+        return new MinioMonitoringAdapter(properties, new MinioMonitoringConnections(() ->
+                java.util.Arrays.stream(beanFactory.getSingletonNames()).map(beanFactory::getSingleton)
+                        .filter(MinioMetricsAuthorization.class::isInstance).map(MinioMetricsAuthorization.class::cast).limit(21).toList()), Clock.systemUTC());
     }
 
     @Bean

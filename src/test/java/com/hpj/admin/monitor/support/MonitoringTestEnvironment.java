@@ -328,6 +328,34 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
         }
     }
 
+    /** Setup only: provision an independent JWT for the disposable fixture without opening public metrics. */
+    public String minioMetricsBearer() {
+        requireType("minio");
+        return operation("prepare owned MinIO metrics authorization", () -> {
+            minioSetupCommand("alias", "set", "owned", "http://127.0.0.1:9000", username, password);
+            try {
+                var outcome = container.execInContainer("/usr/bin/mc", "--json", "admin", "prometheus", "generate", "owned", "node", "--api-version", "v2");
+                if (outcome.getExitCode() != 0) throw new IllegalStateException();
+                String bearer = JSON.readTree(outcome.getStdout()).path("bearerToken").asText();
+                if (bearer.isEmpty()) throw new IllegalStateException();
+                return bearer;
+            } catch (Exception failure) { throw new IllegalStateException("Owned MinIO metrics authorization unavailable"); }
+        });
+    }
+
+    /** Fault injection only on this owned fixture; native restart re-execs in place and preserves its port. */
+    public void restartMinio() {
+        requireType("minio");
+        operation("restart owned MinIO fixture", () -> {
+            minioSetupCommand("--json", "admin", "service", "restart", "--wait", "owned");
+            org.awaitility.Awaitility.await().atMost(READY_TIMEOUT).until(() -> {
+                try { return minioClient().bucketExists(BucketExistsArgs.builder().bucket(resourceName()).build()); }
+                catch (Exception unavailable) { return false; }
+            });
+            return null;
+        });
+    }
+
     /** Opaque test-only credentials; never print record fields in diagnostics. */
     public record MinioReadOnlyCredentials(String accessKey, String secretKey) {
         @Override public String toString() { return "MinioReadOnlyCredentials[REDACTED]"; }

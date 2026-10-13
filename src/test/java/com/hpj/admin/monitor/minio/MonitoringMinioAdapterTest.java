@@ -67,7 +67,7 @@ class MonitoringMinioAdapterTest {
             assertThat(number(result, "minio.health.write.ready.latency.ms")).isEqualByComparingTo("30");
             assertThat(number(result, "minio.bucket.latency.ms")).isEqualByComparingTo("40");
             assertThat(metric(result, "minio.bucket.accessible").sampledAt()).isEqualTo(START.plusMillis(100));
-            assertThat(result.metrics()).hasSize(17);
+            assertThat(result.metrics()).hasSize(18);
             assertThat(value(result, "minio.coverage.complete")).isEqualTo(true);
             var order = inOrder(f.session);
             order.verify(f.session).health(LIVE);
@@ -210,9 +210,9 @@ class MonitoringMinioAdapterTest {
             CollectionResult result = f.collect(0);
             assertThat(result.reason()).isEqualTo(reason);
             assertThat(result.serviceProbe().availability()).isEqualTo(reason == MissingReason.FAILED ? ServiceAvailability.CONNECTION_FAILED : ServiceAvailability.UNKNOWN);
-            assertThat(result.metrics().stream().filter(sample -> sample.definition().scope().kind() != ScopeKind.CONFIGURED_SCOPE))
+            assertThat(result.metrics().stream().filter(sample -> sample.definition().scope().kind() != ScopeKind.CONFIGURED_SCOPE && !sample.definition().key().startsWith("minio.native.")))
                     .allMatch(sample -> sample.value() == null && sample.missingReason() == reason);
-            assertThat(result.metrics()).hasSize(17);
+            assertThat(result.metrics()).hasSize(18);
             assertThat(result.inventoryComplete()).isTrue();
             verifyNoInteractions(f.session);
             assertSafe(result);
@@ -283,7 +283,7 @@ class MonitoringMinioAdapterTest {
             assertThat(value(result, "minio.coverage.complete")).isEqualTo(false);
             assertThat(result.status()).isEqualTo(CollectionStatus.PARTIAL);
             assertThat(result.inventoryComplete()).isFalse();
-            assertThat(result.metrics()).hasSize(14 + effective * 3);
+            assertThat(result.metrics()).hasSize(15 + effective * 3);
             verify(f.session, times(effective)).bucket(anyString());
             verify(f.session, never()).bucket("owned-bucket-" + effective);
         }
@@ -365,15 +365,145 @@ class MonitoringMinioAdapterTest {
     }
 
     @Test
-    void capacityDoesNotOpenAConnectionOrCreateAnyProbeOrResourceSeries() throws Exception {
+    void nativeCountersUseActualIntervalsAndRestartEvidenceWithoutChangingBucketProbe() throws Exception {
+        try (Fixture f = new Fixture()) {
+            when(f.connections.metricsEnabled(any())).thenReturn(true);
+            when(f.session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE)).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, nativeOrdinary(10, 100, 2)));
+            CollectionResult first = f.collect(0);
+            assertThat(metric(first, "minio.native.requests.total.rate").missingReason()).isEqualTo(MissingReason.WAITING_SAMPLE);
+            when(f.session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE)).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, nativeOrdinary(40, 100, 32)));
+            CollectionResult second = f.collect(15_000);
+            assertThat(number(second, "minio.native.requests.total.rate")).isEqualByComparingTo("2");
+            assertThat(number(second, "minio.native.process.cpu.seconds.rate")).isEqualByComparingTo("2");
+            assertThat(metric(second, "minio.native.process.cpu.seconds.rate").definition().unit()).isEqualTo(Unit.CORES);
+            assertThat(metric(second, "minio.bucket.accessible").value()).isEqualTo(true);
+            assertThat(second.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
+            assertThat(JSON.writeValueAsString(second)).doesNotContain("private-node:9000");
+            when(f.session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE)).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, nativeOrdinary(3, 100, 2)));
+            assertThat(metric(f.collect(30_000), "minio.native.requests.total.rate").missingReason()).isEqualTo(MissingReason.WAITING_SAMPLE);
+            when(f.session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE)).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, nativeOrdinary(50, 200, 100)));
+            assertThat(metric(f.collect(45_000), "minio.native.requests.total.rate").missingReason()).isEqualTo(MissingReason.WAITING_SAMPLE);
+        }
+    }
+
+    @Test
+    void nativeAuthorizationDenialKeepsSuccessfulS3ConclusionAndOldResourceSampleTime() throws Exception {
+        try (Fixture f = new Fixture()) {
+            when(f.connections.metricsEnabled(any())).thenReturn(true);
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, nativeOrdinary(10, 100, 2)));
+            f.collect(0);
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(403, SECRET));
+            CollectionResult denied = f.collect(15_000);
+            assertThat(denied.status()).isEqualTo(CollectionStatus.PARTIAL);
+            assertThat(denied.reason()).isEqualTo(MissingReason.UNAUTHORIZED);
+            assertThat(metric(denied, "minio.bucket.accessible").value()).isEqualTo(true);
+            assertThat(denied.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
+            assertThat(denied.inventoryComplete()).isFalse();
+            assertThat(f.snapshots.snapshot("minio-target").orElseThrow().metrics()).filteredOn(stored -> stored.latestAttempt().definition().key().equals("minio.native.process.resident.bytes"))
+                    .allSatisfy(stored -> { assertThat(stored.lastSuccess().sampledAt()).isEqualTo(START); assertThat(stored.lastSuccess().validUntil()).isEqualTo(START.plusSeconds(45)); });
+            assertSafe(denied);
+        }
+    }
+
+    @Test
+    void nativeCapacityNeverCallsHealthOrBucketAndCannotRefreshOrdinaryClocks() throws Exception {
+        try (Fixture f = new Fixture()) {
+            when(f.connections.metricsEnabled(any())).thenReturn(true);
+            when(f.session.metrics(MinioMonitoringConnections.MetricsEndpoint.NODE)).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, nativeOrdinary(10, 100, 2)));
+            f.collect(0);
+            clearInvocations(f.session);
+            when(f.session.metrics(MinioMonitoringConnections.MetricsEndpoint.CLUSTER)).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, "minio_cluster_capacity_raw_total_bytes 0\nminio_cluster_usage_object_total 8\nminio_cluster_drive_offline_total 1\n"));
+            CollectionRequest request = f.request(60_000, CollectionKind.CAPACITY);
+            CollectionResult result = f.adapter.collect(request);
+            assertThat(request.control().complete(request, result, f.snapshots)).isEqualTo(MonitoringSnapshotStore.Acceptance.ACCEPTED);
+            assertThat(result.serviceProbe()).isNull();
+            assertThat(number(result, "minio.native.cluster.raw.total.bytes")).isEqualByComparingTo("0");
+            assertThat(metric(result, "minio.native.cluster.raw.total.bytes").definition().scope().kind()).isEqualTo(ScopeKind.CLUSTER);
+            assertThat(metric(result, "minio.native.cluster.raw.total.bytes").validUntil()).isEqualTo(START.plusSeconds(240));
+            verify(f.session).metrics(MinioMonitoringConnections.MetricsEndpoint.CLUSTER); verify(f.session).close(); verifyNoMoreInteractions(f.session);
+            assertThat(f.snapshots.snapshot("minio-target").orElseThrow().metrics()).filteredOn(stored -> stored.kind() == CollectionKind.ORDINARY)
+                    .allSatisfy(stored -> assertThat(stored.lastSuccess() == null || START.equals(stored.lastSuccess().sampledAt())).isTrue());
+        }
+    }
+
+    @Test
+    void absentNativeFieldsNonFiniteValuesAndMalformedLabelsNeverBecomeZeroResources() throws Exception {
+        try (Fixture f = new Fixture()) {
+            when(f.connections.metricsEnabled(any())).thenReturn(true);
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, "minio_node_process_resident_memory_bytes NaN\nminio_node_process_virtual_memory_bytes 17\n"));
+            CollectionResult result = f.collect(0);
+            assertThat(metric(result, "minio.native.process.resident.bytes").missingReason()).isEqualTo(MissingReason.INVALID_VALUE);
+            assertThat(metric(result, "minio.native.requests.total").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(number(result, "minio.native.process.virtual.bytes")).isEqualByComparingTo("17");
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, "minio_s3_requests_total{api=\"private\\nlabel\"} 1\n"));
+            assertThat(metric(f.collect(15_000), "minio.native.metrics.available").missingReason()).isEqualTo(MissingReason.INVALID_VALUE);
+        }
+    }
+
+    @Test
+    void nativeNodeProcessCollectorNamesUseItsUnlabelledStartupOnlyForOneReportedServer() throws Exception {
+        try (Fixture f = new Fixture()) {
+            when(f.connections.metricsEnabled(any())).thenReturn(true);
+            String first = "minio_process_start_time_seconds 100\nminio_process_cpu_seconds_total 2\nminio_process_resident_memory_bytes 1234\nminio_process_virtual_memory_bytes 2000\nminio_s3_requests_total{server=\"private-node:9000\",api=\"GetObject\"} 10\n";
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, first));
+            CollectionResult baseline = f.collect(0);
+            assertThat(number(baseline, "minio.native.process.resident.bytes")).isEqualByComparingTo("1234");
+            assertThat(metric(baseline, "minio.native.process.resident.bytes").definition().source()).contains("minio_process_resident_memory_bytes");
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, first.replace("} 10", "} 40").replace("total 2", "total 32")));
+            CollectionResult rate = f.collect(15_000);
+            assertThat(number(rate, "minio.native.requests.total.rate")).isEqualByComparingTo("2");
+            assertThat(number(rate, "minio.native.process.cpu.seconds.rate")).isEqualByComparingTo("2");
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, first + "minio_s3_requests_total{server=\"second-node:9000\",api=\"GetObject\"} 5\n"));
+            assertThat(f.collect(30_000).metrics()).filteredOn(sample -> sample.definition().key().equals("minio.native.requests.total.rate"))
+                    .allSatisfy(sample -> assertThat(sample.missingReason()).isEqualTo(MissingReason.UNSUPPORTED));
+        }
+    }
+
+    @Test
+    void labelDelimitersCannotMergeDifferentNativeScopesOrCounterBaselines() throws Exception {
+        try (Fixture f = new Fixture()) {
+            when(f.connections.metricsEnabled(any())).thenReturn(true);
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200,
+                    "minio_s3_requests_total{api=\"b, c=d\"} 1\nminio_s3_requests_total{api=\"b\",c=\"d\"} 2\n"));
+            CollectionResult result = f.collect(0);
+            assertThat(result.metrics()).filteredOn(sample -> sample.definition().key().equals("minio.native.requests.total"))
+                    .hasSize(2).extracting(sample -> sample.definition().scope().id()).doesNotHaveDuplicates();
+        }
+    }
+
+    @Test
+    void boundedNativeLabelsAndSeriesFitSharedSnapshotBudget() throws Exception {
+        try (Fixture f = new Fixture()) {
+            when(f.connections.metricsEnabled(any())).thenReturn(true);
+            String body = IntStream.range(0, 3000).mapToObj(index -> "minio_s3_requests_total{api=\"operation" + index + "\"} 1\n").collect(java.util.stream.Collectors.joining());
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, body));
+            CollectionResult result = f.collect(0);
+            assertThat(result.metrics().size()).isLessThan(2100);
+            assertThat(metric(result, "minio.native.coverage.truncated").value()).isEqualTo(true);
+            assertThat(result.inventoryComplete()).isFalse();
+        }
+    }
+
+    private static String nativeOrdinary(long requests, long start, long cpu) {
+        return "minio_s3_requests_total{api=\"GetObject\",server=\"private-node:9000\"} " + requests + "\n"
+                + "minio_node_process_starttime_seconds{server=\"private-node:9000\"} " + start + "\n"
+                + "minio_node_process_cpu_total_seconds{server=\"private-node:9000\"} " + cpu + "\n"
+                + "minio_node_process_resident_memory_bytes{server=\"private-node:9000\"} 1234\n";
+    }
+
+    @Test
+    void s3OnlyCapacityReportsMissingMetricsAuthorizationWithoutOpeningAConnectionOrProbing() throws Exception {
         try (Fixture f = new Fixture()) {
             CollectionResult result = f.adapter.collect(f.request(0, CollectionKind.CAPACITY));
             assertThat(result.status()).isEqualTo(CollectionStatus.UNSUPPORTED);
-            assertThat(result.reason()).isEqualTo(MissingReason.NOT_APPLICABLE);
-            assertThat(result.metrics()).isEmpty();
+            assertThat(result.reason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(result.metrics()).hasSize(1);
+            assertThat(metric(result, "minio.native.metrics.available").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
             assertThat(result.serviceProbe()).isNull();
             assertThat(result.inventoryComplete()).isFalse();
-            verifyNoInteractions(f.connections, f.session);
+            verify(f.connections).metricsEnabled(any());
+            verifyNoMoreInteractions(f.connections);
+            verifyNoInteractions(f.session);
         }
     }
 
@@ -398,8 +528,8 @@ class MonitoringMinioAdapterTest {
         final MonitoringProperties properties = new MonitoringProperties();
         final MinioMonitoringConnections connections = mock(MinioMonitoringConnections.class);
         final MinioMonitoringConnections.Session session = mock(MinioMonitoringConnections.Session.class);
-        final MonitoringCounterStore counters = new MonitoringCounterStore(2, 10);
-        final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(2, 1000, 4);
+        final MonitoringCounterStore counters = new MonitoringCounterStore(2, 5000);
+        final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(2, 5000, 4);
         final ThreadPoolExecutor cleanup = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(2), new ThreadPoolExecutor.AbortPolicy());
         final List<CollectionControl> controls = new ArrayList<>();
         final MinioMonitoringAdapter adapter = new MinioMonitoringAdapter(properties, connections, clock);

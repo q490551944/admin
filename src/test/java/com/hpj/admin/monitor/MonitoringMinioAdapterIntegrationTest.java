@@ -12,6 +12,7 @@ import com.hpj.admin.monitor.metric.MonitoringCounterStore;
 import com.hpj.admin.monitor.metric.MonitoringSnapshotStore;
 import com.hpj.admin.monitor.minio.MinioMonitoringAdapter;
 import com.hpj.admin.monitor.minio.MinioMonitoringConnections;
+import com.hpj.admin.monitor.minio.MinioMetricsAuthorization;
 import com.hpj.admin.monitor.support.MonitoringTestEnvironment;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -61,6 +62,8 @@ import static com.hpj.admin.monitor.metric.MetricContract.*;
 import static com.hpj.admin.monitor.metric.MonitoringSnapshotStore.Acceptance.ACCEPTED;
 import static com.hpj.admin.monitor.minio.MinioMonitoringConnections.HealthEndpoint;
 import static com.hpj.admin.monitor.minio.MinioMonitoringConnections.Observation;
+import static com.hpj.admin.monitor.minio.MinioMonitoringConnections.MetricsEndpoint;
+import static com.hpj.admin.monitor.minio.MinioMonitoringConnections.MetricsObservation;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -228,6 +231,64 @@ class MonitoringMinioAdapterIntegrationTest {
         }
     }
 
+    @Test
+    @DisabledIfSystemProperty(named = "monitor.minio.test.binary", matches = ".+", disabledReason = "Independent native JWT setup/restart belongs to the owned Docker fixture")
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void existingJwtReadsNativeMetricsWhileS3OnlyAndRejectedJwtKeepBucketEvidenceAndRestartResetsRates() throws Exception {
+        try (OwnedMinio environment = OwnedMinio.start(); Collector collector = new Collector()) {
+            environment.prepare(environment.bucket);
+            BusinessState before = environment.state();
+            ChatProperties source = source(environment.endpoint, environment.bucket, environment.access, environment.secret);
+            ResolvedTarget target = resolve(source, List.of(environment.bucket));
+            CollectionResult s3Only = collector.collect(target);
+            assertThat(metric(s3Only, "native.metrics.available", null).missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(metric(s3Only, "bucket.accessible", environment.bucket).value()).isEqualTo(true);
+            try (var denied = environment.http.newCall(new Request.Builder().url(environment.endpoint + "/minio/v2/metrics/node").build()).execute()) {
+                assertThat(denied.code()).isIn(401, 403);
+            }
+            String bearer = environment.container.minioMetricsBearer();
+            var authorization = new MinioMetricsAuthorization(source, environment.endpoint, bearer, Set.of(MinioMonitoringConnections.MetricsEndpoint.NODE, MinioMonitoringConnections.MetricsEndpoint.CLUSTER));
+            collector.authorizations.add(authorization);
+            // Ensure a visible pre-restart counter baseline exceeds the readiness/collection HEADs after restart.
+            for (int index = 0; index < 8; index++) assertThat(environment.client.bucketExists(BucketExistsArgs.builder().bucket(environment.bucket).build())).isTrue();
+            CollectionResult ordinary = collector.collect(target);
+            assertThat(metric(ordinary, "native.metrics.available", null).value()).isEqualTo(true);
+            assertThat(number(metric(ordinary, "native.process.resident.bytes", null))).isPositive();
+            assertThat(metric(ordinary, "native.process.resident.bytes", null).definition().scope().kind()).isEqualTo(ScopeKind.PROCESS);
+            assertThat(collector.last().nativeMetrics.get(MinioMonitoringConnections.MetricsEndpoint.NODE).body()).contains("minio_process_resident_memory_bytes");
+            assertThat(metric(ordinary, "bucket.accessible", environment.bucket).value()).isEqualTo(true);
+            Instant memoryAt = metric(ordinary, "native.process.resident.bytes", null).sampledAt();
+            CollectionResult capacity = collector.collect(target, CollectionKind.CAPACITY);
+            assertThat(capacity.serviceProbe()).isNull();
+            assertThat(collector.last().health).isEmpty(); assertThat(collector.last().buckets).isEmpty();
+            assertThat(metric(capacity, "native.metrics.available", null).value()).isEqualTo(true);
+            assertThat(number(metric(capacity, "native.cluster.raw.total.bytes", null))).isPositive();
+            assertThat(Duration.between(metric(capacity, "native.cluster.raw.total.bytes", null).sampledAt(), metric(capacity, "native.cluster.raw.total.bytes", null).validUntil())).isEqualTo(Duration.ofSeconds(180));
+            assertThat(collector.snapshots.snapshot(target.display().id()).orElseThrow().metrics()).filteredOn(stored -> stored.kind() == CollectionKind.ORDINARY && stored.latestAttempt().definition().key().equals("minio.native.process.resident.bytes"))
+                    .allSatisfy(stored -> assertThat(stored.lastSuccess().sampledAt()).isEqualTo(memoryAt));
+            collector.authorizations.clear();
+            collector.authorizations.add(new MinioMetricsAuthorization(source, environment.endpoint, "invalid-jwt", Set.of(MinioMonitoringConnections.MetricsEndpoint.NODE)));
+            CollectionResult denied = collector.collect(target);
+            assertThat(metric(denied, "native.metrics.available", null).missingReason()).isEqualTo(MissingReason.UNAUTHORIZED);
+            assertThat(metric(denied, "bucket.accessible", environment.bucket).value()).isEqualTo(true);
+            assertThat(denied.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
+            collector.authorizations.clear(); collector.authorizations.add(authorization);
+            environment.container.restartMinio();
+            // The observer owns a separate pool; fixture readiness cannot replace its pre-restart sockets.
+            environment.http.connectionPool().evictAll();
+            CollectionResult restarted = collector.collect(target);
+            // Linux's native service restart uses execve: kernel PID/start time is unchanged but S3 counters reset.
+            assertThat(number(metric(restarted, "native.process.start.seconds", null))).isEqualByComparingTo(number(metric(ordinary, "native.process.start.seconds", null)));
+            assertThat(restarted.metrics()).filteredOn(sample -> sample.definition().key().equals("minio.native.requests.total.rate"))
+                    .isNotEmpty().anySatisfy(sample -> assertThat(sample.missingReason()).isEqualTo(MissingReason.WAITING_SAMPLE));
+            assertThat(environment.state()).isEqualTo(before);
+            for (CollectionResult result : List.of(s3Only, ordinary, capacity, denied, restarted)) {
+                assertSafe(result, environment);
+                assertThat(JSON.writeValueAsString(result)).doesNotContain(bearer, "invalid-jwt");
+            }
+        }
+    }
+
     private static ChatProperties source(String endpoint, String bucket, String access, String secret) {
         ChatProperties source = new ChatProperties();
         source.setEnabled(true);
@@ -304,7 +365,7 @@ class MonitoringMinioAdapterIntegrationTest {
         assertThat(metric(result, "coverage.complete", null).value()).isEqualTo(complete);
         assertThat(metric(result, "coverage.truncated", null).value()).isEqualTo(false);
         // Every metric is checked: three health triplets, one triplet per configured bucket, five bounds.
-        assertThat(result.metrics()).hasSize(14 + 3 * count);
+        assertThat(result.metrics()).hasSize(15 + 3 * count);
     }
 
     private static MetricSample metric(CollectionResult result, String key, String bucket) {
@@ -329,10 +390,12 @@ class MonitoringMinioAdapterIntegrationTest {
     private static final class ReadObservation {
         final Map<HealthEndpoint, Observation> health = new EnumMap<>(HealthEndpoint.class);
         final Map<String, Observation> buckets = new LinkedHashMap<>();
+        final Map<MetricsEndpoint, MetricsObservation> nativeMetrics = new EnumMap<>(MetricsEndpoint.class);
     }
 
     private static final class RecordingConnections extends MinioMonitoringConnections {
         final List<ReadObservation> reads = new ArrayList<>();
+        RecordingConnections(List<MinioMetricsAuthorization> authorizations) { super(() -> authorizations); }
         @Override public Session open(CollectionRequest request) {
             Session delegate = super.open(request);
             ReadObservation read = new ReadObservation();
@@ -349,6 +412,9 @@ class MonitoringMinioAdapterIntegrationTest {
                     return value;
                 }
                 @Override public void close() { delegate.close(); }
+                @Override public MetricsObservation metrics(MetricsEndpoint endpoint) {
+                    MetricsObservation result = delegate.metrics(endpoint); read.nativeMetrics.put(endpoint, result); return result;
+                }
             };
         }
     }
@@ -356,14 +422,18 @@ class MonitoringMinioAdapterIntegrationTest {
     private static final class Collector implements AutoCloseable {
         final Clock clock = Clock.systemUTC();
         final MonitoringProperties properties = new MonitoringProperties();
-        final MonitoringCounterStore counters = new MonitoringCounterStore(1, 64);
-        final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(1, 64, 1);
-        final RecordingConnections connections = new RecordingConnections();
+        final MonitoringCounterStore counters = new MonitoringCounterStore(1, 5000);
+        final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(1, 5000, 1);
+        final List<MinioMetricsAuthorization> authorizations = new ArrayList<>();
+        final RecordingConnections connections = new RecordingConnections(authorizations);
         final MinioMonitoringAdapter adapter = new MinioMonitoringAdapter(properties, connections, clock);
         final ThreadPoolExecutor cleanup = executor();
         long sequence;
         ReadObservation last() { return connections.reads.get(connections.reads.size() - 1); }
         CollectionResult collect(ResolvedTarget target) {
+            return collect(target, CollectionKind.ORDINARY);
+        }
+        CollectionResult collect(ResolvedTarget target, CollectionKind kind) {
             var binding = target.bindings().get(0);
             var source = binding.connection();
             String id = target.display().id();
@@ -372,8 +442,8 @@ class MonitoringMinioAdapterIntegrationTest {
             Duration timeout = properties.getCollectionTimeout();
             var control = new CollectionControl(new Object(), () -> true, clock, System::nanoTime,
                     System.nanoTime() + timeout.toNanos(), cleanup, counters, id, source.source(),
-                    CollectionKind.ORDINARY, properties.getOrdinaryInterval(), source.client());
-            var request = new CollectionRequest(id, source.source(), source.source(), CollectionKind.ORDINARY,
+                    kind, kind == CollectionKind.CAPACITY ? properties.getCapacityInterval() : properties.getOrdinaryInterval(), source.client());
+            var request = new CollectionRequest(id, source.source(), source.source(), kind,
                     1, ++sequence, scheduled, scheduled.plus(timeout), binding.scope(), source.client(), source.settings(), control);
             try {
                 CollectionResult result = adapter.collect(request);
@@ -554,9 +624,11 @@ class MonitoringMinioAdapterIntegrationTest {
             try {
                 await().atMost(Duration.ofSeconds(45)).pollInterval(Duration.ofMillis(250)).until(() -> {
                     if (!process.isAlive()) throw new IllegalStateException("Owned MinIO exited before readiness; see sanitized fixture logs");
-                    try (var response = http.newCall(new Request.Builder().url(endpoint + LIVE).head().build()).execute()) {
-                        return response.code() == 200;
-                    } catch (IOException unavailable) { return false; }
+                    // Liveness can succeed before S3 initialization; require the protocol used by fixture setup.
+                    try {
+                        client.listBuckets();
+                        return true;
+                    } catch (Exception unavailable) { return false; }
                 });
                 JSON.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("environment.json").toFile(),
                         Map.of("type", "minio", "mode", "owned-native-process", "port", port,

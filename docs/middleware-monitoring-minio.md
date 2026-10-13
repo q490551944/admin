@@ -41,10 +41,26 @@ monitor:
 
 采集使用现有静态 S3 凭据签名，保留受支持客户端的 TLS 和连接策略。动态凭据、无法证明等价的路由或自定义行为明确不支持。请求不跟随重定向，不修改服务权限或业务客户端设置；超时和取消仅终止本次监控请求，资源释放后才完成清理。
 
-采集不创建桶、写对象、遍历对象，也不从 S3 响应猜测 CPU、内存、卷容量或桶总量。容量任务当前返回不适用；已开放原生 metrics 的条件采集归 #39。
+采集不创建桶、写对象、遍历对象，也不从 S3 响应猜测 CPU、内存、卷容量或桶总量。
+
+## 可选原生统计
+
+S3 密钥不证明 metrics 授权。没有应用已有的独立 Bearer 授权时，不尝试 metrics 请求；`minio.native.metrics.available` 给出 `UNSUPPORTED`，原有服务与桶探测继续按各自证据返回。容量任务返回不支持及能力说明，不探测桶或 health。授权存在但统计请求被拒绝时，只降级原生统计，不覆盖已成功的服务/桶结论。
+
+应用可以把已准备好的授权注册为 `MinioMetricsAuthorization` 单例，绑定同一个 `MinioClient` / `ChatProperties` 对象、其当前已配置 origin、已有 Bearer 及明确授权的 NODE / CLUSTER 端点集合。监控只读取已经创建的单例，不初始化懒加载 Bean，也不提供新的凭据配置。origin 漂移、不同 owner、重复授权或不匹配的端点均不使用。监控不生成 token、不自动刷新 token、不改认证模式；授权轮换由应用现有机制负责。
+
+普通周期固定读取 `GET /minio/v2/metrics/node`，映射原生请求总数、4xx/5xx/全部错误累计、S3 收发字节、进程 CPU 累计秒、驻留与虚拟内存以及进程启动时间。此版本 node 端点使用标准 ProcessCollector 的 `minio_process_cpu_seconds_total`、`minio_process_resident_memory_bytes`、`minio_process_virtual_memory_bytes` 与 `minio_process_start_time_seconds`；字段表中的 `minio_node_process_*` 也被识别，但不把两个来源重复合并。每条成功指标保留实际原生字段名。CPU 秒的增量 / 实际秒数以 `CORES` 表达，不猜测宿主机核数或百分比。请求与流量速率使用通用计数器和同节点原生启动时间；无 label 的 node 进程启动值只在同响应至多一个 server 时关联，缺少启动证据时累计值仍可显示，速率不支持。首次、重启与计数回退等待新基线，失败不推进基线。
+
+容量周期固定读取 `GET /minio/v2/metrics/cluster`，仅映射集群 raw / usable total、free 字节、后台扫描器对象数量和逻辑字节，以及在线/离线磁盘数、原生磁盘 free。逻辑对象量可能滞后于写入，与原始卷容量分开；不遍历对象、不跨 label 或磁盘求和。原始节点及路径 label 只参与稳定摘要，不能泄露地址和私有目录。普通 / 容量 TTL 为 45 / 180 秒；容量不会刷新普通样本或服务探测。
+
+版本验收为 MinIO `RELEASE.2025-09-07T16-13-09Z` 的 v2 字段白名单，客户端仍为 8.5.17。字段口径依据[该版本官方字段表](https://github.com/minio/minio/blob/RELEASE.2025-09-07T16-13-09Z/docs/metrics/prometheus/list.md)；独立 Bearer 模式依据[该版本认证说明](https://github.com/minio/minio/blob/RELEASE.2025-09-07T16-13-09Z/docs/metrics/prometheus/README.md)。仅提供 v3 或缺少某个 v2 字段时明确降级，不尝试其他端点或新端口。
+
+统计正文最多 2 MiB，不接收压缩正文；UTF-8、行数、行长、数字和 label 均有上限，拒绝重复同名 label 集。已识别字段最多保留 2000 行；普通统计最多 2001 条、容量最多 491 条，另受节点上限约束。截断有独立标记，不冒充完整 inventory。读取沿用同一个 5 秒共享预算、原有更短超时、TLS 和取消清理边界，只关闭本次自有 HTTP 资源。
+
+Linux 原生 service restart 通过 execve 保留 PID，标准进程启动时间可能不变；已观察到的 S3 计数回退仍会重建速率基线。两次样本间完成同 PID 重启且新计数已超过旧值时，仅这些字段不能保证识别重置。
 
 ## 验证
 
 契约测试核对成功、拒绝、缺失、部分可采、范围上限、超时和服务/桶状态隔离。真实回环 HTTP/TLS 黑洞测试验证超时或取消后实际套接字关闭、清理注册释放。目录测试确认注册适配器不会初始化任何懒加载业务客户端。
 
-`MonitoringMinioAdapterIntegrationTest` 默认使用固定 `RELEASE.2025-09-07T16-13-09Z` 容器，接入 MinIO CI。显式设置 `monitor.minio.test.binary` 可启动本地独立 MinIO 程序，使用随机端口、临时凭据及自有数据目录；测试结束清理自有实例。测试准备阶段创建数据，采集期间通过原生响应与请求白名单验证只读行为。CI 补充真实受限账号的桶权限验收；本地版本和实际覆盖范围以测试报告为准。
+`MonitoringMinioAdapterIntegrationTest` 默认使用固定 `RELEASE.2025-09-07T16-13-09Z` 容器，接入 MinIO CI。显式设置 `monitor.minio.test.binary` 可启动本地独立 MinIO 程序，使用随机端口、临时凭据及自有数据目录；测试结束清理自有实例。测试准备阶段创建数据，采集期间通过原生响应与请求白名单验证只读行为。CI 补充真实受限账号的桶权限，以及保持 JWT 默认认证的统计可读/拒绝、独立容量 TTL、自有实例重启后的速率基线验收；字段缺失、非法值和高基数边界由契约测试覆盖。本地版本和实际覆盖范围以测试报告为准。

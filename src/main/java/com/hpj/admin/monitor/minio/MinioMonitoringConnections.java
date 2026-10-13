@@ -34,6 +34,10 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
+import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.charset.CodingErrorAction;
 
 /**
  * Fixed, read-only health/HeadBucket requests and bounded GetBucketLocation on monitoring-owned connections. Business clients are never changed or
@@ -45,12 +49,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class MinioMonitoringConnections {
     public static final int MAX_BUCKETS = 100;
     static final int MAX_LOCATION_BYTES = 16 * 1024;
+    static final int MAX_METRICS_BYTES = 2 * 1024 * 1024;
     private static final String EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     private static final DateTimeFormatter AMZ_DATE = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'", Locale.ROOT).withZone(ZoneOffset.UTC);
     private final Factory factory;
+    private final Supplier<List<MinioMetricsAuthorization>> authorizations;
 
-    public MinioMonitoringConnections() { this(client -> client); }
-    MinioMonitoringConnections(Factory factory) { this.factory = Objects.requireNonNull(factory); }
+    public MinioMonitoringConnections() { this((Supplier<List<MinioMetricsAuthorization>>) List::of); }
+    public MinioMonitoringConnections(Supplier<List<MinioMetricsAuthorization>> authorizations) { this(client -> client, authorizations); }
+    MinioMonitoringConnections(Factory factory) { this(factory, List::of); }
+    MinioMonitoringConnections(Factory factory, Supplier<List<MinioMetricsAuthorization>> authorizations) {
+        this.factory = Objects.requireNonNull(factory); this.authorizations = Objects.requireNonNull(authorizations);
+    }
     @FunctionalInterface interface Factory { Call.Factory create(OkHttpClient client); }
 
     public enum HealthEndpoint {
@@ -65,10 +75,20 @@ public class MinioMonitoringConnections {
             }
         }
     }
+    public enum MetricsEndpoint {
+        NODE("/minio/v2/metrics/node"), CLUSTER("/minio/v2/metrics/cluster");
+        final String path;
+        MetricsEndpoint(String path) { this.path = path; }
+    }
+    @JsonIgnoreType
+    public record MetricsObservation(int status, String body) {
+        @Override public String toString() { return "MinioMetricsObservation[server-only]"; }
+    }
     @JsonIgnoreType
     public interface Session extends AutoCloseable {
         Observation health(HealthEndpoint endpoint);
         Observation bucket(String bucket);
+        MetricsObservation metrics(MetricsEndpoint endpoint);
         @Override void close();
     }
     @JsonIgnoreType
@@ -95,8 +115,27 @@ public class MinioMonitoringConnections {
 
     public Session open(CollectionRequest request) {
         checkActive(request.control());
-        try { return new NativeSession(request, configuration(request), factory); }
+        try { Configuration configuration = configuration(request); return new NativeSession(request, configuration, factory, authorization(configuration)); }
         catch (RuntimeException failure) { throw sanitized(failure, request.control()); }
+    }
+
+    /** No credential inference or network discovery. Only an already-created explicit authorization may opt in. */
+    public boolean metricsEnabled(CollectionRequest request) {
+        try {
+            MinioMetricsAuthorization authorization = authorization(configuration(request));
+            return authorization != null && authorization.permits(request.kind() == com.hpj.admin.monitor.metric.MetricContract.CollectionKind.CAPACITY
+                    ? MetricsEndpoint.CLUSTER : MetricsEndpoint.NODE);
+        } catch (RuntimeException unavailable) { return false; }
+    }
+    private MinioMetricsAuthorization authorization(Configuration configuration) {
+        MinioMetricsAuthorization selected = null;
+        List<MinioMetricsAuthorization> values = authorizations.get();
+        if (values == null || values.size() > 20) return null;
+        for (MinioMetricsAuthorization value : values) if (value != null && value.matches(configuration.owner(), configuration.endpoint())) {
+            if (selected != null) return null;
+            selected = value;
+        }
+        return selected;
     }
 
     @JsonIgnoreType
@@ -190,14 +229,16 @@ public class MinioMonitoringConnections {
         private final Configuration configuration;
         private final OkHttpClient client;
         private final Factory factory;
+        private final MinioMetricsAuthorization authorization;
         private final Set<Call> active = ConcurrentHashMap.newKeySet();
         private final Map<String, String> regions = new ConcurrentHashMap<>();
         private final AtomicBoolean closed = new AtomicBoolean();
 
-        private NativeSession(CollectionRequest request, Configuration configuration, Factory factory) {
+        private NativeSession(CollectionRequest request, Configuration configuration, Factory factory, MinioMetricsAuthorization authorization) {
             this.request = request;
             this.configuration = configuration;
             this.factory = factory;
+            this.authorization = authorization;
             regions.putAll(configuration.bucketRegions());
             // Separate dispatcher and pool prevent monitoring from competing for or closing business connections.
             client = configuration.original().newBuilder().dispatcher(new Dispatcher())
@@ -239,8 +280,21 @@ public class MinioMonitoringConnections {
             return new Observation(head.observation().status(), Duration.ofNanos(Math.max(0, System.nanoTime() - started)));
         }
 
+        @Override public MetricsObservation metrics(MetricsEndpoint endpoint) {
+            if (endpoint == null || authorization == null || !authorization.permits(endpoint)
+                    || endpoint != (request.kind() == com.hpj.admin.monitor.metric.MetricContract.CollectionKind.CAPACITY ? MetricsEndpoint.CLUSTER : MetricsEndpoint.NODE)) throw unsupported();
+            Reply reply = perform(configuration.endpoint().newBuilder().encodedPath(endpoint.path).build(), false, null, false, endpoint);
+            try {
+                return new MetricsObservation(reply.observation().status(), StandardCharsets.UTF_8.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(reply.body())).toString());
+            } catch (java.nio.charset.CharacterCodingException invalid) { throw new Failure(MissingReason.INVALID_VALUE, false); }
+        }
+
         private record Reply(Observation observation, byte[] body) { }
         private Reply perform(HttpUrl url, boolean signed, String region, boolean location) {
+            return perform(url, signed, region, location, null);
+        }
+        private Reply perform(HttpUrl url, boolean signed, String region, boolean location, MetricsEndpoint metrics) {
             if (closed.get()) throw new Failure(MissingReason.FAILED, false);
             checkActive(request.control());
             var worker = request.control().reserveOwnedCancellation();
@@ -250,8 +304,9 @@ public class MinioMonitoringConnections {
             long started = System.nanoTime();
             try {
                 cancellation = request.control().reserveOwnedCancellation();
-                Request.Builder builder = new Request.Builder().url(url).method(location ? "GET" : "HEAD", null)
+                Request.Builder builder = new Request.Builder().url(url).method(location || metrics != null ? "GET" : "HEAD", null)
                         .header("Accept-Encoding", "identity");
+                if (metrics != null) builder.header("Authorization", "Bearer " + authorization.bearer()).header("Accept", "text/plain; version=0.0.4");
                 if (signed) {
                     String host = url.host().contains(":") ? "[" + url.host() + "]" : url.host();
                     if (url.port() != (url.isHttps() ? 443 : 80)) host += ":" + url.port();
@@ -281,13 +336,14 @@ public class MinioMonitoringConnections {
                     checkActive(request.control());
                     if (response == null || response.code() < 100 || response.code() > 599) throw new Failure(MissingReason.INVALID_VALUE, false);
                     byte[] body = new byte[0];
-                    if (location && response.code() == 200) {
-                        if (response.body() == null || response.body().contentLength() > MAX_LOCATION_BYTES
+                    if ((location || metrics != null) && response.code() == 200) {
+                        int bodyLimit = metrics == null ? MAX_LOCATION_BYTES : MAX_METRICS_BYTES;
+                        if (response.body() == null || response.body().contentLength() > bodyLimit
                                 || response.header("Content-Encoding") != null && !"identity".equalsIgnoreCase(response.header("Content-Encoding"))) {
                             throw new Failure(MissingReason.INVALID_VALUE, false);
                         }
-                        body = response.body().byteStream().readNBytes(MAX_LOCATION_BYTES + 1);
-                        if (body.length > MAX_LOCATION_BYTES) throw new Failure(MissingReason.INVALID_VALUE, false);
+                        body = response.body().byteStream().readNBytes(bodyLimit + 1);
+                        if (body.length > bodyLimit) throw new Failure(MissingReason.INVALID_VALUE, false);
                     }
                     checkActive(request.control());
                     return new Reply(new Observation(response.code(), Duration.ofNanos(Math.max(0, System.nanoTime() - started))), body);
