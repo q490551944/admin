@@ -343,11 +343,11 @@ public final class MonitoringTestEnvironment implements AutoCloseable {
         });
     }
 
-    /** Fault injection only on this owned fixture; Docker restart keeps its data and published port. */
+    /** Fault injection only on this owned fixture; native restart re-execs in place and preserves its port. */
     public void restartMinio() {
         requireType("minio");
         operation("restart owned MinIO fixture", () -> {
-            org.testcontainers.DockerClientFactory.instance().client().restartContainerCmd(container.getContainerId()).exec();
+            minioSetupCommand("--json", "admin", "service", "restart", "--wait", "owned");
             org.awaitility.Awaitility.await().atMost(READY_TIMEOUT).until(() -> {
                 try { return minioClient().bucketExists(BucketExistsArgs.builder().bucket(resourceName()).build()); }
                 catch (Exception unavailable) { return false; }
