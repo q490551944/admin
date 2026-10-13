@@ -59,6 +59,7 @@ public class ElasticsearchMonitoringConnections {
         JsonNode health();
         JsonNode indexStats(List<String> names, CollectionKind kind);
         JsonNode threadPools();
+        JsonNode nodeFilesystems();
         JsonNode nodeStarts(List<String> ids);
         @Override void close();
     }
@@ -143,9 +144,17 @@ public class ElasticsearchMonitoringConnections {
             return get("/_cluster/health", Map.of("level", "cluster"));
         }
         @Override public JsonNode threadPools() {
-            JsonNode result = get("/_nodes/stats/thread_pool", Map.of("filter_path", "_nodes,nodes.*.thread_pool"));
+            JsonNode result = get("/_nodes/stats/thread_pool,process,os,jvm", Map.of("filter_path",
+                    "_nodes,nodes.*.thread_pool,nodes.*.process.cpu.percent,nodes.*.os.cpu.percent,nodes.*.os.mem,nodes.*.jvm.mem", "timeout", nodeTimeout()));
             rememberNodes(result.path("nodes"));
             return result;
+        }
+        @Override public JsonNode nodeFilesystems() {
+            if (request.kind() != CollectionKind.CAPACITY) throw unsupported();
+            return get("/_nodes/stats/fs", Map.of("filter_path", "_nodes,nodes.*.fs.total,nodes.*.fs.data", "timeout", nodeTimeout()));
+        }
+        private String nodeTimeout() {
+            return Math.max(1, Math.min(1000, Math.min(remainingMillis(request.control()), configuration.config().getSocketTimeout()) / 2)) + "ms";
         }
         @Override public JsonNode indexStats(List<String> names, CollectionKind kind) {
             if (kind == null || kind != request.kind() || names == null || names.isEmpty() || names.size() > MAX_NAMES

@@ -13,6 +13,7 @@ import com.hpj.admin.monitor.metric.CollectionRequest;
 import com.hpj.admin.monitor.metric.MonitoringCounterStore;
 import com.hpj.admin.monitor.metric.MonitoringSnapshotStore;
 import com.hpj.admin.monitor.support.MonitoringTestEnvironment;
+import com.hpj.admin.monitor.support.MonitoringElasticsearchCluster;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
@@ -212,6 +213,85 @@ class MonitoringElasticsearchAdapterIntegrationTest {
         }
     }
 
+    @Test
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void nativeTwoNodeResourcesSharedDataPathsAndPausedNodeKeepReadOnlyDataAndIndependentTtls() throws Exception {
+        try (MonitoringElasticsearchCluster environment = MonitoringElasticsearchCluster.start();
+             RestClient business = environment.client(); Collector collector = new Collector()) {
+            String index = "monitor_resources_" + UUID.randomUUID().toString().replace("-", "");
+            createIndex(business, index, 0, null);
+            request(business, "PUT", "/" + index + "/_doc/fixture?refresh=true", Map.of("sentinel", "unchanged"));
+            BusinessState before = state(business, index);
+            var clientNodes = List.copyOf(business.getNodes());
+            ResolvedTarget target = resolve(business, List.of());
+            CollectionResult ordinary = collector.collect(target, CollectionKind.ORDINARY);
+            JsonNode nativeNodes = collector.last().threadPools.path("nodes");
+            assertThat(nativeNodes.size()).isEqualTo(2);
+            List<String> ids = new ArrayList<>(); nativeNodes.fieldNames().forEachRemaining(ids::add);
+            for (String node : ids) {
+                JsonNode value = nativeNodes.path(node);
+                assertNodeNative(ordinary, "process.cpu.percent", node, value.path("process").path("cpu").path("percent"));
+                assertNodeNative(ordinary, "os.cpu.percent", node, value.path("os").path("cpu").path("percent"));
+                assertNodeNative(ordinary, "jvm.heap.used.bytes", node, value.path("jvm").path("mem").path("heap_used_in_bytes"));
+                assertNodeNative(ordinary, "jvm.heap.maximum.bytes", node, value.path("jvm").path("mem").path("heap_max_in_bytes"));
+                assertNodeNative(ordinary, "os.memory.total.bytes", node, value.path("os").path("mem").path("total_in_bytes"));
+                assertThat(nodeMetric(ordinary, "os.memory.total.bytes", node).definition().scope().kind()).isEqualTo(ScopeKind.NODE_REPORTED_OS);
+                assertThat(Duration.between(nodeMetric(ordinary, "jvm.heap.used.bytes", node).sampledAt(), nodeMetric(ordinary, "jvm.heap.used.bytes", node).validUntil())).isEqualTo(Duration.ofSeconds(45));
+            }
+            CollectionResult capacity = collector.collect(target, CollectionKind.CAPACITY);
+            JsonNode nativeFs = collector.last().filesystems;
+            assertThat(capacity.status()).isEqualTo(CollectionStatus.SUCCESS);
+            assertThat(capacity.serviceProbe()).isNull();
+            assertThat(collector.last().health).isNull(); assertThat(collector.last().threadPools).isNull();
+            assertThat(collector.last().indexStats).isEmpty();
+            for (String node : ids) {
+                JsonNode fs = nativeFs.path("nodes").path(node).path("fs");
+                assertThat(fs.path("data").size()).isEqualTo(2);
+                assertThat(fs.path("data").get(0).path("mount")).isEqualTo(fs.path("data").get(1).path("mount"));
+                assertThat(fs.path("total").path("total_in_bytes").decimalValue()).isEqualByComparingTo(fs.path("data").get(0).path("total_in_bytes").decimalValue());
+                assertNodeNative(capacity, "filesystem.total.bytes", node, fs.path("total").path("total_in_bytes"));
+                assertNodeNative(capacity, "filesystem.free.bytes", node, fs.path("total").path("free_in_bytes"));
+                assertNodeNative(capacity, "filesystem.available.bytes", node, fs.path("total").path("available_in_bytes"));
+                assertThat(Duration.between(nodeMetric(capacity, "filesystem.total.bytes", node).sampledAt(), nodeMetric(capacity, "filesystem.total.bytes", node).validUntil())).isEqualTo(Duration.ofSeconds(180));
+                assertThat(capacity.metrics()).filteredOn(sample -> sample.definition().key().equals(PREFIX + "data_path.total.bytes") && node.equals(sample.definition().scope().nodeId())).hasSize(2);
+            }
+            assertThat(JSON.writeValueAsString(capacity)).doesNotContain("/usr/share/elasticsearch", "overlay");
+            environment.pauseSecond();
+            try {
+                CollectionResult partial = collector.collect(target, CollectionKind.CAPACITY);
+                JsonNode failure = collector.last().filesystems;
+                assertThat(failure.path("_nodes").path("total").asInt()).isEqualTo(2);
+                assertThat(failure.path("_nodes").path("failed").asInt()).isEqualTo(1);
+                assertThat(partial.status()).isEqualTo(CollectionStatus.PARTIAL);
+                assertThat(partial.inventoryComplete()).isFalse();
+                assertThat(metric(partial, "coverage.complete").value()).isEqualTo(false);
+                String missing = ids.stream().filter(id -> !failure.path("nodes").has(id)).findFirst().orElseThrow();
+                assertThat(collector.snapshots.snapshot(target.display().id()).orElseThrow().metrics())
+                        .filteredOn(stored -> stored.kind() == CollectionKind.CAPACITY && missing.equals(stored.latestAttempt().definition().scope().nodeId()))
+                        .isNotEmpty().allSatisfy(stored -> assertThat(stored.lastSuccess().sampledAt()).isEqualTo(nodeMetric(capacity, "filesystem.total.bytes", missing).sampledAt()));
+            } finally { environment.resumeSecond(); }
+            await().atMost(Duration.ofSeconds(15)).until(() -> request(business, "GET", "/_nodes/stats/fs?timeout=1s", null).path("_nodes").path("successful").asInt() == 2);
+            CollectionResult recovered = collector.collect(target, CollectionKind.CAPACITY);
+            assertThat(recovered.status()).isEqualTo(CollectionStatus.SUCCESS);
+            assertThat(recovered.inventoryComplete()).isTrue();
+            assertThat(state(business, index)).isEqualTo(before);
+            assertThat(business.getNodes()).containsExactlyElementsOf(clientNodes);
+            assertThat(collector.connections.closed).isEqualTo(4);
+            assertThat(collector.snapshots.snapshot(target.display().id()).orElseThrow().metrics())
+                    .filteredOn(stored -> stored.kind() == CollectionKind.ORDINARY && stored.latestAttempt().definition().key().equals(PREFIX + "jvm.heap.used.bytes"))
+                    .hasSize(2).allSatisfy(stored -> assertThat(stored.lastSuccess().sampledAt()).isEqualTo(nodeMetric(ordinary, "jvm.heap.used.bytes", stored.lastSuccess().definition().scope().nodeId()).sampledAt()));
+        }
+    }
+
+    private static MetricSample nodeMetric(CollectionResult result, String key, String node) {
+        return result.metrics().stream().filter(sample -> sample.definition().key().equals(PREFIX + key) && node.equals(sample.definition().scope().nodeId())).findFirst().orElseThrow();
+    }
+    private static void assertNodeNative(CollectionResult result, String key, String node, JsonNode nativeValue) {
+        MetricSample sample = nodeMetric(result, key, node);
+        if (nativeValue.longValue() == -1) assertThat(sample.missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+        else assertThat((BigDecimal) sample.value()).isEqualByComparingTo(nativeValue.decimalValue());
+    }
+
     private static void createIndex(RestClient client, String index, int replicas, String allocation) throws Exception {
         Map<String, Object> settings = new LinkedHashMap<>();
         settings.put("number_of_shards", 1);
@@ -355,6 +435,7 @@ class MonitoringElasticsearchAdapterIntegrationTest {
         final List<List<String>> requestedIndices = new ArrayList<>();
         final List<CollectionKind> kinds = new ArrayList<>();
         final List<JsonNode> nodeStarts = new ArrayList<>();
+        JsonNode filesystems;
         JsonNode index(String name) { return indexStats.stream().map(stats -> stats.path("indices").path(name)).filter(JsonNode::isObject).findFirst().orElseThrow(); }
     }
 
@@ -368,6 +449,7 @@ class MonitoringElasticsearchAdapterIntegrationTest {
             return new Session() {
                 @Override public JsonNode health() { observation.health = delegate.health(); return observation.health; }
                 @Override public JsonNode threadPools() { observation.threadPools = delegate.threadPools(); return observation.threadPools; }
+                @Override public JsonNode nodeFilesystems() { observation.filesystems = delegate.nodeFilesystems(); return observation.filesystems; }
                 @Override public JsonNode indexStats(List<String> names, CollectionKind kind) {
                     observation.requestedIndices.add(List.copyOf(names));
                     observation.kinds.add(kind);
@@ -389,7 +471,7 @@ class MonitoringElasticsearchAdapterIntegrationTest {
         final Clock clock = Clock.systemUTC();
         final MonitoringProperties properties = new MonitoringProperties();
         final MonitoringCounterStore counters = new MonitoringCounterStore(1, 128);
-        final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(1, 128, 1);
+        final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(1, 5000, 1);
         final RecordingConnections connections = new RecordingConnections();
         final ElasticsearchMonitoringAdapter adapter = new ElasticsearchMonitoringAdapter(properties, connections, clock);
         final ThreadPoolExecutor cleanup = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
