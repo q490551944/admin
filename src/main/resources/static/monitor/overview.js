@@ -149,6 +149,7 @@
     const byId = id => document.getElementById(id);
     const root = byId("overview");
     let current;
+    let details;
     let cached;
     let receivedAt = 0;
     const filters = { type: "", service: "", collection: "", exceptional: false };
@@ -222,8 +223,9 @@
         }
         if (!previews.length) metrics.append(node("p", "muted", row.schedulingState === "ACTIVE" ? "暂无核心数值 · 等待首样本或采集结果" : "未安排采集"));
         article.append(metrics);
-        const detail = node("details", "instance-entry");
-        detail.append(node("summary", "", "查看实例"));
+        const detail = node("div", "instance-entry");
+        const button = node("button", "secondary-button detail-button", "查看实例"); button.type = "button"; button.dataset.openTarget = row.target.id;
+        detail.append(button);
         detail.append(node("p", "muted", "目标 " + row.target.id), node("p", "muted", "连接来源 " + (list(row.target.connectionSources).join("、") || "暂无连接")));
         for (const collection of list(row.collections)) {
           detail.append(node("p", "muted", `${collection.source} · ${collection.kind === "CAPACITY" ? "容量" : "普通"} · ${COLLECTION[collection.status]?.[1] || "等待采样"} · ${time(collection.lastAttempt?.completedAt)}`));
@@ -231,6 +233,7 @@
         article.append(detail);
         instances.append(article);
       }
+      details?.sync(data);
     }
     function recompute() {
       if (!cached) return;
@@ -251,6 +254,7 @@
         cached = data; receivedAt = global.performance.now();
         byId("overview-message").hidden = true;
         recompute();
+        details?.refresh();
       },
       onError(error) {
         if (["SESSION_EXPIRED", "ACCESS_DENIED", "IDENTITY_UNAVAILABLE", "MONITOR_DISABLED"].includes(error.code)) { onSessionError(error); return; }
@@ -265,6 +269,11 @@
         const status = byId("refresh-status"); status.dataset.paused = String(state.paused);
         status.textContent = state.paused ? "◷ 已暂停自动刷新 · 当前显示保留的快照，仍可手动刷新" : state.busy ? "正在读取共享快照…" : "页面可见时每 15 秒读取共享快照";
       }
+    });
+    details = global.MonitorDetails?.create({ client, onSessionError });
+    byId("instance-list").addEventListener("click", event => {
+      const button = event.target.closest(".detail-button"); if (!button) return;
+      const row = current?.rows.find(row => row.target.id === button.dataset.openTarget); if (row) details?.open(row);
     });
     for (const [id, labels] of [["filter-type", NAMES], ["filter-service", SERVICE], ["filter-collection", COLLECTION]]) {
       for (const [value, label] of Object.entries(labels)) {
@@ -288,9 +297,10 @@
     });
     byId("refresh-snapshot").addEventListener("click", () => poller.refresh());
     byId("pause-snapshot").addEventListener("click", () => poller.setPaused(!poller.state().paused));
-    function suspend() { poller.suspend(); root.hidden = true; }
+    function suspend() { poller.suspend(); details?.suspend(); root.hidden = true; }
     function stop() {
       poller.stop(); current = null; cached = null;
+      details?.close();
       root.hidden = true;
       for (const id of ["service-summary", "type-cards", "instance-list"]) byId(id).replaceChildren();
       byId("configuration-summary").textContent = "";
@@ -302,9 +312,10 @@
       else {
         const message = byId("overview-message"); message.hidden = false; message.textContent = "正在读取当前快照…";
       }
+      details?.resume();
       return poller.start(!cached);
     }
-    return Object.freeze({ start, stop, suspend, recompute, current: () => current });
+    return Object.freeze({ start, stop, suspend, recompute, current: () => current, details: () => details?.current() });
   }
   const api = Object.freeze({ TYPES, NAMES, SERVICE, COLLECTION, REASONS, SCOPES, model, serviceState, collectionState, metricView, time, scopeText,
     exceptional, matches, ageMetric, ageSnapshot, createPoller, create });

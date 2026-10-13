@@ -8,6 +8,7 @@
     CSRF_INVALID: "请求凭证已失效，请重试。",
     IDENTITY_UNAVAILABLE: "认证服务暂不可用，请稍后重试。",
     MONITOR_DISABLED: "监控功能未启用，请联系管理员。",
+    TARGET_NOT_FOUND: "此实例已不在当前监控目录。",
     NETWORK_ERROR: "无法连接服务，请检查网络后重试。",
     REQUEST_FAILED: "请求未完成，请稍后重试。"
   });

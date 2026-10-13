@@ -12,7 +12,7 @@
 .\mvnw.cmd -B -DskipTests test-compile dependency:build-classpath '-Dmdep.outputFile=target/monitor-e2e-classpath.txt' '-DincludeScope=test'
 npm ci
 npx playwright install chromium
-node --test src/test/js/monitor-session.test.cjs src/test/js/monitor-overview.test.cjs
+node --test src/test/js/monitor-session.test.cjs src/test/js/monitor-overview.test.cjs src/test/js/monitor-details.test.cjs
 npm run test:monitor:e2e
 ```
 
@@ -37,6 +37,10 @@ runner 为每次执行创建随机控制令牌，通过进程环境传给测试�
 测试不拦截或伪造监控认证 API。异常在测试应用的员工 Mapper 边界注入，CSRF 验证由真实过滤链完成。认证竞态由 `src/test/js/monitor-session.test.cjs` 补充。`monitor-overview.spec.cjs` 仅在浏览器测试中提供目录/快照夹具，覆盖六类卡片、同类型多目标、互斥服务汇总、等待首样本、部分采集、真实零值、旧值与 XSS 名称，以及 1280px/390px 无横向溢出；夹具不进入正式页面。
 
 总览 API 的 `coreMetrics` 最多返回三条原始普通指标，包含范围、单位、最近尝试和独立的上次成功样本；不会跨来源或对象相加。完整数据仍由受保护详情 API 提供。
+
+点击“查看实例”按需读取所选目标详情，保留目标 ID、类型及连接来源，分别展示 CPU、内存、存储与容量、专属指标。每项显示单位、原生对象范围、数值采样时间、最近尝试、来源及计算说明；容量明确显示服务器配置的独立周期。没有观测的类别显示“未报告”，原生不支持、未授权、不适用、等待及失败保留各自原因，不产生零值。详情切换或权限失效会中止旧请求并清除旧目标数值。
+
+详情最多接受服务器约定的 5000 项，首次渲染 200 项，使用“继续显示”增加 200 项；该操作复用当前详情，不新增请求。自动或手动更新总览时仅更新已打开的实例详情。浏览器覆盖六类、空项、长名称、390px、详情切换、5000 项边界、目标移除和授权失败。
 
 总览按类型、服务状态和采集状态组合筛选；“仅看异常”包含配置问题、未知服务和异常采集，排除未启用目标。点击服务汇总会清除其他条件，以便筛选结果与汇总数量一致。筛选只操作当前快照，不请求 API。
 

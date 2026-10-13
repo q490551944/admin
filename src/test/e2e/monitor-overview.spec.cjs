@@ -35,6 +35,12 @@ function fixture(empty = false) {
 async function routeData(page, data) {
   await page.route(`**${API}/catalog`, route => route.fulfill({ json: data.catalog }));
   await page.route(`**${API}/snapshots`, route => route.fulfill({ json: data.snapshot }));
+  await page.route(`**${API}/targets/*`, route => {
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").pop());
+    const row = data.snapshot.targets.find(row => row.target.id === id);
+    return route.fulfill({ json: data.details?.[id] || { generation: data.snapshot.generation, serverTime: data.snapshot.serverTime,
+      target: row, metrics: row?.coreMetrics || [], capabilityState: "UNKNOWN", capabilities: [], freshnessRules: data.snapshot.freshnessRules } });
+  });
 }
 async function login(page) {
   await page.goto("/monitor/login.html");
@@ -62,7 +68,8 @@ for (const width of [1280, 390]) {
     await expect(page.locator('[data-target-id="redis-b"]')).toContainText("上次成功值 · 超时");
     await expect(page.locator('[data-target-id="redis-b"] h3')).toHaveText(data.snapshot.targets[2].target.name);
     expect(await page.evaluate(() => window.pwned)).toBeUndefined(); await expect(page.locator("#instance-list img")).toHaveCount(0);
-    await mysql.locator("summary").click(); await expect(mysql).toContainText("目标 mysql-a"); await expect(mysql).toContainText("连接来源 existingClient");
+    await mysql.getByRole("button", { name: "查看实例", exact: true }).click();
+    await expect(page.locator("#detail-identity")).toContainText("目标 mysql-a"); await expect(page.locator("#detail-identity")).toContainText("连接来源 existingClient");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     const file = testInfo.outputPath(`overview-${width}.png`); await page.screenshot({ path: file, fullPage: true });
     await testInfo.attach(`overview-${width}`, { path: file, contentType: "image/png" });
@@ -72,6 +79,116 @@ test("overview empty directory keeps six disabled type cards and an explicit emp
   await routeData(page, fixture(true)); await login(page);
   await expect(page.locator("#type-cards .type-card")).toHaveCount(6); await expect(page.locator("#instance-list")).toContainText("尚未配置监控实例");
   await expect(page.locator("#instance-list .instance-card")).toHaveCount(0); await expect(page.locator("#service-summary strong")).toHaveText(["0", "0", "0", "0"]);
+});
+
+function detailFixture() {
+  const data = fixture(); const at = data.snapshot.serverTime, until = new Date(Date.parse(at) + 45000).toISOString(), capacityUntil = new Date(Date.parse(at) + 180000).toISOString();
+  const rows = types.map((type, index) => {
+    const base = structuredClone(data.snapshot.targets[0]), id = type.toLowerCase() + "-detail";
+    base.target = { ...base.target, id, type, name: index === 1 ? data.snapshot.targets[2].target.name : names[index] + " · 原生实例" };
+    function metric(key, label, unit, kind, scope, value, missingReason = null) {
+      const definition = { key, label, unit, scope: { kind: scope, id: "remote-" + scope.toLowerCase(), nodeId: "node-a" }, source: "已有授权的原生接口", calculation: "原生字段直接读取，不跨对象相加" };
+      const sample = { definition, value, missingReason, sampledAt: at, lastSuccessAt: missingReason ? null : at, validUntil: missingReason ? at : kind === "CAPACITY" ? capacityUntil : until };
+      return { source: "existingClient", bindingId: id, kind, latestAttempt: sample, lastSuccess: missingReason ? null : sample, valueState: missingReason ? "NO_DATA" : "CURRENT", validUntil: missingReason ? null : sample.validUntil };
+    }
+    const reasons = [null, "UNSUPPORTED", "UNAUTHORIZED", "NOT_APPLICABLE", "WAITING_SAMPLE", "FAILED"];
+    base.metrics = [metric(type.toLowerCase() + ".cpu.percent", "原生 CPU", "PERCENT", "ORDINARY", "PROCESS", reasons[index] ? null : 0, reasons[index]),
+      metric(type.toLowerCase() + ".memory.bytes", "原生内存", "BYTES", "ORDINARY", type === "ELASTICSEARCH" ? "JVM_HEAP" : "PROCESS", 0),
+      metric(type.toLowerCase() + ".data.bytes", "原生对象容量", "BYTES", "CAPACITY", type === "MINIO" ? "BUCKET" : "DATABASE", 1024),
+      metric(type.toLowerCase() + ".requests.count", "原生请求数", "COUNT", "ORDINARY", "ENDPOINT", 5)];
+    base.coreMetrics = base.metrics.slice(0, 2); base.metricCount = 4; base.missingMetricCount = reasons[index] ? 1 : 0;
+    return base;
+  });
+  data.snapshot.targets = rows.map(({ metrics, ...row }) => row);
+  data.catalog.types = types.map((type, i) => ({ type, name: names[i], targets: rows.filter(row => row.target.type === type).map(row => row.target) }));
+  data.details = Object.fromEntries(rows.map(({ metrics, ...row }) => [row.target.id, { generation: 1, serverTime: at, target: row, metrics, capabilityState: "OBSERVED", capabilities: [], freshnessRules: data.snapshot.freshnessRules }]));
+  return data;
+}
+
+test("generic details show all six native types, units, scopes, zero and distinct absence reasons", async ({ page }) => {
+  const data = detailFixture(); await routeData(page, data); await login(page);
+  const reasons = [null, "不支持", "未授权", "不适用", "等待采样", "采集失败"];
+  for (const [index, type] of types.entries()) {
+    await page.locator(`[data-target-id="${type.toLowerCase()}-detail"] .detail-button`).click();
+    const detail = page.locator("#target-detail"); await expect(detail).toBeVisible(); await expect(page.locator("#detail-count")).toHaveText("当前显示 4 / 4 项原生指标");
+    await expect(page.locator("#detail-title")).toContainText(names[index]); await expect(page.locator("#detail-identity")).toContainText(type.toLowerCase() + "-detail");
+    const cpu = detail.locator(`[data-metric-key="${type.toLowerCase()}.cpu.percent"]`);
+    await expect(cpu.locator(".metric-value")).toHaveText(reasons[index] ? "— %" : "0 %");
+    if (reasons[index]) { await expect(cpu).toContainText(reasons[index]); expect(await cpu.locator(".metric-value").evaluate(element => getComputedStyle(element).color)).toBe("rgb(100, 117, 108)"); }
+    await expect(detail.locator('[data-category="MEMORY"]')).toContainText("0 B");
+    await expect(detail.locator('[data-category="STORAGE"]')).toContainText("容量独立采样 · 60 秒周期");
+    await expect(cpu).toContainText("对象范围 进程 · remote-process · 节点 node-a"); await expect(cpu).toContainText("单位 %");
+    await cpu.locator("summary").click(); await expect(cpu).toContainText("已有授权的原生接口"); await expect(cpu).toContainText("不跨对象相加");
+    await page.getByRole("button", { name: "关闭详情", exact: true }).click();
+  }
+  expect(await page.evaluate(() => window.pwned)).toBeUndefined(); await expect(page.locator("#target-detail img")).toHaveCount(0);
+});
+
+test("empty details retain target identity and explain unreported categories without inventing values", async ({ page }) => {
+  const data = detailFixture(), detail = data.details["mysql-detail"]; detail.metrics = []; detail.target.collections = []; detail.capabilityState = "UNKNOWN";
+  await routeData(page, data); await login(page); await page.locator('[data-target-id="mysql-detail"] .detail-button').click();
+  await expect(page.locator("#detail-count")).toHaveText("当前显示 0 / 0 项原生指标"); await expect(page.locator("#detail-metrics .metric-category")).toHaveCount(4);
+  await expect(page.locator("#detail-collection")).toContainText("能力尚未确认，不表示资源为零"); await expect(page.locator("#detail-metrics .metric-value")).toHaveCount(0);
+});
+
+test("mobile details safely wrap long names and retain source explanations", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 900 }); const data = detailFixture(); await routeData(page, data); await login(page);
+  await page.locator('[data-target-id="redis-detail"] .detail-button').click(); await expect(page.locator("#detail-count")).toContainText("4 / 4");
+  await expect(page.locator("#detail-title")).toContainText(data.details["redis-detail"].target.target.name);
+  await page.locator('#target-detail [data-metric-key="redis.cpu.percent"] summary').click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const file = testInfo.outputPath("details-390.png"); await page.locator("#target-detail").screenshot({ path: file }); await testInfo.attach("details-390", { path: file, contentType: "image/png" });
+});
+
+test("switching detail targets discards a late response and clears previous values immediately", async ({ page }) => {
+  const data = detailFixture(); await routeData(page, data); await login(page);
+  await page.unroute(`**${API}/targets/*`); let release, started = false; const held = new Promise(resolve => { release = resolve; });
+  await page.route(`**${API}/targets/*`, async route => {
+    const id = new URL(route.request().url()).pathname.split("/").pop();
+    if (id === "mysql-detail") { started = true; await held; await route.fulfill({ json: data.details[id] }).catch(() => {}); }
+    else await route.fulfill({ json: data.details[id] });
+  });
+  await page.locator('[data-target-id="mysql-detail"] .detail-button').click(); await expect.poll(() => started).toBe(true); await expect(page.locator("#detail-metrics .metric-value")).toHaveCount(0);
+  await page.locator('[data-target-id="redis-detail"] .detail-button').click(); await expect(page.locator("#detail-title")).toContainText("Redis"); await expect(page.locator("#detail-count")).toContainText("4 / 4");
+  release(); await expect(page.locator("#detail-title")).toContainText("Redis"); await expect(page.locator('#detail-metrics [data-metric-key^="mysql."]')).toHaveCount(0);
+});
+
+test("5000-metric details initially render 200 rows and expand explicitly without another API read", async ({ page }) => {
+  const data = detailFixture(), detail = data.details["mysql-detail"], template = detail.metrics[1];
+  detail.metrics = Array.from({ length: 5000 }, (_, index) => ({ ...template, latestAttempt: { ...template.latestAttempt, definition: { ...template.latestAttempt.definition, key: "mysql.memory." + index } } }));
+  await routeData(page, data); await login(page); let reads = 0; page.on("request", request => { if (request.url().endsWith("/targets/mysql-detail")) reads++; });
+  await page.locator('[data-target-id="mysql-detail"] .detail-button').click(); await expect(page.locator("#detail-count")).toHaveText("当前显示 200 / 5000 项原生指标");
+  await expect(page.locator("#detail-metrics .detail-metric")).toHaveCount(200);
+  await page.getByRole("button", { name: "继续显示 200 项", exact: true }).click(); await expect(page.locator("#detail-metrics .detail-metric")).toHaveCount(400); expect(reads).toBe(1);
+});
+
+test("missing target details show a safe message and detail authorization errors clear both private views", async ({ page }) => {
+  const data = detailFixture(); await routeData(page, data); await login(page); await page.unroute(`**${API}/targets/*`);
+  let denied = false;
+  await page.route(`**${API}/targets/*`, route => route.fulfill({ status: denied ? 403 : 404,
+    json: { code: denied ? "ACCESS_DENIED" : "TARGET_NOT_FOUND", message: "password=secret" } }));
+  await page.locator('[data-target-id="mysql-detail"] .detail-button').click(); await expect(page.locator("#detail-message")).toContainText("此实例已不在当前目录");
+  await expect(page.locator("#detail-metrics .metric-value")).toHaveCount(0); await expect(page.locator("#detail-identity")).toContainText("mysql-detail");
+  denied = true; await page.getByRole("button", { name: "重读详情", exact: true }).click(); await expect(page.locator("#status-panel")).toContainText("无查看权限");
+  await expect(page.locator("#overview")).not.toBeVisible(); await expect(page.locator("#detail-metrics .metric-value")).toHaveCount(0); await expect(page.locator("#detail-identity")).toBeEmpty();
+  await expect(page.locator("body")).not.toContainText("password=secret");
+});
+
+test("a paused background return cancels pending detail loading and permits an explicit retry", async ({ page }) => {
+  const data = detailFixture(); await routeData(page, data); await login(page); await page.unroute(`**${API}/targets/*`);
+  let release, reads = 0; const held = new Promise(resolve => { release = resolve; });
+  await page.route(`**${API}/targets/*`, async route => {
+    reads++; if (reads === 1) await held;
+    await route.fulfill({ json: data.details["mysql-detail"] }).catch(() => {});
+  });
+  await page.locator('[data-target-id="mysql-detail"] .detail-button').click(); await expect.poll(() => reads).toBe(1);
+  await page.getByRole("button", { name: "暂停刷新", exact: true }).click();
+  for (const state of ["hidden", "visible"]) await page.evaluate(value => { Object.defineProperty(document, "visibilityState", { configurable: true, value }); document.dispatchEvent(new Event("visibilitychange")); }, state);
+  await expect(page.locator("#target-detail")).toBeVisible(); await expect(page.locator("#target-detail")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("#detail-message")).toContainText("详情尚未读取"); release();
+  await expect(page.locator("#detail-metrics .metric-value")).toHaveCount(0);
+  await page.getByRole("button", { name: "重读详情", exact: true }).click(); await expect(page.locator("#detail-count")).toContainText("4 / 4"); expect(reads).toBe(2);
+  await expect(page.locator("#refresh-status")).toContainText("已暂停");
 });
 test("overview retries a generation race once without combining different generations", async ({ page }) => {
   const data = fixture(); let reads = 0;
