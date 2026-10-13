@@ -20,11 +20,15 @@ import org.apache.kafka.clients.admin.DeleteTopicsOptions;
 import org.apache.kafka.clients.admin.DescribeConfigsOptions;
 import org.apache.kafka.clients.admin.DescribeTopicsOptions;
 import org.apache.kafka.clients.admin.ListConsumerGroupsOptions;
+import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions;
+import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec;
+import org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions;
 import org.apache.kafka.clients.admin.ListOffsetsOptions;
 import org.apache.kafka.clients.admin.ListTopicsOptions;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TopicPartitionInfo;
@@ -35,6 +39,7 @@ import org.apache.kafka.common.acl.AclOperation;
 import org.apache.kafka.common.acl.AclPermissionType;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
+import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.resource.PatternType;
 import org.apache.kafka.common.resource.ResourcePattern;
 import org.apache.kafka.common.resource.ResourceType;
@@ -249,6 +254,155 @@ class MonitoringKafkaAdapterIntegrationTest {
         }
     }
 
+    @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void nativeCommittedProgressCoversKnownMissingNegativeAndBoundedScopesWithoutChangingCommits() throws Exception {
+        try (MonitoringTestEnvironment environment = MonitoringTestEnvironment.start("kafka");
+             AdminClient observer = environment.kafkaAdmin(); Collector collector = new Collector()) {
+            List<String> owned = topicNames(environment);
+            List<String> groups = List.of(environment.resourceName() + "_known", environment.resourceName() + "_missing",
+                    environment.resourceName() + "_negative");
+            try {
+                prepareTopics(observer, owned);
+                environment.prepareData();
+                List<TopicPartition> selected = partitions(observer, owned.subList(0, 2));
+                List<TopicPartition> all = partitions(observer, owned);
+                Map<TopicPartition, OffsetAndMetadata> zeros = new LinkedHashMap<>();
+                all.forEach(partition -> zeros.put(partition, new OffsetAndMetadata(0)));
+                prepareCommits(observer, groups.get(0), zeros);
+                // This group has commits only outside the configured topics; queried partitions must remain unknown.
+                prepareCommits(observer, groups.get(1), Map.of(new TopicPartition(owned.get(2), 0), new OffsetAndMetadata(0)));
+                Map<TopicPartition, OffsetAndMetadata> negative = new LinkedHashMap<>(zeros);
+                TopicPartition anomalous = selected.get(0);
+                long end = observer.listOffsets(Map.of(anomalous, OffsetSpec.latest())).partitionResult(anomalous).get(5, TimeUnit.SECONDS).offset();
+                negative.put(anomalous, new OffsetAndMetadata(end + 2));
+                prepareCommits(observer, groups.get(2), negative);
+                var before = committedState(observer, groups, all);
+                Set<String> beforeGroups = groups(observer);
+                KafkaAdmin business = source(environment);
+                var settings = business.getConfigurationProperties();
+                CollectionResult result = collector.collect(resolve(business, "committed", owned.subList(0, 2), groups));
+                NativeObservation nativeRead = collector.connections.observations.get(0);
+                assertThat(nativeRead.requestedGroups).containsExactlyElementsOf(groups);
+                assertThat(nativeRead.requestedPartitions).containsExactlyElementsOf(selected);
+                assertThat(nativeRead.lag.ends()).doesNotContainKey(new TopicPartition(owned.get(2), 0));
+                String known = groups.get(0);
+                assertThat(value(result, "kafka.group.lag.total", known)).isEqualByComparingTo("1");
+                assertThat(value(result, "kafka.group.lag.maximum", known)).isEqualByComparingTo("1");
+                assertThat(value(result, "kafka.group.partitions.expected", known)).isEqualByComparingTo("5");
+                assertThat(value(result, "kafka.group.partitions.covered", known)).isEqualByComparingTo("5");
+                assertThat(metric(result, "kafka.group.coverage.complete", known).value()).isEqualTo(true);
+                for (TopicPartition partition : selected) {
+                    var readEnd = nativeRead.lag.ends().get(partition);
+                    var readCommit = nativeRead.lag.committed().get(known).get(partition);
+                    assertThat(readEnd.failure()).isNull();
+                    assertThat(readCommit.failure()).isNull();
+                    assertThat(value(result, "kafka.group.partition.lag", lagScope(known, partition)))
+                            .isEqualByComparingTo(BigDecimal.valueOf(readEnd.offset()).subtract(BigDecimal.valueOf(readCommit.offset())));
+                    assertThat(metric(result, "kafka.group.partition.lag", lagScope(groups.get(1), partition)).missingReason())
+                            .isEqualTo(MissingReason.NO_COMMITTED_OFFSET);
+                }
+                assertThat(metric(result, "kafka.group.lag.total", groups.get(1)).value()).isNull();
+                assertThat(metric(result, "kafka.group.lag.known.total", groups.get(1)).value()).isNull();
+                assertThat(value(result, "kafka.group.partitions.covered", groups.get(1))).isZero();
+                assertThat(value(result, "kafka.group.partition.lag", lagScope(groups.get(2), anomalous))).isEqualByComparingTo("-2");
+                assertThat(metric(result, "kafka.group.partition.lag.anomaly", lagScope(groups.get(2), anomalous)).value()).isEqualTo(true);
+                assertThat(metric(result, "kafka.group.lag.total", groups.get(2)).value()).isNull();
+                assertThat(value(result, "kafka.group.lag.anomalies", groups.get(2))).isEqualByComparingTo("1");
+
+                collector.properties.getLimits().setPartitions(2);
+                collector.properties.getLimits().setConsumerGroups(1);
+                CollectionResult limited = collector.collect(resolve(business, "committed-limited", owned.subList(0, 2), groups));
+                NativeObservation bounded = collector.connections.observations.get(1);
+                assertThat(bounded.requestedGroups).containsExactly(known);
+                assertThat(bounded.requestedPartitions).containsExactlyElementsOf(selected.subList(0, 2));
+                assertThat(value(limited, "kafka.group.partitions.expected", known)).isEqualByComparingTo("5");
+                assertThat(value(limited, "kafka.group.partitions.covered", known)).isEqualByComparingTo("2");
+                assertThat(metric(limited, "kafka.group.lag.total", known).missingReason()).isEqualTo(MissingReason.PARTIAL_SCOPE);
+                assertThat(metric(limited, "kafka.group.lag.known.total", known).missingReason()).isNull();
+                assertThat(collector.connections.closed).isEqualTo(2);
+                assertThat(committedState(observer, groups, all)).isEqualTo(before);
+                assertThat(groups(observer)).isEqualTo(beforeGroups);
+                assertThat(business.getConfigurationProperties()).isEqualTo(settings);
+            } finally {
+                observer.deleteConsumerGroups(groups).all().get(10, TimeUnit.SECONDS);
+                deleteOwnedTopics(observer, owned);
+            }
+        }
+    }
+
+    @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void nativeGroupAclDenialKeepsOtherGroupProgressAndLeavesAllCommitsUnchanged() throws Exception {
+        try (MonitoringTestEnvironment environment = MonitoringTestEnvironment.startKafkaWithAuthorizer();
+             AdminClient observer = environment.kafkaAdmin(); Collector collector = new Collector()) {
+            List<String> owned = topicNames(environment);
+            List<String> groups = List.of(environment.resourceName() + "_allowed", environment.resourceName() + "_denied");
+            AclBinding denial = new AclBinding(new ResourcePattern(ResourceType.GROUP, groups.get(1), PatternType.LITERAL),
+                    new AccessControlEntry("User:ANONYMOUS", "*", AclOperation.DESCRIBE, AclPermissionType.DENY));
+            boolean created = false;
+            try {
+                prepareTopics(observer, owned);
+                environment.prepareData();
+                List<TopicPartition> selected = partitions(observer, owned.subList(0, 2));
+                Map<TopicPartition, OffsetAndMetadata> zeros = new LinkedHashMap<>();
+                selected.forEach(partition -> zeros.put(partition, new OffsetAndMetadata(0)));
+                for (String group : groups) prepareCommits(observer, group, zeros);
+                var before = committedState(observer, groups, selected);
+                observer.createAcls(List.of(denial), new CreateAclsOptions().timeoutMs(NATIVE_TIMEOUT_MS)).all().get(5, TimeUnit.SECONDS);
+                created = true;
+                await().atMost(Duration.ofSeconds(15)).until(() -> groupIsDenied(observer, groups.get(1), selected));
+                CollectionResult result = collector.collect(resolve(source(environment), "committed-acl", owned.subList(0, 2), groups));
+                assertThat(result.status()).isEqualTo(CollectionStatus.PARTIAL);
+                assertThat(result.reason()).isEqualTo(MissingReason.UNAUTHORIZED);
+                assertThat(value(result, "kafka.group.lag.total", groups.get(0))).isEqualByComparingTo("1");
+                assertThat(metric(result, "kafka.group.lag.total", groups.get(1)).value()).isNull();
+                for (TopicPartition partition : selected) {
+                    assertThat(metric(result, "kafka.group.partition.committed_offset", lagScope(groups.get(1), partition)).missingReason())
+                            .isEqualTo(MissingReason.UNAUTHORIZED);
+                }
+                assertThat(result.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
+                observer.deleteAcls(List.of(denial.toFilter()), new DeleteAclsOptions().timeoutMs(NATIVE_TIMEOUT_MS)).all().get(5, TimeUnit.SECONDS);
+                created = false;
+                await().atMost(Duration.ofSeconds(15)).until(() -> !groupIsDenied(observer, groups.get(1), selected));
+                assertThat(committedState(observer, groups, selected)).isEqualTo(before);
+                assertThat(collector.connections.closed).isEqualTo(1);
+            } finally {
+                if (created) observer.deleteAcls(List.of(denial.toFilter())).all().get(5, TimeUnit.SECONDS);
+                observer.deleteConsumerGroups(groups).all().get(10, TimeUnit.SECONDS);
+                deleteOwnedTopics(observer, owned);
+            }
+        }
+    }
+
+    private static List<TopicPartition> partitions(AdminClient observer, List<String> topics) throws Exception {
+        var descriptions = observer.describeTopics(topics).allTopicNames().get(5, TimeUnit.SECONDS);
+        List<TopicPartition> partitions = new ArrayList<>();
+        for (String topic : topics) for (TopicPartitionInfo partition : descriptions.get(topic).partitions()) {
+            partitions.add(new TopicPartition(topic, partition.partition()));
+        }
+        return List.copyOf(partitions);
+    }
+    private static void prepareCommits(AdminClient observer, String group, Map<TopicPartition, OffsetAndMetadata> offsets) {
+        // Writes only the owned fixture's offsets before the measured read-only interval; no consumer is created.
+        await().atMost(Duration.ofSeconds(30)).ignoreExceptions().untilAsserted(() -> observer.alterConsumerGroupOffsets(group, offsets,
+                new AlterConsumerGroupOffsetsOptions().timeoutMs(10000)).all().get(12, TimeUnit.SECONDS));
+    }
+    private static Map<String, Map<TopicPartition, OffsetAndMetadata>> committedState(AdminClient observer, List<String> groups,
+                                                                                  List<TopicPartition> partitions) throws Exception {
+        Map<String, ListConsumerGroupOffsetsSpec> specs = new LinkedHashMap<>();
+        groups.forEach(group -> specs.put(group, new ListConsumerGroupOffsetsSpec().topicPartitions(partitions)));
+        return observer.listConsumerGroupOffsets(specs, new ListConsumerGroupOffsetsOptions().timeoutMs(NATIVE_TIMEOUT_MS)).all().get(5, TimeUnit.SECONDS);
+    }
+    private static boolean groupIsDenied(AdminClient observer, String group, List<TopicPartition> partitions) throws Exception {
+        try { committedState(observer, List.of(group), partitions); return false; }
+        catch (ExecutionException failure) {
+            if (failure.getCause() instanceof GroupAuthorizationException) return true;
+            throw failure;
+        }
+    }
+    private static String lagScope(String group, TopicPartition partition) { return group + "/" + partition.topic() + "#" + partition.partition(); }
+
     private static KafkaAdmin source(MonitoringTestEnvironment environment) {
         Map<String, Object> declared = new LinkedHashMap<>();
         declared.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, "127.0.0.2:1");
@@ -260,12 +414,17 @@ class MonitoringKafkaAdapterIntegrationTest {
     }
 
     private static ResolvedTarget resolve(KafkaAdmin source, String id, List<String> topics) {
+        return resolve(source, id, topics, List.of());
+    }
+
+    private static ResolvedTarget resolve(KafkaAdmin source, String id, List<String> topics, List<String> groups) {
         MonitoringProperties.Target declaration = new MonitoringProperties.Target();
         declaration.setId(id);
         declaration.setType(MiddlewareType.KAFKA);
         declaration.setEnabled(true);
         declaration.setConnectionSource("businessKafka");
         declaration.getScope().setTopics(topics);
+        declaration.getScope().setConsumerGroups(groups);
         MonitoringProperties properties = new MonitoringProperties();
         properties.setEnabled(true);
         properties.setTargets(List.of(declaration));
@@ -417,6 +576,12 @@ class MonitoringKafkaAdapterIntegrationTest {
                     observation.topicReads.putAll(reads);
                     return reads;
                 }
+                @Override public LagRead readCommittedLag(List<String> groups, List<TopicPartition> partitions) {
+                    observation.requestedGroups.addAll(groups);
+                    observation.requestedPartitions.addAll(partitions);
+                    observation.lag = actual.readCommittedLag(groups, partitions);
+                    return observation.lag;
+                }
                 @Override public void close() { actual.close(); closed++; }
             };
         }
@@ -425,14 +590,17 @@ class MonitoringKafkaAdapterIntegrationTest {
         KafkaMonitoringConnections.ClusterRead cluster;
         final List<String> requestedTopics = new ArrayList<>();
         final Map<String, KafkaMonitoringConnections.TopicRead> topicReads = new LinkedHashMap<>();
+        final List<String> requestedGroups = new ArrayList<>();
+        final List<TopicPartition> requestedPartitions = new ArrayList<>();
+        KafkaMonitoringConnections.LagRead lag;
     }
 
     private static final class Collector implements AutoCloseable {
         final Object lifecycle = new Object();
         final Clock clock = Clock.systemUTC();
         final MonitoringProperties properties = new MonitoringProperties();
-        final MonitoringCounterStore counters = new MonitoringCounterStore(4, 64);
-        final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(4, 64, 2);
+        final MonitoringCounterStore counters = new MonitoringCounterStore(4, 5000);
+        final MonitoringSnapshotStore snapshots = new MonitoringSnapshotStore(4, 5000, 2);
         final RecordingConnections connections = new RecordingConnections();
         final KafkaMonitoringAdapter adapter = new KafkaMonitoringAdapter(properties, connections, clock);
         final ThreadPoolExecutor cleanup = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,

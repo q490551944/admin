@@ -13,12 +13,19 @@ import org.apache.kafka.clients.admin.DescribeClusterResult;
 import org.apache.kafka.clients.admin.DescribeTopicsOptions;
 import org.apache.kafka.clients.admin.DescribeTopicsResult;
 import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult;
+import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec;
+import org.apache.kafka.clients.admin.ListOffsetsResult;
+import org.apache.kafka.clients.admin.OffsetSpec;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.types.Password;
 import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.errors.ClusterAuthorizationException;
 import org.apache.kafka.common.errors.DisconnectException;
+import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
@@ -34,6 +41,8 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -420,6 +429,101 @@ class MonitoringKafkaConnectionsTest {
         return future;
     }
 
+    @Test
+    void committedOffsetsAreScopedInBothNativeBatchesAndNullCommitDiffersFromOmittedPartition() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            TopicPartition zero = new TopicPartition("ready", 0);
+            TopicPartition one = new TopicPartition("ready", 1);
+            TopicPartition denied = new TopicPartition("denied", 0);
+            var groups = mock(ListConsumerGroupOffsetsResult.class);
+            Map<TopicPartition, OffsetAndMetadata> nativeOffsets = new HashMap<>();
+            nativeOffsets.put(zero, new OffsetAndMetadata(4));
+            nativeOffsets.put(one, null);
+            nativeOffsets.put(new TopicPartition("outside", 0), new OffsetAndMetadata(99));
+            when(groups.partitionsToOffsetAndMetadata("readers")).thenReturn(KafkaFuture.completedFuture(nativeOffsets));
+            when(groups.partitionsToOffsetAndMetadata("denied-group")).thenReturn(failed(new GroupAuthorizationException("private-group-secret")));
+            var ends = new ListOffsetsResult(Map.of(zero, KafkaFuture.completedFuture(offset(12)),
+                    one, KafkaFuture.completedFuture(offset(8)), denied, failed(new TopicAuthorizationException(Set.of("private-topic")))));
+            when(fixture.admin.listConsumerGroupOffsets(anyMap(), any())).thenReturn(groups);
+            when(fixture.admin.listOffsets(anyMap(), any())).thenReturn(ends);
+            try (var session = fixture.access().open(fixture.request())) {
+                fixture.ticker.set(TimeUnit.SECONDS.toNanos(3));
+                var result = session.readCommittedLag(List.of("readers", "readers", "denied-group"), List.of(zero, one, denied));
+                assertThat(result.committed()).containsOnlyKeys("readers", "denied-group");
+                assertThat(result.committed().get("readers")).containsOnlyKeys(zero, one, denied);
+                assertThat(result.committed().get("readers").get(zero).offset()).isEqualTo(4L);
+                assertFailure(result.committed().get("readers").get(one).failure(), MissingReason.NO_COMMITTED_OFFSET, false);
+                assertFailure(result.committed().get("readers").get(denied).failure(), MissingReason.FAILED, false);
+                assertFailure(result.committed().get("denied-group").get(zero).failure(), MissingReason.UNAUTHORIZED, false);
+                assertThat(result.ends().get(zero).offset()).isEqualTo(12L);
+                assertFailure(result.ends().get(denied).failure(), MissingReason.UNAUTHORIZED, false);
+            }
+            verify(fixture.admin).listConsumerGroupOffsets(argThat((Map<String, ListConsumerGroupOffsetsSpec> specs) -> specs.keySet().equals(Set.of("readers", "denied-group"))
+                    && specs.values().stream().allMatch(spec -> spec.topicPartitions().equals(List.of(zero, one, denied)))),
+                    argThat(options -> options.timeoutMs() == 2000));
+            verify(fixture.admin).listOffsets(argThat(specs -> specs.keySet().equals(Set.of(zero, one, denied))
+                    && specs.values().stream().allMatch(spec -> spec instanceof OffsetSpec.LatestSpec)),
+                    argThat(options -> options.timeoutMs() == 2000));
+            verify(fixture.admin).close(Duration.ZERO);
+            verifyNoMoreInteractions(fixture.admin);
+        }
+    }
+
+    @Test
+    void emptyOrEscapingGroupPartitionScopesNeverReachNativeOffsetReads() throws Exception {
+        try (Fixture fixture = new Fixture(); var session = fixture.access().open(fixture.request())) {
+            var zero = new TopicPartition("ready", 0);
+            assertThat(session.readCommittedLag(List.of(), List.of(zero)).ends()).isEmpty();
+            assertThat(session.readCommittedLag(List.of("readers"), List.of()).committed()).isEmpty();
+            for (var groups : List.of(List.of("outside"), List.of("readers"))) {
+                List<TopicPartition> partitions = groups.contains("outside") ? List.of(zero) : List.of(new TopicPartition("outside", 0));
+                assertThatThrownBy(() -> session.readCommittedLag(groups, partitions)).isInstanceOfSatisfying(KafkaMonitoringConnections.Failure.class,
+                        failure -> assertFailure(failure, MissingReason.UNSUPPORTED, false));
+            }
+            assertThatThrownBy(() -> session.readCommittedLag(List.of("readers"), List.of(new TopicPartition("ready", -1))))
+                    .isInstanceOfSatisfying(KafkaMonitoringConnections.Failure.class,
+                            failure -> assertFailure(failure, MissingReason.UNSUPPORTED, false));
+            verify(fixture.admin, never()).listConsumerGroupOffsets(anyMap(), any());
+            verify(fixture.admin, never()).listOffsets(anyMap(), any());
+        }
+    }
+
+    @Test
+    void pendingGroupDoesNotHideCompletedGroupsAndEndsAndAllReadsKeepTheOriginalBudget() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            var zero = new TopicPartition("ready", 0);
+            @SuppressWarnings("unchecked") KafkaFuture<Map<TopicPartition, OffsetAndMetadata>> pending = mock(KafkaFuture.class);
+            var later = new KafkaFutureImpl<Map<TopicPartition, OffsetAndMetadata>>();
+            when(pending.isDone()).thenReturn(false);
+            when(pending.get(anyLong(), any())).thenAnswer(invocation -> {
+                later.complete(Map.of(zero, new OffsetAndMetadata(8)));
+                fixture.ticker.set(TimeUnit.SECONDS.toNanos(5));
+                throw new TimeoutException("private-timeout-secret");
+            });
+            var groups = mock(ListConsumerGroupOffsetsResult.class);
+            when(groups.partitionsToOffsetAndMetadata("pending-group")).thenReturn(pending);
+            when(groups.partitionsToOffsetAndMetadata("readers")).thenReturn(KafkaFuture.completedFuture(Map.of(zero, new OffsetAndMetadata(4))));
+            when(groups.partitionsToOffsetAndMetadata("later-group")).thenReturn(later);
+            when(fixture.admin.listConsumerGroupOffsets(anyMap(), any())).thenReturn(groups);
+            when(fixture.admin.listOffsets(anyMap(), any())).thenReturn(new ListOffsetsResult(Map.of(zero, KafkaFuture.completedFuture(offset(12)))));
+            try (var session = fixture.access().open(fixture.request())) {
+                var result = session.readCommittedLag(List.of("pending-group", "readers", "later-group"), List.of(zero));
+                assertFailure(result.committed().get("pending-group").get(zero).failure(), MissingReason.TIMEOUT, false);
+                assertThat(result.committed().get("readers").get(zero).offset()).isEqualTo(4L);
+                assertThat(result.committed().get("later-group").get(zero).offset()).isEqualTo(8L);
+                assertThat(result.ends().get(zero).offset()).isEqualTo(12L);
+            }
+            var ordered = inOrder(fixture.admin);
+            ordered.verify(fixture.admin).listConsumerGroupOffsets(anyMap(), any());
+            ordered.verify(fixture.admin).listOffsets(anyMap(), any());
+            ordered.verify(fixture.admin).close(Duration.ZERO);
+        }
+    }
+
+    private static ListOffsetsResult.ListOffsetsResultInfo offset(long value) {
+        return new ListOffsetsResult.ListOffsetsResultInfo(value, -1, Optional.empty());
+    }
+
     private static DescribeClusterResult cluster(KafkaFuture<Collection<Node>> nodes, KafkaFuture<String> id) {
         var result = mock(DescribeClusterResult.class);
         when(result.nodes()).thenReturn(nodes);
@@ -449,7 +553,8 @@ class MonitoringKafkaConnectionsTest {
         private CollectionRequest request() {
             Instant now = Instant.now();
             return new CollectionRequest("kafka", "kafkaFactory", "kafkaFactory", MetricContract.CollectionKind.ORDINARY,
-                    1, 1, now, now.plusSeconds(5), new MonitoringTarget.Scope(List.of(), List.of("ready", "denied", "pending", "later"), List.of(), List.of(), List.of()),
+                    1, 1, now, now.plusSeconds(5), new MonitoringTarget.Scope(List.of(), List.of("ready", "denied", "pending", "later"),
+                    List.of("readers", "denied-group", "pending-group", "later-group"), List.of(), List.of()),
                     business, settings, control);
         }
 
