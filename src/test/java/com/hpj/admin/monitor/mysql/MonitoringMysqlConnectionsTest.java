@@ -596,6 +596,9 @@ class MonitoringMysqlConnectionsTest {
                 assertThat(result.reason()).isEqualTo(MetricContract.MissingReason.TIMEOUT);
                 assertThat(script.queries).hasSize(2);
             }
+            // Deadline cancellation dispatches owned-connection cleanup asynchronously.
+            f.drainCleanup();
+            assertThat(f.control.isCleanupComplete()).isTrue();
             script.verifyClosed();
         }
     }
