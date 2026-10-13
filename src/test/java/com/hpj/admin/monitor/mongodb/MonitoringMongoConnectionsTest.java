@@ -330,6 +330,39 @@ class MonitoringMongoConnectionsTest {
             assertThat(failure.getStackTrace()).isEmpty();
         });
     }
+
+    @Test
+    void capacityDbStatsUsesOnlyConfiguredDatabaseAndFixedByteScaleWithoutSessionsOrDiscovery() throws Exception {
+        try (Fixture f = new Fixture(); var session = f.access().open(f.request(MetricContract.CollectionKind.CAPACITY, List.of("allowed-db")))) {
+            session.dbStats("allowed-db");
+            assertThat(f.commands).containsExactly("dbStats");
+            assertThat(f.commandDatabases).containsExactly("allowed-db");
+            assertThat(f.contexts).allSatisfy(context -> assertThat(context.getClass().getSimpleName()).isEqualTo("NoOpSessionContext"));
+            for (String rejected : List.of("outside", "invalid.name", "a".repeat(64))) {
+                assertFailure(() -> session.dbStats(rejected), MissingReason.UNSUPPORTED, false);
+            }
+            assertThat(f.commands).hasSize(1);
+            verifyNoInteractions(f.business);
+        }
+        try (Fixture f = new Fixture(); var session = f.access().open(f.request(MetricContract.CollectionKind.ORDINARY, List.of("allowed-db")))) {
+            assertFailure(() -> session.dbStats("allowed-db"), MissingReason.UNSUPPORTED, false);
+            assertThat(f.commands).isEmpty();
+        }
+    }
+
+    @Test
+    void oneDbStatsAuthorizationFailureDoesNotRetryOrPoisonAnotherConfiguredDatabase() throws Exception {
+        try (Fixture f = new Fixture(); var session = f.access().open(f.request(MetricContract.CollectionKind.CAPACITY, List.of("allowed-db", "second-db")))) {
+            f.failure = commandFailure(13); f.failOnlyOnce = true;
+            assertFailure(() -> session.dbStats("allowed-db"), MissingReason.UNAUTHORIZED, false);
+            assertThat(session.dbStats("second-db")).isEqualTo(f.ok);
+            assertThat(f.commands).containsExactly("dbStats", "dbStats");
+            assertThat(f.commandDatabases).containsExactly("allowed-db", "second-db");
+            f.ticker.set(TimeUnit.SECONDS.toNanos(5));
+            assertFailure(() -> session.dbStats("second-db"), MissingReason.TIMEOUT, false);
+            assertThat(f.commands).hasSize(2);
+        }
+    }
     private static MongoCommandException commandFailure(int code) {
         return new MongoCommandException(new BsonDocument("ok", new BsonInt32(0)).append("code", new BsonInt32(code))
                 .append("errmsg", new BsonString("private-native-text")), new ServerAddress("private-host"));
@@ -368,6 +401,7 @@ class MonitoringMongoConnectionsTest {
         private MongoClientSettings settings = MongoClientSettings.builder().applyConnectionString(new ConnectionString("mongodb://native-a:27017")).build();
         private final AtomicReference<MongoClientSettings> captured = new AtomicReference<>();
         private final List<String> commands = new ArrayList<>();
+        private final List<String> commandDatabases = new ArrayList<>();
         private final List<Object> contexts = new ArrayList<>();
         private final BsonDocument ok = new BsonDocument("ok", new BsonInt32(1));
         private RuntimeException failure;
@@ -382,7 +416,13 @@ class MonitoringMongoConnectionsTest {
                 Field field = CommandMessage.class.getDeclaredField("command");
                 field.setAccessible(true);
                 BsonDocument document = (BsonDocument) field.get(message);
-                assertThat(document.size()).isEqualTo(1);
+                if (document.getFirstKey().equals("dbStats")) {
+                    assertThat(document).isEqualTo(new BsonDocument("dbStats", new BsonInt32(1))
+                            .append("scale", new BsonInt32(1)).append("freeStorage", new BsonInt32(0)));
+                } else assertThat(document.size()).isEqualTo(1);
+                var namespace = CommandMessage.class.getDeclaredMethod("getNamespace");
+                namespace.setAccessible(true);
+                commandDatabases.add(((MongoNamespace) namespace.invoke(message)).getDatabaseName());
                 commands.add(document.getFirstKey());
                 contexts.add(invocation.getArgument(2));
                 RuntimeException pending = failure;
@@ -395,9 +435,12 @@ class MonitoringMongoConnectionsTest {
             return new MongoMonitoringConnections((effective, streams) -> { captured.set(effective); return connection; });
         }
         private CollectionRequest request() {
+            return request(MetricContract.CollectionKind.ORDINARY, List.of());
+        }
+        private CollectionRequest request(MetricContract.CollectionKind kind, List<String> databases) {
             Instant now = Instant.now();
-            return new CollectionRequest("mongo", "mongoClient", "mongoClient", MetricContract.CollectionKind.ORDINARY,
-                    1, 1, now, now.plusSeconds(5), new MonitoringTarget.Scope(List.of(), List.of(), List.of(), List.of(), List.of()),
+            return new CollectionRequest("mongo", "mongoClient", "mongoClient", kind,
+                    1, 1, now, now.plusSeconds(5), new MonitoringTarget.Scope(databases, List.of(), List.of(), List.of(), List.of()),
                     business, Map.of("mongoSettings", settings), control);
         }
         private void drain() throws Exception { cleanup.submit(() -> {}).get(2, TimeUnit.SECONDS); }
