@@ -78,7 +78,10 @@
         // A 201 establishes identity only. The allowlist is checked by the current-session endpoint.
         return this.current(signal);
       },
-      logout(signal) { return write("sessions/current", "DELETE", undefined, signal); }
+      logout(signal) { return write("sessions/current", "DELETE", undefined, signal); },
+      catalog(signal) { return request("catalog", { signal }); },
+      snapshots(signal) { return request("snapshots", { signal }); },
+      detail(targetId, signal) { return request("targets/" + encodeURIComponent(targetId), { signal }); }
     });
   }
 

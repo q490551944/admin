@@ -48,10 +48,11 @@ public final class MonitoringResponses {
     public record TargetOverview(DirectoryTarget target, SchedulingState schedulingState,
                                  List<CollectionObservation> collections,
                                  List<ServiceObservation> serviceObservations,
-                                 int metricCount, int missingMetricCount) {
+                                 int metricCount, int missingMetricCount, List<StoredMetric> coreMetrics) {
         public TargetOverview {
             collections = List.copyOf(collections);
             serviceObservations = List.copyOf(serviceObservations);
+            coreMetrics = List.copyOf(coreMetrics);
         }
     }
     public record SnapshotResponse(@JsonFormat(shape = JsonFormat.Shape.STRING) Instant serverTime,

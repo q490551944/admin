@@ -9,6 +9,19 @@ const appSource = fs.readFileSync(path.join(folder, "app.js"), "utf8");
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status });
 const employee = { id: "1", username: "monitor-allowed" };
 
+test("monitor reads stay inside the application context and use only shared read endpoints", async () => {
+  const requests = [];
+  const h = harness(async (url, options) => { requests.push({ url, options }); return json({ generation: 1 }); });
+  await h.client.catalog(); await h.client.snapshots(); await h.client.detail("target/a?x");
+  assert.deepEqual(requests.map(item => new URL(item.url).pathname), [
+    "/admin/api/monitor/v1/catalog", "/admin/api/monitor/v1/snapshots", "/admin/api/monitor/v1/targets/target%2Fa%3Fx"
+  ]);
+  for (const { options } of requests) {
+    assert.equal(options.credentials, "same-origin"); assert.equal(options.cache, "no-store");
+    assert.equal(options.method, undefined); assert.equal(options.body, undefined);
+  }
+});
+
 function harness(fetcher, page = "index") {
   const nodes = new Map();
   const events = {};
