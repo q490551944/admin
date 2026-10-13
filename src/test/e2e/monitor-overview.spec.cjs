@@ -100,3 +100,87 @@ test("backend-projected expired overview keeps the original zero gray and servic
   expect(await card.locator(".metric-value").evaluate(element => getComputedStyle(element).color)).toBe("rgb(100, 117, 108)");
   await expect(page.locator('[data-service="UNKNOWN"] strong')).toHaveText("2");
 });
+
+test("combined overview filters and summary clicks select exactly their active instances without another read", async ({ page }) => {
+  const data = fixture(); let reads = 0;
+  await page.route(`**${API}/catalog`, route => route.fulfill({ json: data.catalog }));
+  await page.route(`**${API}/snapshots`, route => { reads++; return route.fulfill({ json: data.snapshot }); });
+  await login(page); await expect(page.locator("#instance-list .instance-card")).toHaveCount(6);
+  await page.getByLabel("类型", { exact: true }).selectOption("REDIS");
+  await page.getByLabel("服务状态", { exact: true }).selectOption("CONNECTION_FAILED");
+  await page.getByLabel("采集状态", { exact: true }).selectOption("FAILED");
+  await page.getByLabel("仅看异常").check(); await expect(page.locator("#instance-list .instance-card")).toHaveCount(1);
+  await expect(page.locator("#instance-list")).toContainText("缓存 B");
+  await page.getByLabel("类型", { exact: true }).selectOption("MYSQL"); await expect(page.locator("#instance-list")).toContainText("没有匹配的实例");
+  await page.locator('button[data-service="AVAILABLE"]').click(); await expect(page.locator("#instance-list .instance-card")).toHaveCount(1);
+  await expect(page.locator("#filter-type")).toHaveValue(""); await expect(page.locator("#filter-collection")).toHaveValue("");
+  await expect(page.locator('[data-target-id="mysql-a"]')).toBeVisible(); expect(reads).toBe(1);
+});
+
+test("automatic shared reads stop while paused, manual refresh keeps pause and continue refreshes immediately", async ({ page }) => {
+  await page.clock.install(); const data = fixture(); let reads = 0;
+  await page.route(`**${API}/catalog`, route => route.fulfill({ json: data.catalog }));
+  await page.route(`**${API}/snapshots`, route => { reads++; return route.fulfill({ json: data.snapshot }); });
+  await login(page); await expect(page.locator("#instance-list .instance-card")).toHaveCount(6);
+  await page.clock.pauseAt(new Date(Date.now() + 1000)); const baseline = reads;
+  await page.clock.runFor(15000); await expect.poll(() => reads).toBe(baseline + 1);
+  await expect(page.locator("#refresh-snapshot")).toBeEnabled();
+  await page.getByRole("button", { name: "暂停刷新", exact: true }).click(); await expect(page.locator("#refresh-status")).toContainText("已暂停");
+  await page.clock.runFor(60000); expect(reads).toBe(baseline + 1);
+  await page.getByRole("button", { name: "手动刷新", exact: true }).click(); await expect.poll(() => reads).toBe(baseline + 2);
+  await expect(page.locator("#refresh-status")).toContainText("已暂停");
+  await page.getByRole("button", { name: "继续刷新", exact: true }).click(); await expect.poll(() => reads).toBe(baseline + 3);
+});
+
+test("background return ages a paused snapshot before showing it and reads immediately only after continue", async ({ page }) => {
+  await page.clock.install(); const data = fixture(); let reads = 0;
+  await page.route(`**${API}/catalog`, route => route.fulfill({ json: data.catalog }));
+  await page.route(`**${API}/snapshots`, route => { reads++; return route.fulfill({ json: data.snapshot }); });
+  await login(page); await expect(page.locator('[data-target-id="mysql-a"]')).toContainText("● 可用");
+  await page.getByRole("button", { name: "暂停刷新", exact: true }).click();
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  async function visibility(value) { await page.evaluate(state => { Object.defineProperty(document, "visibilityState", { configurable: true, value: state }); document.dispatchEvent(new Event("visibilitychange")); }, value); }
+  await visibility("hidden"); await page.clock.runFor(46000); await visibility("visible");
+  await expect(page.locator("#overview")).toBeVisible(); await expect(page.locator('[data-target-id="mysql-a"]')).toContainText("? 未知");
+  await expect(page.locator('[data-target-id="mysql-a"]')).toContainText("已过期 · 上次成功值");
+  await expect(page.locator("#refresh-status")).toContainText("已暂停"); expect(reads).toBe(1);
+  await page.getByRole("button", { name: "继续刷新", exact: true }).click(); await expect.poll(() => reads).toBe(2);
+});
+
+test("an aborted old snapshot cannot overwrite a newer manual read and pending refreshes do not overlap", async ({ page }) => {
+  const data = fixture(); await routeData(page, data); await login(page); await expect(page.locator("#instance-list .instance-card")).toHaveCount(6);
+  await page.unroute(`**${API}/snapshots`); let release, reads = 0;
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route(`**${API}/snapshots`, async route => {
+    reads++;
+    if (reads === 1) { await held; await route.fulfill({ json: data.snapshot }).catch(() => {}); }
+    else await route.fulfill({ json: { ...data.snapshot, targets: data.snapshot.targets.map(row => ({ ...row, target: { ...row.target, name: row.target.name + " · 新快照" } })) } });
+  });
+  await page.getByRole("button", { name: "手动刷新", exact: true }).click(); await expect.poll(() => reads).toBe(1);
+  await expect(page.locator("#refresh-snapshot")).toBeDisabled();
+  await page.getByRole("button", { name: "暂停刷新", exact: true }).click();
+  await page.getByRole("button", { name: "手动刷新", exact: true }).click(); await expect(page.locator('[data-target-id="mysql-a"] h3')).toContainText("新快照");
+  release(); await expect(page.locator('[data-target-id="mysql-a"] h3')).toContainText("新快照"); expect(reads).toBe(2);
+});
+
+test("five pages use bounded GET shared reads with no request that changes collection", async ({ page, context }) => {
+  await page.clock.install();
+  await login(page); const pages = [page];
+  for (let i = 1; i < 5; i++) pages.push(await context.newPage());
+  const reads = Array(5).fill(0), mutations = [];
+  for (const [i, tab] of pages.entries()) {
+    // Model five simultaneously visible pages, independent of headless tab activation.
+    await tab.addInitScript(() => Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" }));
+    const data = fixture();
+    await tab.route(`**${API}/catalog`, route => route.fulfill({ json: data.catalog }));
+    await tab.route(`**${API}/snapshots`, route => { reads[i]++; if (route.request().method() !== "GET") mutations.push(route.request().method()); return route.fulfill({ json: data.snapshot }); });
+    await tab.goto("/monitor/index.html"); await expect(tab.locator("#instance-list .instance-card")).toHaveCount(6);
+  }
+  for (const tab of pages) await expect(tab.locator("#refresh-snapshot")).toBeEnabled();
+  // Playwright's page clock controls the entire browser context, including all five pages.
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  const baseline = [...reads];
+  await page.clock.runFor(15000);
+  await expect.poll(() => reads).toEqual(baseline.map(count => count + 1)); expect(mutations).toEqual([]);
+  for (const tab of pages.slice(1)) await tab.close();
+});

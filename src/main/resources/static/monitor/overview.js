@@ -80,13 +80,78 @@
   function scopeText(scope) {
     return [SCOPES[scope?.kind] || "对象", scope?.id, scope?.nodeId && "节点 " + scope.nodeId].filter(Boolean).join(" · ");
   }
+  function exceptional(row) {
+    if (row.schedulingState === "DISABLED") return false;
+    return row.schedulingState !== "ACTIVE" || row.exceptional === true || row.service !== "AVAILABLE" ||
+      row.collection !== "SUCCESS" || list(row.coreMetrics).some(metric => metric.valueState && metric.valueState !== "CURRENT");
+  }
+  function matches(row, filters = {}) {
+    return (!filters.type || row.target.type === filters.type) &&
+      (!filters.service || row.schedulingState === "ACTIVE" && row.service === filters.service) &&
+      (!filters.collection || row.schedulingState === "ACTIVE" && row.collection === filters.collection) &&
+      (!filters.exceptional || exceptional(row));
+  }
+  function ageMetric(metric, serverMillis) {
+    const deadline = Date.parse(metric.validUntil || metric.lastSuccess?.validUntil);
+    return metric.valueState === "NO_DATA" || !Number.isFinite(deadline) || serverMillis <= deadline ? metric :
+      { ...metric, valueState: "EXPIRED" };
+  }
+  function ageSnapshot(snapshot, serverMillis) {
+    const expired = deadline => Number.isFinite(Date.parse(deadline)) && serverMillis > Date.parse(deadline);
+    return { ...snapshot, targets: list(snapshot.targets).map(row => ({ ...row,
+      coreMetrics: list(row.coreMetrics).map(metric => ageMetric(metric, serverMillis)),
+      serviceObservations: list(row.serviceObservations).map(item => item.expired || expired(item.validUntil)
+        ? { ...item, availability: "UNKNOWN", expired: true } : item),
+      collections: list(row.collections).map(item => {
+        const attemptExpired = expired(item.validUntil), valuesExpired = expired(item.valuesValidUntil);
+        return { ...item, expired: item.expired || attemptExpired || valuesExpired,
+          status: attemptExpired || valuesExpired && item.status === "SUCCESS" ? "STALE" : item.status };
+      })
+    })) };
+  }
+  // A page reads the shared store; the poller never invokes a collection endpoint.
+  function createPoller({ load, onData, onError, onState = () => {}, visible = () => true,
+    now = () => global.performance.now(), schedule = (callback, delay) => global.setTimeout(callback, delay),
+    cancel = handle => global.clearTimeout(handle), interval = () => 15000 }) {
+    let active = false, paused = false, pending = null, timer = null, version = 0, lastStart = 0;
+    const state = () => ({ active, paused, busy: pending !== null });
+    const emit = () => onState(state());
+    function clear() { if (timer !== null) cancel(timer); timer = null; }
+    function invalidate() { clear(); version++; pending?.controller.abort(); pending = null; }
+    function plan() {
+      clear();
+      if (active && !paused && visible() && !pending) {
+        timer = schedule(() => { timer = null; refresh(); }, Math.max(1, interval() - (now() - lastStart)));
+      }
+    }
+    function refresh() {
+      if (!active || !visible()) return Promise.resolve();
+      if (pending) return pending.promise;
+      clear(); lastStart = now();
+      const job = { controller: new AbortController(), version };
+      const valid = () => active && job.version === version && !job.controller.signal.aborted;
+      job.promise = Promise.resolve().then(() => load(job.controller.signal)).then(data => {
+        if (valid()) onData(data);
+      }).catch(error => { if (valid()) onError(error); }).finally(() => {
+        if (pending === job) { pending = null; emit(); plan(); }
+      });
+      pending = job; emit(); return job.promise;
+    }
+    return Object.freeze({ state, refresh,
+      start(force = false) { active = true; emit(); return !paused || force ? refresh() : Promise.resolve(); },
+      suspend() { active = false; invalidate(); emit(); },
+      stop() { active = false; paused = false; invalidate(); emit(); },
+      setPaused(value) { paused = Boolean(value); invalidate(); emit(); if (active && !paused) return refresh(); return Promise.resolve(); }
+    });
+  }
   function create({ client, onSessionError }) {
     const document = global.document;
     const byId = id => document.getElementById(id);
     const root = byId("overview");
-    let controller;
-    let generation = 0;
     let current;
+    let cached;
+    let receivedAt = 0;
+    const filters = { type: "", service: "", collection: "", exceptional: false };
     function node(tag, className, text) {
       const element = document.createElement(tag);
       if (className) element.className = className;
@@ -104,7 +169,8 @@
       const summary = byId("service-summary");
       summary.replaceChildren();
       for (const [state, count] of Object.entries(data.summary)) {
-        const item = node("div", "summary-item");
+        const item = node("button", "summary-item");
+        item.type = "button";
         item.dataset.service = state;
         item.append(badge(state, SERVICE), node("strong", "", count));
         summary.append(item);
@@ -126,11 +192,13 @@
         if (active.length) card.append(node("small", "muted", `可用 ${active.filter(row => row.service === "AVAILABLE").length} · 异常/未知 ${active.filter(row => row.service !== "AVAILABLE").length}`));
         cards.append(card);
       }
-      byId("instance-count").textContent = `${data.rows.length} 个声明实例`;
+      const rows = data.rows.filter(row => matches(row, filters));
+      byId("instance-count").textContent = `${rows.length} / ${data.rows.length} 个声明实例`;
       const instances = byId("instance-list");
       instances.replaceChildren();
       if (!data.rows.length) instances.append(node("p", "empty-state", "尚未配置监控实例。启用并配置连接后，实例会出现在这里。"));
-      for (const row of data.rows) {
+      else if (!rows.length) instances.append(node("p", "empty-state", "没有匹配的实例，请调整筛选条件。"));
+      for (const row of rows) {
         const article = node("article", "instance-card");
         article.dataset.targetId = row.target.id;
         const header = node("div", "instance-heading");
@@ -163,47 +231,83 @@
         article.append(detail);
         instances.append(article);
       }
-      byId("overview-message").hidden = true;
-      root.setAttribute("aria-busy", "false");
     }
+    function recompute() {
+      if (!cached) return;
+      render(model(cached.catalog, ageSnapshot(cached.snapshot,
+        Date.parse(cached.snapshot.serverTime) + Math.max(0, global.performance.now() - receivedAt))));
+    }
+    const poller = createPoller({
+      visible: () => document.visibilityState === "visible",
+      interval: () => cached?.snapshot.freshnessRules?.refreshIntervalMillis || 15000,
+      async load(signal) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const [catalog, snapshot] = await Promise.all([client.catalog(signal), client.snapshots(signal)]);
+          if (catalog?.generation === snapshot?.generation) { model(catalog, snapshot); return { catalog, snapshot }; }
+        }
+        throw new Error("Directory changed");
+      },
+      onData(data) {
+        cached = data; receivedAt = global.performance.now();
+        byId("overview-message").hidden = true;
+        recompute();
+      },
+      onError(error) {
+        if (["SESSION_EXPIRED", "ACCESS_DENIED", "IDENTITY_UNAVAILABLE", "MONITOR_DISABLED"].includes(error.code)) { onSessionError(error); return; }
+        const message = byId("overview-message"); message.hidden = false;
+        message.textContent = "! 当前快照读取失败，保留上次结果；可手动刷新重试。";
+      },
+      onState(state) {
+        root.setAttribute("aria-busy", String(state.busy));
+        byId("refresh-snapshot").disabled = state.busy;
+        byId("pause-snapshot").textContent = state.paused ? "继续刷新" : "暂停刷新";
+        byId("pause-snapshot").setAttribute("aria-pressed", String(state.paused));
+        const status = byId("refresh-status"); status.dataset.paused = String(state.paused);
+        status.textContent = state.paused ? "◷ 已暂停自动刷新 · 当前显示保留的快照，仍可手动刷新" : state.busy ? "正在读取共享快照…" : "页面可见时每 15 秒读取共享快照";
+      }
+    });
+    for (const [id, labels] of [["filter-type", NAMES], ["filter-service", SERVICE], ["filter-collection", COLLECTION]]) {
+      for (const [value, label] of Object.entries(labels)) {
+        const option = node("option", "", Array.isArray(label) ? label[1] : label); option.value = value; byId(id).append(option);
+      }
+    }
+    function applyFilters() {
+      filters.type = byId("filter-type").value; filters.service = byId("filter-service").value;
+      filters.collection = byId("filter-collection").value; filters.exceptional = byId("filter-exceptional").checked;
+      recompute();
+    }
+    for (const id of ["filter-type", "filter-service", "filter-collection", "filter-exceptional"]) byId(id).addEventListener("change", applyFilters);
+    byId("service-summary").addEventListener("click", event => {
+      const item = event.target.closest("button[data-service]"); if (!item) return;
+      byId("filter-type").value = ""; byId("filter-collection").value = ""; byId("filter-exceptional").checked = false;
+      byId("filter-service").value = item.dataset.service; applyFilters();
+    });
+    byId("type-cards").addEventListener("click", event => {
+      const item = event.target.closest("a[data-type]"); if (!item) return;
+      byId("filter-type").value = item.dataset.type; applyFilters();
+    });
+    byId("refresh-snapshot").addEventListener("click", () => poller.refresh());
+    byId("pause-snapshot").addEventListener("click", () => poller.setPaused(!poller.state().paused));
+    function suspend() { poller.suspend(); root.hidden = true; }
     function stop() {
-      generation++;
-      controller?.abort();
-      controller = null;
-      current = null;
+      poller.stop(); current = null; cached = null;
       root.hidden = true;
       for (const id of ["service-summary", "type-cards", "instance-list"]) byId(id).replaceChildren();
       byId("configuration-summary").textContent = "";
       byId("overview-time").textContent = "";
     }
-    async function start() {
-      stop();
+    function start() {
       root.hidden = false;
-      root.setAttribute("aria-busy", "true");
-      const message = byId("overview-message");
-      message.hidden = false;
-      message.textContent = "正在读取当前快照…";
-      controller = new AbortController();
-      const signal = controller.signal;
-      const version = generation;
-      try {
-        let data;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const [catalog, snapshot] = await Promise.all([client.catalog(signal), client.snapshots(signal)]);
-          if (catalog?.generation === snapshot?.generation) { data = model(catalog, snapshot); break; }
-        }
-        if (!data) throw new Error("Directory changed");
-        if (version === generation && !signal.aborted) render(data);
-      } catch (error) {
-        if (version !== generation || signal.aborted) return;
-        if (["SESSION_EXPIRED", "ACCESS_DENIED", "IDENTITY_UNAVAILABLE", "MONITOR_DISABLED"].includes(error.code)) { onSessionError(error); return; }
-        message.textContent = "! 当前快照读取失败，请重试页面。";
-        root.setAttribute("aria-busy", "false");
+      if (cached) recompute();
+      else {
+        const message = byId("overview-message"); message.hidden = false; message.textContent = "正在读取当前快照…";
       }
+      return poller.start(!cached);
     }
-    return Object.freeze({ start, stop, current: () => current });
+    return Object.freeze({ start, stop, suspend, recompute, current: () => current });
   }
-  const api = Object.freeze({ TYPES, NAMES, SERVICE, COLLECTION, REASONS, SCOPES, model, serviceState, collectionState, metricView, time, scopeText, create });
+  const api = Object.freeze({ TYPES, NAMES, SERVICE, COLLECTION, REASONS, SCOPES, model, serviceState, collectionState, metricView, time, scopeText,
+    exceptional, matches, ageMetric, ageSnapshot, createPoller, create });
   if (typeof module === "object" && module.exports) module.exports = api;
   else global.MonitorOverview = api;
 })(typeof window === "object" ? window : globalThis);

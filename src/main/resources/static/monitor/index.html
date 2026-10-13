@@ -30,6 +30,8 @@
     <section id="overview" class="overview" aria-labelledby="overview-title" hidden>
       <div class="overview-heading"><div><p class="eyebrow">CURRENT SNAPSHOT</p><h2 id="overview-title">中间件总览</h2></div><p id="overview-time" class="muted"></p></div>
       <p id="overview-message" class="overview-message" role="status" aria-live="polite">正在读取当前快照…</p>
+      <div class="monitor-toolbar"><div class="filter-field"><label for="filter-type">类型</label><select id="filter-type"><option value="">全部类型</option></select></div><div class="filter-field"><label for="filter-service">服务状态</label><select id="filter-service"><option value="">全部服务状态</option></select></div><div class="filter-field"><label for="filter-collection">采集状态</label><select id="filter-collection"><option value="">全部采集状态</option></select></div><label class="exception-filter"><input id="filter-exceptional" type="checkbox">仅看异常</label><div class="refresh-actions"><button id="refresh-snapshot" class="secondary-button" type="button">手动刷新</button><button id="pause-snapshot" class="secondary-button" type="button" aria-pressed="false">暂停刷新</button></div></div>
+      <p id="refresh-status" class="muted" role="status" aria-live="polite"></p>
       <div id="service-summary" class="service-summary" aria-label="服务状态汇总"></div>
       <p id="configuration-summary" class="muted"></p>
       <div id="type-cards" class="type-cards" aria-label="中间件类型"></div>
