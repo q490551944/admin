@@ -8,6 +8,7 @@
     CSRF_INVALID: "请求凭证已失效，请重试。",
     IDENTITY_UNAVAILABLE: "认证服务暂不可用，请稍后重试。",
     MONITOR_DISABLED: "监控功能未启用，请联系管理员。",
+    TARGET_NOT_FOUND: "此实例已不在当前监控目录。",
     NETWORK_ERROR: "无法连接服务，请检查网络后重试。",
     REQUEST_FAILED: "请求未完成，请稍后重试。"
   });
@@ -78,7 +79,10 @@
         // A 201 establishes identity only. The allowlist is checked by the current-session endpoint.
         return this.current(signal);
       },
-      logout(signal) { return write("sessions/current", "DELETE", undefined, signal); }
+      logout(signal) { return write("sessions/current", "DELETE", undefined, signal); },
+      catalog(signal) { return request("catalog", { signal }); },
+      snapshots(signal) { return request("snapshots", { signal }); },
+      detail(targetId, signal) { return request("targets/" + encodeURIComponent(targetId), { signal }); }
     });
   }
 

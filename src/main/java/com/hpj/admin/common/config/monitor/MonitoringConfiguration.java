@@ -71,8 +71,8 @@ public class MonitoringConfiguration {
     }
 
     @Bean
-    MonitoringResponseProjector monitoringResponseProjector() {
-        return new MonitoringResponseProjector();
+    MonitoringResponseProjector monitoringResponseProjector(MonitoringProperties properties) {
+        return new MonitoringResponseProjector(properties);
     }
 
     @Bean

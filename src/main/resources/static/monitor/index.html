@@ -13,7 +13,7 @@
     <section class="intro" aria-labelledby="page-title">
       <p class="eyebrow">MIDDLEWARE MONITORING</p>
       <h1 id="page-title">监控入口</h1>
-      <p class="intro-copy">在这里确认账号的监控访问状态。</p>
+      <p class="intro-copy">查看中间件的当前服务状态、采集结果与资源范围。</p>
       <div class="intro-note"><span class="note-line" aria-hidden="true"></span><p>访问由管理员授权。<br>使用完毕后，请退出登录。</p></div>
     </section>
     <section class="card" id="shell" aria-busy="true" aria-label="监控访问状态">
@@ -27,9 +27,23 @@
       <a class="back-link" href="./index.html">返回监控入口 <span aria-hidden="true">↗</span></a>
       <noscript><p class="noscript">请启用 JavaScript 后确认监控访问状态。</p></noscript>
     </section>
+    <section id="overview" class="overview" aria-labelledby="overview-title" hidden>
+      <div class="overview-heading"><div><p class="eyebrow">CURRENT SNAPSHOT</p><h2 id="overview-title">中间件总览</h2></div><p id="overview-time" class="muted"></p></div>
+      <p id="overview-message" class="overview-message" role="status" aria-live="polite">正在读取当前快照…</p>
+      <div class="monitor-toolbar"><div class="filter-field"><label for="filter-type">类型</label><select id="filter-type"><option value="">全部类型</option></select></div><div class="filter-field"><label for="filter-service">服务状态</label><select id="filter-service"><option value="">全部服务状态</option></select></div><div class="filter-field"><label for="filter-collection">采集状态</label><select id="filter-collection"><option value="">全部采集状态</option></select></div><label class="exception-filter"><input id="filter-exceptional" type="checkbox">仅看异常</label><div class="refresh-actions"><button id="refresh-snapshot" class="secondary-button" type="button">手动刷新</button><button id="pause-snapshot" class="secondary-button" type="button" aria-pressed="false">暂停刷新</button></div></div>
+      <p id="refresh-status" class="muted" role="status" aria-live="polite"></p>
+      <div id="service-summary" class="service-summary" aria-label="服务状态汇总"></div>
+      <p id="configuration-summary" class="muted"></p>
+      <div id="type-cards" class="type-cards" aria-label="中间件类型"></div>
+      <div class="instances-heading"><h2 id="instances">实例列表</h2><p id="instance-count" class="muted"></p></div>
+      <div id="instance-list" class="instance-list"></div>
+      <section id="target-detail" class="target-detail" aria-labelledby="detail-title" hidden><div class="overview-heading"><h2 id="detail-title" tabindex="-1">实例详情</h2><button id="detail-close" class="secondary-button" type="button">关闭详情</button></div><p id="detail-identity" class="muted"></p><div id="detail-states" class="instance-states"></div><p id="detail-time" class="muted"></p><p id="detail-message" class="overview-message" role="status" aria-live="polite"></p><button id="detail-retry" class="secondary-button" type="button">重读详情</button><p id="detail-periods" class="muted"></p><div id="detail-metrics"></div><p id="detail-count" class="muted"></p><button id="detail-more" class="secondary-button" type="button" hidden>继续显示 200 项</button><h3 class="collection-title">采集说明</h3><div id="detail-collection"></div></section>
+    </section>
   </main>
   <footer>ADMIN <span aria-hidden="true">·</span> 中间件监控</footer>
   <script src="./session.js"></script>
+  <script src="./overview.js"></script>
+  <script src="./details.js"></script>
   <script src="./app.js" defer></script>
 </body>
 </html>

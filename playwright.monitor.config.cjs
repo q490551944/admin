@@ -1,7 +1,7 @@
 const { defineConfig } = require("@playwright/test");
 
 module.exports = defineConfig({
-  testDir: "src/test/e2e", testMatch: "monitor.spec.cjs", timeout: 45000,
+  testDir: "src/test/e2e", testMatch: ["monitor.spec.cjs", "monitor-overview.spec.cjs"], timeout: 45000,
   expect: { timeout: 10000 }, workers: 1, fullyParallel: false,
   reporter: [["list"], ["html", { outputFolder: "target/monitor-e2e-report", open: "never" }]],
   outputDir: "target/monitor-e2e-results",

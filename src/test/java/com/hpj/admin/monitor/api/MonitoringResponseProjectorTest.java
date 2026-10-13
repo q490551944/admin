@@ -15,6 +15,8 @@ import com.hpj.admin.monitor.scheduling.MonitoringScheduler.ResolutionState;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import com.hpj.admin.common.config.monitor.MonitoringProperties;
 
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -41,6 +43,177 @@ class MonitoringResponseProjectorTest {
     private static final String SOURCE = "sharedRedis";
     private static final MonitoringTarget.Scope EMPTY_SCOPE = scope();
     private final MonitoringResponseProjector projector = new MonitoringResponseProjector();
+
+    @ParameterizedTest
+    @ValueSource(longs = {-1, 0, 1})
+    void metricAndServiceExpiryUseStrictOriginalBoundaries(long offsetNanos) {
+        ReadTarget target = configured("redis-a", binding("redis-a", "0"));
+        StoredMetric ordinary = success("redis-a", CollectionKind.ORDINARY, "redis.commands.rate", "process", 0, SAMPLE_TIME, 45);
+        StoredMetric capacity = success("redis-a", CollectionKind.CAPACITY, "aof.bytes", "volume", 123, SAMPLE_TIME, 180);
+        ReadState state = state(List.of(target), snapshot("redis-a", List.of(
+                attempt("redis-a", CollectionKind.ORDINARY, CollectionStatus.SUCCESS, null),
+                attempt("redis-a", CollectionKind.CAPACITY, CollectionStatus.SUCCESS, null)), List.of(ordinary, capacity),
+                Map.of("redis-a", probe(ServiceAvailability.AVAILABLE, null, "endpoint"))));
+        for (int ttl : List.of(45, 180)) {
+            Instant now = SAMPLE_TIME.plusSeconds(ttl).plusNanos(offsetNanos);
+            DetailResponse detail = projector.detail(state, now, "redis-a").orElseThrow();
+            MetricObservation metric = detail.metrics().get(ttl == 45 ? 0 : 1);
+            assertThat(metric.valueState()).isEqualTo(offsetNanos > 0 ? ValueState.EXPIRED : ValueState.CURRENT);
+            assertThat(metric.validUntil()).isEqualTo(SAMPLE_TIME.plusSeconds(ttl));
+            assertThat(metric.lastSuccess().sampledAt()).isEqualTo(SAMPLE_TIME);
+            assertThat(projector.project(state, now).targets().get(0)).isEqualTo(detail.target());
+            assertThat(detail.capabilities().get(ttl == 45 ? 0 : 1).valueState()).isEqualTo(metric.valueState());
+            if (ttl == 45) {
+                assertThat(detail.metrics().get(1).valueState()).isEqualTo(ValueState.CURRENT);
+                assertThat(detail.target().serviceAvailability()).isEqualTo(offsetNanos > 0 ? ServiceAvailability.UNKNOWN : ServiceAvailability.AVAILABLE);
+                assertThat(detail.target().serviceObservations().get(0).lastObservation().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
+                assertThat(detail.target().serviceObservations().get(0).expired()).isEqualTo(offsetNanos > 0);
+            }
+        }
+        assertThat(state.snapshots().get(0).metrics()).containsExactly(ordinary, capacity);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = ServiceAvailability.class, names = {"AVAILABLE", "DEGRADED", "CONNECTION_FAILED"})
+    void everyExpiredKnownServiceConclusionBecomesUnknownWithoutLosingTheOriginal(ServiceAvailability availability) {
+        ReadTarget target = configured("redis-a", binding("redis-a"));
+        ServiceProbe previous = probe(availability, availability == ServiceAvailability.CONNECTION_FAILED ? MissingReason.TIMEOUT : null, "endpoint");
+        ReadState state = state(List.of(target), snapshot("redis-a", List.of(), List.of(), Map.of("redis-a", previous)));
+        SnapshotResponse response = projector.project(state, SAMPLE_TIME.plusSeconds(45).plusNanos(1));
+        assertThat(response.targets().get(0).serviceAvailability()).isEqualTo(ServiceAvailability.UNKNOWN);
+        assertThat(response.targets().get(0).serviceObservations().get(0).lastObservation()).isSameAs(previous);
+        assertThat(response.serviceSummary().get(ServiceAvailability.UNKNOWN)).isEqualTo(1);
+        assertThat(response.serviceSummary().get(availability)).isZero();
+    }
+
+    @Test
+    void wholeCollectionFailureMarksOmittedValuesImmediatelyWithoutChangingStoredClocks() {
+        ReadTarget target = configured("redis-a", binding("redis-a", "0"));
+        StoredMetric ordinary = success("redis-a", CollectionKind.ORDINARY, "redis.memory.used.bytes", "process", 12, SAMPLE_TIME, 45);
+        StoredMetric capacity = success("redis-a", CollectionKind.CAPACITY, "aof.bytes", "volume", 32, SAMPLE_TIME, 180);
+        Instant failureTime = SAMPLE_TIME.plusSeconds(15);
+        Attempt failed = new Attempt(SOURCE, "redis-a", CollectionKind.ORDINARY, 2, failureTime, failureTime, CollectionStatus.FAILED, MissingReason.TIMEOUT);
+        ReadState state = state(List.of(target), snapshot("redis-a", List.of(failed), List.of(ordinary, capacity), Map.of()));
+        DetailResponse detail = projector.detail(state, failureTime, "redis-a").orElseThrow();
+        MetricObservation retained = detail.metrics().get(0);
+        assertThat(retained.valueState()).isEqualTo(ValueState.LAST_SUCCESS);
+        assertThat(retained.latestAttempt().missingReason()).isEqualTo(MissingReason.TIMEOUT);
+        assertThat(retained.latestAttempt().sampledAt()).isEqualTo(failureTime);
+        assertThat(retained.lastSuccess()).isSameAs(ordinary.lastSuccess());
+        assertThat(retained.validUntil()).isEqualTo(SAMPLE_TIME.plusSeconds(45));
+        assertThat(detail.metrics().get(1).valueState()).isEqualTo(ValueState.CURRENT);
+        assertThat(projector.detail(state, failureTime.plusSeconds(1), "redis-a").orElseThrow().metrics()).isEqualTo(detail.metrics());
+        assertThat(state.snapshots().get(0).metrics()).containsExactly(ordinary, capacity);
+    }
+
+    @Test
+    void partialProbeSuccessCannotRefreshOmittedResourcesOrCapacityAndRecoveryUsesOnlyNewState() {
+        ReadTarget target = configured("redis-a", binding("redis-a", "0"));
+        Instant next = SAMPLE_TIME.plusSeconds(30);
+        StoredMetric probe = success("redis-a", CollectionKind.ORDINARY, "redis.probe.duration", "endpoint", 1, next, 45);
+        StoredMetric memory = success("redis-a", CollectionKind.ORDINARY, "redis.memory.used.bytes", "process", 10, SAMPLE_TIME, 45);
+        StoredMetric capacity = success("redis-a", CollectionKind.CAPACITY, "aof.bytes", "volume", 30, SAMPLE_TIME, 180);
+        Attempt partial = new Attempt(SOURCE, "redis-a", CollectionKind.ORDINARY, 2, next, next, CollectionStatus.PARTIAL, MissingReason.UNAUTHORIZED);
+        ReadState state = state(List.of(target), snapshot("redis-a", List.of(partial), List.of(probe, memory, capacity),
+                Map.of("redis-a", new ServiceProbe(ServiceAvailability.AVAILABLE, null, new Scope(ScopeKind.ENDPOINT, "endpoint", null), next, next.plusSeconds(45)))));
+        DetailResponse detail = projector.detail(state, next.plusSeconds(16), "redis-a").orElseThrow();
+        assertThat(detail.metrics()).extracting(MetricObservation::valueState).containsExactly(ValueState.CURRENT, ValueState.EXPIRED, ValueState.CURRENT);
+        assertThat(detail.metrics().get(1).latestAttempt().missingReason()).isEqualTo(MissingReason.UNAUTHORIZED);
+        assertThat(detail.metrics().get(1).lastSuccess().sampledAt()).isEqualTo(SAMPLE_TIME);
+        assertThat(detail.metrics().get(2).validUntil()).isEqualTo(SAMPLE_TIME.plusSeconds(180));
+        assertThat(detail.target().serviceAvailability()).isEqualTo(ServiceAvailability.AVAILABLE);
+        assertThat(detail.target().exceptional()).isTrue();
+        StoredMetric recovered = success("redis-a", CollectionKind.ORDINARY, "redis.memory.used.bytes", "process", 11, next.plusSeconds(20), 45);
+        ReadState recoveredState = state(List.of(target), snapshot("redis-a", List.of(), List.of(recovered), Map.of()));
+        assertThat(projector.detail(recoveredState, next.plusSeconds(20), "redis-a").orElseThrow().metrics())
+                .singleElement().satisfies(metric -> {
+                    assertThat(metric.valueState()).isEqualTo(ValueState.CURRENT);
+                    assertThat(metric.lastSuccess().value()).isEqualTo(BigDecimal.valueOf(11));
+                });
+        ReadState restarted = new ReadState(GENERATION + 1, ResolutionState.READY, List.of(target), List.of());
+        assertThat(projector.detail(restarted, next, "redis-a").orElseThrow().metrics()).isEmpty();
+    }
+
+    @Test
+    void noSuccessHasNoDataAndNoValidityEvenWhenThereIsARecentFailure() {
+        ReadTarget target = configured("redis-a", binding("redis-a", "0"));
+        StoredMetric unavailable = new StoredMetric(SOURCE, "redis-a", CollectionKind.ORDINARY,
+                MetricSample.missing(definition("cpu", "process"), MissingReason.UNSUPPORTED, SAMPLE_TIME), null);
+        MetricObservation metric = projector.detail(state(List.of(target), snapshot("redis-a", List.of(), List.of(unavailable), Map.of())),
+                SAMPLE_TIME.plusSeconds(1000), "redis-a").orElseThrow().metrics().get(0);
+        assertThat(metric.valueState()).isEqualTo(ValueState.NO_DATA);
+        assertThat(metric.validUntil()).isNull(); assertThat(metric.lastSuccess()).isNull();
+        assertThat(metric.latestAttempt().missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+    }
+
+    @Test
+    void successfulLightweightAttemptKeepsAnOlderResourceDeadlineInTheBoundedOverview() {
+        ReadTarget target = configured("redis-a", binding("redis-a"));
+        Instant next = SAMPLE_TIME.plusSeconds(30);
+        StoredMetric current = success("redis-a", CollectionKind.ORDINARY, "redis.probe.duration", "endpoint", 1, next, 45);
+        StoredMetric older = success("redis-a", CollectionKind.ORDINARY, "redis.memory.used.bytes", "process", 4, SAMPLE_TIME, 45);
+        Attempt attempt = new Attempt(SOURCE, "redis-a", CollectionKind.ORDINARY, 2, next, next, CollectionStatus.SUCCESS, null);
+        ReadState state = state(List.of(target), snapshot("redis-a", List.of(attempt), List.of(current, older), Map.of()));
+        CollectionObservation collection = projector.project(state, next).targets().get(0).collections().get(0);
+        assertThat(collection.validUntil()).isEqualTo(next.plusSeconds(45));
+        assertThat(collection.valuesValidUntil()).isEqualTo(SAMPLE_TIME.plusSeconds(45));
+        TargetOverview expired = projector.project(state, SAMPLE_TIME.plusSeconds(46)).targets().get(0);
+        assertThat(expired.collections().get(0).status()).isEqualTo(CollectionStatus.STALE);
+        assertThat(expired.coreMetrics()).extracting(MetricObservation::valueState).containsExactly(ValueState.CURRENT, ValueState.EXPIRED);
+    }
+
+    @Test
+    void publicRulesUseConfiguredPeriodsAndMutuallyExclusiveSummaryUsesCurrentServiceProjection() {
+        MonitoringProperties properties = new MonitoringProperties();
+        properties.setRefreshInterval(Duration.ofSeconds(4)); properties.setOrdinaryInterval(Duration.ofSeconds(2));
+        properties.setCapacityInterval(Duration.ofSeconds(10)); properties.setServiceTtl(Duration.ofSeconds(9));
+        MonitoringResponseProjector configuredProjector = new MonitoringResponseProjector(properties);
+        ReadTarget a = configured("a", binding("a")), b = configured("b", binding("b"));
+        ReadTarget disabled = target("disabled", MiddlewareType.MINIO, DISABLED, ResolvedTarget.Reason.DISABLED, List.of());
+        ReadState state = state(List.of(a, b, disabled), snapshot("a", List.of(), List.of(), Map.of("a", probe(ServiceAvailability.AVAILABLE, null, "endpoint"))));
+        SnapshotResponse snapshot = configuredProjector.project(state, SAMPLE_TIME.plusSeconds(46));
+        assertThat(snapshot.freshnessRules()).isEqualTo(new FreshnessRules(4000, 2000, 10000, 9000, 3, true));
+        assertThat(snapshot.serviceSummary().get(ServiceAvailability.UNKNOWN)).isEqualTo(2);
+        assertThat(snapshot.serviceSummary().values().stream().mapToInt(Integer::intValue).sum()).isEqualTo(2);
+        assertThat(snapshot.targets().get(2).exceptional()).isFalse();
+    }
+
+    @Test
+    void overviewPreviewIsBoundedAndKeepsFailedSeriesOriginalSuccessAndScope() {
+        ReadTarget target = configured("redis-a", binding("redis-a", "0"));
+        StoredMetric old = success("redis-a", CollectionKind.ORDINARY, "redis.commands.rate", "native-node", 0, SAMPLE_TIME, 45);
+        StoredMetric failed = new StoredMetric(SOURCE, "redis-a", CollectionKind.ORDINARY,
+                MetricSample.missing(old.latestAttempt().definition(), MissingReason.TIMEOUT, SAMPLE_TIME.plusSeconds(10)), old.lastSuccess());
+        List<StoredMetric> metrics = new ArrayList<>();
+        metrics.add(success("redis-a", CollectionKind.CAPACITY, "capacity.bytes", "disk", 99, SAMPLE_TIME, 180));
+        metrics.add(success("redis-a", CollectionKind.ORDINARY, "redis.memory.used.bytes", "native-node", 512, SAMPLE_TIME, 45));
+        metrics.add(failed);
+        metrics.add(success("redis-a", CollectionKind.ORDINARY, "redis.probe.duration", "endpoint", 7, SAMPLE_TIME, 45));
+        for (int i = 0; i < 50; i++) metrics.add(success("redis-a", CollectionKind.ORDINARY, "other." + i, "scope", i, SAMPLE_TIME, 45));
+        ReadState state = state(List.of(target), snapshot("redis-a", List.of(), metrics, Map.of()));
+
+        TargetOverview overview = projector.project(state, SERVER_TIME).targets().get(0);
+        assertThat(overview.metricCount()).isEqualTo(54);
+        assertThat(overview.coreMetrics()).extracting(metric -> metric.latestAttempt().definition().key())
+                .containsExactly("redis.probe.duration", "redis.commands.rate", "redis.memory.used.bytes");
+        assertThat(overview.coreMetrics().get(1).latestAttempt()).isSameAs(failed.latestAttempt());
+        assertThat(overview.coreMetrics().get(1).lastSuccess().value()).isEqualTo(BigDecimal.ZERO);
+        assertThat(overview.coreMetrics().get(1).lastSuccess().sampledAt()).isEqualTo(SAMPLE_TIME);
+        assertThat(overview.coreMetrics().get(1).latestAttempt().definition().scope().id()).isEqualTo("native-node");
+        assertThat(projector.detail(state, SERVER_TIME, "redis-a").orElseThrow().target()).isEqualTo(overview);
+        assertThatThrownBy(() -> overview.coreMetrics().clear()).isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @ParameterizedTest
+    @EnumSource(MiddlewareType.class)
+    void everyTypeCanPreviewItsOriginalOrdinaryValuesWithoutCapacityOrInventedFields(MiddlewareType type) {
+        ReadTarget target = target("target", type, CONFIGURED, ResolvedTarget.Reason.CONFIGURED, List.of(binding("target")));
+        StoredMetric original = success("target", CollectionKind.ORDINARY, "native.value", "node-a", 0, SAMPLE_TIME, 45);
+        StoredMetric capacity = success("target", CollectionKind.CAPACITY, "storage.bytes", "volume-a", 1, SAMPLE_TIME, 180);
+        ReadState state = state(List.of(target), snapshot("target", List.of(), List.of(capacity, original), Map.of()));
+        assertThat(projector.project(state, SERVER_TIME).targets().get(0).coreMetrics()).extracting(MetricObservation::latestAttempt).containsExactly(original.latestAttempt());
+        assertThat(projector.project(state(List.of(target)), SERVER_TIME).targets().get(0).coreMetrics()).isEmpty();
+    }
 
     @Test
     void catalogAlwaysContainsSixTypesAndKeepsConfigurationCountsSeparate() {
@@ -168,7 +341,7 @@ class MonitoringResponseProjectorTest {
                 .containsExactly(available, unknown);
         assertThat(response.capabilities()).extracting(MetricCapability::capability)
                 .containsExactly(Capability.AVAILABLE, Capability.UNAUTHORIZED);
-        assertThat(response.metrics()).extracting(StoredMetric::bindingId).containsExactly("redis-a", "redis-b");
+        assertThat(response.metrics()).extracting(MetricObservation::bindingId).containsExactly("redis-a", "redis-b");
         assertThat(response.target().missingMetricCount()).isEqualTo(1);
         // Only the canonical display target is addressable, even when a merged member has observations.
         assertThat(projector.detail(state(List.of(target), sample), SERVER_TIME, "redis-b")).isEmpty();
@@ -194,7 +367,7 @@ class MonitoringResponseProjectorTest {
 
         assertThat(response.metrics().get(0).latestAttempt().value()).isEqualTo(BigDecimal.ZERO);
         assertThat(response.metrics().get(0).latestAttempt().missingReason()).isNull();
-        StoredMetric capacity = response.metrics().get(1);
+        MetricObservation capacity = response.metrics().get(1);
         assertThat(capacity.latestAttempt().value()).isNull();
         assertThat(capacity.latestAttempt().missingReason()).isEqualTo(MissingReason.TIMEOUT);
         assertThat(capacity.lastSuccess().sampledAt()).isEqualTo(capacityTime);
@@ -204,8 +377,12 @@ class MonitoringResponseProjectorTest {
         assertThat(response.capabilities().get(1).lastSuccessAt()).isEqualTo(capacityTime);
         assertThat(response.capabilities().get(1).sampledAt()).isEqualTo(SAMPLE_TIME);
         assertThat(response.capabilities().get(1).latestMissingReason()).isEqualTo(MissingReason.TIMEOUT);
-        assertThat(later.metrics()).isEqualTo(response.metrics());
-        assertThat(later.capabilities()).isEqualTo(response.capabilities());
+        assertThat(later.metrics()).extracting(MetricObservation::lastSuccess)
+                .containsExactlyElementsOf(response.metrics().stream().map(MetricObservation::lastSuccess).toList());
+        assertThat(later.metrics()).extracting(MetricObservation::latestAttempt)
+                .containsExactlyElementsOf(response.metrics().stream().map(MetricObservation::latestAttempt).toList());
+        assertThat(later.metrics()).extracting(MetricObservation::valueState).containsOnly(ValueState.EXPIRED);
+        assertThat(later.capabilities()).extracting(MetricCapability::valueState).containsOnly(ValueState.EXPIRED);
         assertThat(sample.metrics()).containsExactly(ordinaryZero, timedOut);
     }
 
@@ -278,7 +455,7 @@ class MonitoringResponseProjectorTest {
 
         DetailResponse response = projector.detail(state(List.of(target), sample), SERVER_TIME, "redis-a").orElseThrow();
 
-        assertThat(response.metrics()).containsExactly(first, second);
+        assertThat(response.metrics()).extracting(MetricObservation::latestAttempt).containsExactly(first.latestAttempt(), second.latestAttempt());
         assertThat(response.metrics()).extracting(metric -> metric.latestAttempt().definition().scope().id())
                 .containsExactly("db-0", "db-1");
         assertThat(response.target().metricCount()).isEqualTo(2);
@@ -316,7 +493,7 @@ class MonitoringResponseProjectorTest {
 
         assertThat(state.targets()).containsExactly(target);
         assertThat(snapshot.metrics()).containsExactly(metric);
-        assertThat(detail.metrics()).containsExactly(metric);
+        assertThat(detail.metrics()).extracting(MetricObservation::latestAttempt).containsExactly(metric.latestAttempt());
         assertThat(projector.detail(state, SERVER_TIME, "redis-a")).contains(detail);
         assertThatThrownBy(() -> catalog.types().clear()).isInstanceOf(UnsupportedOperationException.class);
         assertThatThrownBy(() -> overview.targets().clear()).isInstanceOf(UnsupportedOperationException.class);
@@ -345,7 +522,7 @@ class MonitoringResponseProjectorTest {
         assertThat(reads.snapshots().serverTime()).isEqualTo(SERVER_TIME.plusSeconds(1));
         DetailResponse detail = reads.detail("redis-a").orElseThrow();
         assertThat(detail.serverTime()).isEqualTo(SERVER_TIME.plusSeconds(2));
-        assertThat(detail.metrics()).containsExactly(metric);
+        assertThat(detail.metrics()).extracting(MetricObservation::latestAttempt).containsExactly(metric.latestAttempt());
         assertThat(detail.metrics().get(0).latestAttempt().sampledAt()).isEqualTo(SAMPLE_TIME);
         assertThat(detail.metrics().get(0).latestAttempt().validUntil()).isEqualTo(SAMPLE_TIME.plusSeconds(45));
         verify(scheduler, times(3)).readState();

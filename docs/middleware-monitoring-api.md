@@ -1,6 +1,6 @@
 # 当前监控数据 API
 
-实现 issue #25。API 使用现有监控会话与服务端用户 ID 白名单；聊天开关不影响权限。
+实现 issue #25、#40 和 #44。API 使用现有监控会话与服务端用户 ID 白名单；聊天开关不影响权限。
 
 | 方法与路由 | 内容 |
 | --- | --- |
@@ -32,13 +32,21 @@
 
 `serviceObservations` 按 binding 返回最后服务观测；无观测时为 `UNKNOWN/WAITING_SAMPLE` 且 `lastObservation=null`。权限不足、统计不支持或采集超时不据此变成连接失败。采集状态和服务观测彼此独立。
 
-详情 `metrics` 复用 `StoredMetric` 契约：每项保留来源、binding、普通/容量类别、`latestAttempt` 和可空的 `lastSuccess`。定义中的原生对象范围、来源、单位和计算说明原样返回；真实 0 保持为数值，不可采则保持 null 和具体原因。容量值的时间不因普通采集刷新。
+详情 `metrics` 和总览 `coreMetrics` 使用同一指标投影：每项保留来源、binding、普通/容量类别、`latestAttempt` 和可空的 `lastSuccess`，并附 `valueState/validUntil`。定义中的原生对象范围、来源、单位和计算说明原样返回；真实 0 保持为数值，不可采则保持 null 和具体原因。容量值的时间不因普通采集刷新。
 
 `capabilityState=UNKNOWN` 表示尚无逐指标证据；`OBSERVED` 只表示存在观测，不保证所有指标可采。每个 capability 基于该指标最后尝试：成功为 `AVAILABLE`，权限不足、不支持、不适用分别保留 `UNAUTHORIZED/UNSUPPORTED/NOT_APPLICABLE`，超时、失败等为 `UNKNOWN`。每项附 `sampledAt/lastSuccessAt/validUntil`，不得把服务连通或存在适配器解释为远端所有资源可采。
 
-这些字段描述最后观测。指标和服务各自的有效期均保留，GET 不延长有效期；当前过期状态和旧值投影由 #44 在 `MonitoringResponseProjector` 接入。`PARTIAL` 不升级成成功，也不按返回指标数量计算对象覆盖率。底层 `inventoryComplete` 仅用于清理退出身份清单的指标，不是完整集群覆盖证明。
+`valueState` 为 `CURRENT/LAST_SUCCESS/EXPIRED/NO_DATA`：成功样本仍有效为当前值；最近尝试失败且旧成功值有效为上次成功值；超过旧成功样本自身 `validUntil` 为已过期；从未成功为暂无数据且有效期为 null。边界是严格超过，等于有效期仍有效。普通默认 15 秒、容量 60 秒，各自使用周期 3 倍的 TTL；服务观测默认 45 秒。实际有效期来自原始成功样本，读取不会延长。
 
-总览有意不复制所有指标；当前数值和能力详情从目标详情读取。#40 增加首页核心数值时应选择固定、有界的指标摘要，不能让调用方指定任意原生命令或指标查询。
+整轮失败或部分采集没有返回旧系列时，投影为该 binding/kind 附上对应失败原因，保留旧成功值及其原时间；当前轮已明确读取的部分成功项仍保留自己的证据。投影不回写内存。原始最后探测保存在 `lastObservation`，过期后的当前 `availability=UNKNOWN/expired=true`；不会把权限、TLS 或统计缺失当作服务宕机。
+
+目标返回统一 `serviceAvailability/collectionStatus/exceptional`；`serviceSummary` 只互斥计数 ACTIVE 目标。`collections` 附最近整轮有效期和独立的 `valuesValidUntil`（该 binding/kind 最早成功值有效期），轻量探测成功不能隐藏未展开指标的过期。详情和列表在同一 `serverTime` 下投影一致。
+
+快照/详情下发 `freshnessRules`：实际刷新/普通/容量周期、服务 TTL、指标 TTL 倍数与 `expiresAfterValidUntil=true`，供页面采用相同规则。所有时间为 ISO 字符串。重复读取只改变响应的服务器时间和由此推算的状态，不补历史。
+
+`PARTIAL` 不升级成成功，也不按返回指标数量计算对象覆盖率。底层 `inventoryComplete` 仅用于清理退出身份清单的指标，不是完整集群覆盖证明。
+
+总览最多返回三条原始普通核心指标，不复制全部指标、不跨 scope 合并。完整数值与能力从受保护详情读取；调用方不能指定任意原生命令或指标查询。
 
 ## 一致性和边界
 
@@ -60,3 +68,5 @@
 | 5000 项指标详情 | 354.19 ms | 5,882,386 bytes |
 
 测量期间 resolver 和 adapter 调用增量均为 0。CI 使用相同测试门槛并归档 `target/monitor-api-performance.json`。详情响应较大，前端总览不应为每个卡片循环下载所有详情。
+
+2026-10-13 在相同本机环境验证 #44：总览 P95 262.07 ms、最大 76,461 bytes；详情 P95 366.31 ms、最大 6,295,270 bytes。仍为 20×5000、五个独立授权页面，读取期间解析与采集增量为 0。此项为受 API 投影变更影响的专项性能检查。
