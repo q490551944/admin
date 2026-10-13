@@ -138,3 +138,35 @@ test("late aborted responses cannot overwrite a resumed page or restore private 
   const denied = h.poller.refresh(); await h.flush(); h.poller.stop(); h.reads[2].resolve("private"); await denied;
   assert.deepEqual(h.rendered, ["fresh"]); assert.equal(h.timers.size, 0);
 });
+
+test("server clock measures elapsed monotonic time regardless of the client wall clock", () => {
+  let monotonic = 5000;
+  const clock = monitor.createServerClock(at, () => monotonic), base = Date.parse(at);
+  const originalWall = Date.now;
+  try {
+    Date.now = () => Date.parse("2045-01-01T00:00:00Z"); monotonic += 44000;
+    assert.equal(clock(), base + 44000);
+    Date.now = () => 0; monotonic += 1000; assert.equal(clock(), base + 45000);
+  } finally { Date.now = originalWall; }
+});
+
+test("freshness keeps the exact deadline valid and distinguishes a never-observed metric", () => {
+  const base = Date.parse(at);
+  assert.equal(monitor.freshnessText(at, base), "截止时刻仍有效");
+  assert.equal(monitor.freshnessText(at, base + 1), "已过期");
+  assert.equal(monitor.freshnessText(new Date(base + 1001).toISOString(), base), "有效期剩余 2 秒");
+  assert.equal(monitor.freshnessText(null, base), "暂无成功样本有效期");
+});
+
+test("unauthorized metrics do not prove a service down and expired service states feed summary and exceptional filters", () => {
+  const base = Date.parse(at), until = new Date(base + 45000).toISOString();
+  const rows = ["AVAILABLE", "DEGRADED", "CONNECTION_FAILED"].map((availability, index) => ({ ...row(String(index), "ACTIVE", [availability], ["UNAUTHORIZED"]),
+    serviceObservations: [{ availability, reason: "UNAUTHORIZED", validUntil: until }], collections: [{ status: "UNAUTHORIZED", validUntil: until }] }));
+  const original = { generation: 1, serverTime: at, targets: rows };
+  const catalog = { generation: 1, types: [{ targets: rows.map(row => row.target) }] };
+  assert.equal(monitor.model(catalog, monitor.ageSnapshot(original, base + 15000)).rows[0].service, "AVAILABLE");
+  const aged = monitor.model(catalog, monitor.ageSnapshot(original, base + 45001));
+  assert.deepEqual(aged.summary, { AVAILABLE: 0, DEGRADED: 0, CONNECTION_FAILED: 0, UNKNOWN: 3 });
+  assert.equal(aged.rows.filter(row => monitor.matches(row, { exceptional: true, service: "UNKNOWN" })).length, 3);
+  assert.equal(original.targets[0].serviceObservations[0].availability, "AVAILABLE");
+});
