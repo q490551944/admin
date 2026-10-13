@@ -37,9 +37,19 @@ public final class MinioMonitoringAdapter implements MonitoringAdapter {
 
     @Override public CollectionResult collect(CollectionRequest request) {
         Instant started = atLeast(request.scheduledAt());
-        // Capacity and optional native metrics have a separate capability; no S3 object enumeration is permitted.
+        boolean nativeEnabled = connections.metricsEnabled(request);
         if (request.kind() == CollectionKind.CAPACITY) {
-            return new CollectionResult(CollectionStatus.UNSUPPORTED, started, started, List.of(), null, false, MissingReason.NOT_APPLICABLE);
+            MinioNativeMetrics.Result result = MinioNativeMetrics.unavailable(request, started, MissingReason.UNSUPPORTED);
+            if (nativeEnabled) try (MinioMonitoringConnections.Session session = connections.open(request)) {
+                result = nativeMetrics(request, session, started);
+            } catch (MinioMonitoringConnections.Failure unavailable) {
+                result = MinioNativeMetrics.unavailable(request, atLeast(started), unavailable.reason());
+            } catch (CollectionControl.InactiveCollectionException inactive) {
+                result = MinioNativeMetrics.unavailable(request, atLeast(started), inactive.reason());
+            }
+            boolean any = result.metrics().stream().anyMatch(metric -> metric.value() != null && !metric.definition().key().endsWith("available") && !metric.definition().key().endsWith("truncated"));
+            return new CollectionResult(result.reason() == null ? CollectionStatus.SUCCESS : any ? CollectionStatus.PARTIAL : failureStatus(result.reason()),
+                    started, atLeast(started), result.metrics(), null, result.inventoryComplete(), result.reason());
         }
         List<String> configured = configuredBuckets(request);
         int limit = Math.min(MinioMonitoringConnections.MAX_BUCKETS, Math.max(0, properties.getLimits().getBuckets()));
@@ -50,6 +60,7 @@ public final class MinioMonitoringAdapter implements MonitoringAdapter {
         MissingReason failure = null;
         boolean connectionFailure = false;
         Instant previous = started;
+        MinioNativeMetrics.Result nativeResult = MinioNativeMetrics.unavailable(request, started, MissingReason.UNSUPPORTED);
         try {
             request.control().checkActive();
             try (MinioMonitoringConnections.Session session = connections.open(request)) {
@@ -64,6 +75,10 @@ public final class MinioMonitoringAdapter implements MonitoringAdapter {
                             : missing(MissingReason.INVALID_VALUE, false, previous);
                     buckets.put(bucket, read);
                     previous = read.at();
+                }
+                if (nativeEnabled) {
+                    nativeResult = nativeMetrics(request, session, previous);
+                    previous = atLeast(previous);
                 }
             }
         } catch (MinioMonitoringConnections.Failure error) {
@@ -97,7 +112,22 @@ public final class MinioMonitoringAdapter implements MonitoringAdapter {
                 truncated, reason == null && !truncated, finished);
         CollectionStatus status = reason == null ? truncated ? CollectionStatus.PARTIAL : CollectionStatus.SUCCESS
                 : anyConclusion ? CollectionStatus.PARTIAL : failureStatus(reason);
-        return new CollectionResult(status, started, finished, metrics, probe(health.get(HealthEndpoint.LIVE), endpointScope), !truncated, reason);
+        metrics.addAll(nativeResult.metrics());
+        if (nativeEnabled && nativeResult.reason() != null) { reason = reason == null ? nativeResult.reason() : reason; status = anyConclusion ? CollectionStatus.PARTIAL : failureStatus(reason); }
+        return new CollectionResult(status, started, finished, metrics, probe(health.get(HealthEndpoint.LIVE), endpointScope), !truncated && (!nativeEnabled || nativeResult.inventoryComplete()), reason);
+    }
+
+    private MinioNativeMetrics.Result nativeMetrics(CollectionRequest request, MinioMonitoringConnections.Session session, Instant previous) {
+        try {
+            request.control().checkActive();
+            var observation = session.metrics(request.kind() == CollectionKind.CAPACITY ? MinioMonitoringConnections.MetricsEndpoint.CLUSTER : MinioMonitoringConnections.MetricsEndpoint.NODE);
+            request.control().checkActive();
+            return MinioNativeMetrics.map(request, properties, observation, atLeast(previous));
+        } catch (MinioMonitoringConnections.Failure failure) {
+            return MinioNativeMetrics.unavailable(request, atLeast(previous), failure.reason());
+        } catch (CollectionControl.InactiveCollectionException inactive) {
+            return MinioNativeMetrics.unavailable(request, atLeast(previous), inactive.reason());
+        }
     }
 
     private static List<String> configuredBuckets(CollectionRequest request) {
