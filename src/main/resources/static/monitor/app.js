@@ -30,8 +30,8 @@
     return { signal, valid: () => version === generation && !signal.aborted };
   }
 
-  function display(title, text, kind = "neutral") {
-    overview?.stop();
+  function display(title, text, kind = "neutral", preserveOverview = false) {
+    if (!preserveOverview) overview?.stop();
     heading.textContent = title;
     description.textContent = text;
     panel.dataset.kind = kind;
@@ -70,6 +70,7 @@
   function showError(error, operation) {
     const code = error.code || "REQUEST_FAILED";
     if (code === "SESSION_EXPIRED") {
+      overview?.stop();
       if (loginPage) showLogin();
       else window.location.replace("./login.html?reason=expired");
       return;
@@ -92,7 +93,8 @@
   async function check() {
     if (mutating) return;
     const task = begin();
-    display("正在确认身份", "正在检查登录状态与监控查看权限。");
+    overview?.suspend();
+    display("正在确认身份", "正在检查登录状态与监控查看权限。", "neutral", true);
     busy(true);
     try {
       const current = await client.current(task.signal);
@@ -101,7 +103,7 @@
         window.location.replace("./index.html");
         return;
       }
-      display("查看权限已确认", "当前账号已获授权，可以访问监控。", "success");
+      display("查看权限已确认", "当前账号已获授权，可以访问监控。", "success", true);
       byId("identity-name").textContent = current.username;
       identity.hidden = false;
       logout.hidden = false;
@@ -165,6 +167,7 @@
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") check();
+    else overview?.suspend();
   });
   window.addEventListener("pagehide", () => {
     active?.abort();

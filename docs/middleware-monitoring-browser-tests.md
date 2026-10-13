@@ -12,7 +12,7 @@
 .\mvnw.cmd -B -DskipTests test-compile dependency:build-classpath '-Dmdep.outputFile=target/monitor-e2e-classpath.txt' '-DincludeScope=test'
 npm ci
 npx playwright install chromium
-npm test
+node --test src/test/js/monitor-session.test.cjs src/test/js/monitor-overview.test.cjs
 npm run test:monitor:e2e
 ```
 
@@ -37,6 +37,12 @@ runner 为每次执行创建随机控制令牌，通过进程环境传给测试�
 测试不拦截或伪造监控认证 API。异常在测试应用的员工 Mapper 边界注入，CSRF 验证由真实过滤链完成。认证竞态由 `src/test/js/monitor-session.test.cjs` 补充。`monitor-overview.spec.cjs` 仅在浏览器测试中提供目录/快照夹具，覆盖六类卡片、同类型多目标、互斥服务汇总、等待首样本、部分采集、真实零值、旧值与 XSS 名称，以及 1280px/390px 无横向溢出；夹具不进入正式页面。
 
 总览 API 的 `coreMetrics` 最多返回三条原始普通指标，包含范围、单位、最近尝试和独立的上次成功样本；不会跨来源或对象相加。完整数据仍由受保护详情 API 提供。
+
+总览按类型、服务状态和采集状态组合筛选；“仅看异常”包含配置问题、未知服务和异常采集，排除未启用目标。点击服务汇总会清除其他条件，以便筛选结果与汇总数量一致。筛选只操作当前快照，不请求 API。
+
+页面可见且未暂停时，每 15 秒以 GET 读取共享目录/快照，手动刷新使用相同接口并复用正在进行的请求。暂停会中止当前读取，仍可手动读取；继续会立即读取。返回前台先复查权限，按服务器时间和单调时钟重算各自有效期；暂停状态保留，只有未暂停时自动读取。权限失效会清除私有数据，迟到响应不会恢复旧内容。五页面浏览器用例验证每页最多一个并发读取且不发送采集写请求；后端只读链路的零采集调用由 API 测试验证。
+
+只验证刷新改动可运行 `npm run test:monitor:e2e -- --grep 'combined overview|automatic shared|background return|aborted old|five pages'`；布局或登录生命周期发生变化时，加跑对应桌面、手机和授权用例。完整浏览器集由既有 CI 自动执行。
 
 每次测试结束时 runner 停止自己启动的应用，H2 数据随进程销毁。应用日志位于 `target/monitor-e2e-<随机 ID>/app.log`，HTML 报告位于 `target/monitor-e2e-report/`，截图和失败 trace 位于 `target/monitor-e2e-results/`。桌面和手机的登录页、入口页、故障页截图在成功运行时也保留。
 

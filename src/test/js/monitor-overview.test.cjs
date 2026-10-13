@@ -71,3 +71,70 @@ test("backend expiry marks a retained zero as old and does not invent a zero for
   const empty = monitor.metricView({ latestAttempt: { ...sample, value: null, missingReason: "WAITING_SAMPLE" }, valueState: "NO_DATA" });
   assert.equal(empty.text, "—"); assert.equal(empty.note, "等待采样"); assert.equal(empty.sample, null);
 });
+
+test("combined filters match active summary counts, include configuration exceptions and exclude disabled targets", () => {
+  const rows = model([row("ok"), row("bad", "ACTIVE", ["AVAILABLE"], ["FAILED"]),
+    row("missing", "CONFIGURATION_MISSING"), row("disabled", "DISABLED")]).rows;
+  assert.deepEqual(rows.filter(item => monitor.matches(item, { type: "REDIS", service: "AVAILABLE", collection: "FAILED", exceptional: true })).map(item => item.target.id), ["bad"]);
+  assert.equal(rows.filter(item => monitor.matches(item, { service: "AVAILABLE" })).length, 2);
+  assert.deepEqual(rows.filter(item => monitor.matches(item, { exceptional: true })).map(item => item.target.id), ["bad", "missing"]);
+  assert.equal(rows.filter(item => monitor.matches(item, { type: "MYSQL" })).length, 0);
+});
+
+test("returning to a retained snapshot uses each server deadline, preserves failure priority and never mutates the cache", () => {
+  const atMillis = Date.parse(at);
+  const deadline = delay => new Date(atMillis + delay).toISOString();
+  const original = { targets: [{ ...row("a"), coreMetrics: [
+    { valueState: "CURRENT", validUntil: deadline(45000) }, { valueState: "CURRENT", validUntil: deadline(180000) }],
+    serviceObservations: [{ availability: "AVAILABLE", validUntil: deadline(45000) }],
+    collections: [{ status: "SUCCESS", validUntil: deadline(45000), valuesValidUntil: deadline(45000) },
+      { status: "FAILED", validUntil: deadline(90000), valuesValidUntil: deadline(45000) }] }] };
+  assert.equal(monitor.ageSnapshot(original, atMillis + 45000).targets[0].serviceObservations[0].availability, "AVAILABLE");
+  const aged = monitor.ageSnapshot(original, atMillis + 45001).targets[0];
+  assert.equal(aged.serviceObservations[0].availability, "UNKNOWN");
+  assert.deepEqual(aged.coreMetrics.map(item => item.valueState), ["EXPIRED", "CURRENT"]);
+  assert.deepEqual(aged.collections.map(item => item.status), ["STALE", "FAILED"]);
+  assert.equal(original.targets[0].coreMetrics[0].valueState, "CURRENT");
+});
+
+function pollingHarness() {
+  let millis = 0, visible = true, handle = 0;
+  const timers = new Map(), reads = [], rendered = [], errors = [];
+  const poller = monitor.createPoller({ now: () => millis, visible: () => visible,
+    schedule(callback, delay) { const id = ++handle; timers.set(id, { callback, at: millis + delay }); return id; },
+    cancel(id) { timers.delete(id); },
+    load(signal) { return new Promise((resolve, reject) => reads.push({ signal, resolve, reject })); },
+    onData(data) { rendered.push(data); }, onError(error) { errors.push(error); }
+  });
+  return { poller, reads, rendered, errors,
+    async flush() { await new Promise(resolve => setImmediate(resolve)); },
+    async advance(delay) { millis += delay; for (const [id, timer] of [...timers]) if (timer.at <= millis) { timers.delete(id); timer.callback(); } await this.flush(); },
+    setVisible(value) { visible = value; }, timers };
+}
+
+test("manual and automatic reads share one pending request and continue on the 15-second cadence", async () => {
+  const h = pollingHarness(); const first = h.poller.start(); await h.flush();
+  assert.equal(h.poller.refresh(), first); await h.advance(15000); assert.equal(h.reads.length, 1);
+  h.reads[0].resolve("first"); await first; await h.advance(1); assert.equal(h.reads.length, 2);
+  h.reads[1].resolve("next"); await h.flush(); await h.advance(14999); assert.equal(h.reads.length, 2);
+  await h.advance(1); assert.equal(h.reads.length, 3); h.poller.stop();
+});
+
+test("paused pages allow manual reads, retain pause across background auth checks and resume immediately", async () => {
+  const h = pollingHarness(); const first = h.poller.start(); await h.flush(); h.reads[0].resolve("first"); await first;
+  await h.poller.setPaused(true); await h.advance(60000); assert.equal(h.reads.length, 1);
+  const manual = h.poller.refresh(); await h.flush(); h.reads[1].resolve("manual"); await manual;
+  h.setVisible(false); h.poller.suspend(); await h.advance(60000); h.setVisible(true); await h.poller.start();
+  assert.equal(h.poller.state().paused, true); assert.equal(h.reads.length, 2);
+  const resumed = h.poller.setPaused(false); await h.flush(); assert.equal(h.reads.length, 3);
+  h.reads[2].resolve("resumed"); await resumed; h.poller.stop();
+});
+
+test("late aborted responses cannot overwrite a resumed page or restore private data after stop", async () => {
+  const h = pollingHarness(); const old = h.poller.start(); await h.flush(); h.poller.suspend();
+  assert.equal(h.reads[0].signal.aborted, true);
+  const fresh = h.poller.start(); await h.flush(); h.reads[1].resolve("fresh"); await fresh;
+  h.reads[0].resolve("late"); await old; assert.deepEqual(h.rendered, ["fresh"]);
+  const denied = h.poller.refresh(); await h.flush(); h.poller.stop(); h.reads[2].resolve("private"); await denied;
+  assert.deepEqual(h.rendered, ["fresh"]); assert.equal(h.timers.size, 0);
+});
