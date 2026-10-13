@@ -153,8 +153,8 @@ class MonitoringRedisAdapterIntegrationTest {
                 var commands = observer.sync();
                 // Configuration changes belong to this disposable fixture, before the read-only interval.
                 assertThat(commands.configSet("maxmemory", "0")).isEqualTo("OK");
+                assertThat(commands.configSet("appendonly", aofEnabled ? "yes" : "no")).isEqualTo("OK");
                 if (aofEnabled) {
-                    assertThat(commands.configSet("appendonly", "yes")).isEqualTo("OK");
                     await().atMost(Duration.ofSeconds(15)).until(() -> {
                         Map<String, String> persistence = parse(commands.info("persistence"));
                         return "0".equals(persistence.get("aof_rewrite_in_progress"))
