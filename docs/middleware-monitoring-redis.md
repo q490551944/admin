@@ -1,4 +1,4 @@
-# Redis 运行状态与命令指标
+# Redis 运行状态、命令与资源指标
 
 启用 Redis 目标后，普通调度通过已经解析的实际连接配置读取当前进程指标。HTTP 接口只读取共享快照，不因页面刷新向 Redis 发出额外请求。
 
@@ -33,12 +33,24 @@ monitor:
 | `redis.rdb.last_bgsave.status` | rdb_last_bgsave_status |
 | `redis.aof.enabled` / `redis.aof.rewrite.in_progress` | aof_enabled / aof_rewrite_in_progress，布尔值 |
 | `redis.aof.last_bgrewrite.status` / `redis.aof.last_write.status` | aof_last_bgrewrite_status / aof_last_write_status，ok/err |
+| `redis.memory.used.bytes` | used_memory，分配器内存，B |
+| `redis.memory.rss.bytes` | used_memory_rss，进程驻留内存，B |
+| `redis.memory.maxmemory.bytes` | maxmemory，配置阈值，B；0 表示未设置上限 |
+| `redis.memory.used.percent` | used_memory / 正 maxmemory，参考比例，% |
+| `redis.cpu.single_core.percent` | 进程 user/system CPU 秒数增量 / 实际采样秒数 × 100，单核基准，% |
+| `redis.aof.current.bytes` | aof_current_size，当前 AOF 文件字节数；独立容量采集 |
 
-连接建立后执行 `PING`，分别读取 `INFO server`、`clients`、`stats`、`persistence`、`replication`。每个分区独立处理失败；PING 成功而 INFO 被拒绝时，服务仍有成功探测，相关指标显示无权限。缺失字段、未知状态、超时和真实零值分别表达；只发布固定字段及已知状态，不返回原始 INFO、run_id、地址、密码或异常文本。
+普通采集连接建立后执行 `PING`，分别读取 `INFO server`、`clients`、`stats`、`persistence`、`replication`、`memory`、`cpu`。每个分区独立处理失败；PING 成功而 INFO 被拒绝时，服务仍有成功探测，相关指标显示无权限。缺失字段、未知状态、超时和真实零值分别表达；只发布固定字段及已知状态，不返回原始 INFO、run_id、地址、密码或异常文本。
 
 命令处理速率使用 `total_commands_processed` 的周期差值除以实际采样秒数。命中/未命中、淘汰/过期分别提供累计值和周期增量；命中率使用 `Δhits / (Δhits + Δmisses) × 100%`。没有键查找请求时命中率显示 `NO_REQUESTS`，不会显示为零。命中/未命中针对键查找，不等于所有命令；监控自身的连接设置、PING 和 INFO 会影响服务的命令计数。
 
 派生指标复用公共前一样本存储。首次采样、`run_id` 变化、计数下降或样本间隔超过三个普通周期时建立新基线；缺少 run_id 只影响需要基线的指标。默认普通采集周期 15 秒、指标有效期 45 秒、服务探测有效期 45 秒。只保留计算当前值所需的前一样本，不保存趋势历史。
+
+内存的三个原生值分别展示：分配器内存、进程 RSS、配置上限不能相加，也不是主机内存或某个 Redis DB 的用量。`maxmemory=0` 表示未设置上限，比例返回 `NOT_APPLICABLE`；配置阈值为正时才计算参考比例，可超过 100%。该比例不代表主机使用率，也不用于推导剩余驱逐额度。
+
+CPU 使用 `Δused_cpu_user + Δused_cpu_sys`，包含进程各线程。子进程 `*_children` 和主线程子集不会再次累加。单核基准的 200% 表示这一采样间隔使用约两个核心，不截断为 100%；首次采样及重启/计数回退重新建立基线。
+
+容量任务只读取 `INFO persistence`，不更新普通服务探测。AOF 启用且字段可读时返回 `aof_current_size`；未启用为 `NOT_APPLICABLE`，无权限为 `UNAUTHORIZED`，字段缺失为 `UNSUPPORTED`，均不伪造零值。默认容量周期 60 秒、有效期 180 秒，采样时间独立于普通指标。此值仅表示原生报告的当前 AOF 文件大小，不包含全部 RDB/AOF 持久化文件，更不能推导文件系统总量、剩余量或磁盘使用率。
 
 ## 连接与支持范围
 
@@ -64,9 +76,7 @@ monitor:
 .\mvnw.cmd '-Dtest=MonitoringRedisAdapterIntegrationTest' '-Dmonitor.test.type=redis' test
 ```
 
-CI 的 Redis 任务调用同一入口。测试只操作自有临时容器；受控键、ACL 和 RESETSTAT 属于测试准备，不在生产采集器中执行。真实测试验证已启动 Lettuce/Redisson 的实际来源、原生字段、无请求与计数归零、部分 INFO 拒绝，以及原有业务连接和数据保持可用。真实测试固定普通 TCP 单节点 Redis 7.2.4；进程 run_id 切换使用契约测试覆盖，不声称已验证真实重启或其他 Redis 版本。按 INFO 首参数限制权限使用固定测试版本支持的 ACL 能力，不要求修改应用服务的授权。
-
-CPU、内存和 AOF 文件大小由 #30 补充。
+CI 的 Redis 任务调用同一入口。测试只操作自有临时容器；受控键、ACL、RESETSTAT 与 AOF 配置属于测试准备，不在生产采集器中执行。真实测试验证已启动 Lettuce/Redisson 的实际来源、原生字段、CPU 增量公式、零内存上限、AOF 开关、无请求与计数归零、部分 INFO 拒绝，以及原有业务连接和数据保持可用。真实测试固定普通 TCP 单节点 Redis 7.2.4；进程 run_id 切换、多核 CPU 和字段缺失使用契约测试覆盖，不声称已验证真实重启或其他 Redis 版本。按 INFO 首参数限制权限使用固定测试版本支持的 ACL 能力，不要求修改应用服务的授权。
 
 ## 语义依据
 

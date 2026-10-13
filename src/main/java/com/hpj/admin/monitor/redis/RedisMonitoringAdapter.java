@@ -23,11 +23,12 @@ import static com.hpj.admin.monitor.metric.MonitoringCalculations.Calculation.*;
 
 /** Fixed, read-only Redis process observations; previous samples belong to the shared counter store. */
 public final class RedisMonitoringAdapter implements MonitoringAdapter {
-    private static final List<String> SECTIONS = List.of("server", "clients", "stats", "persistence", "replication");
+    private static final List<String> SECTIONS = List.of("server", "clients", "stats", "persistence", "replication", "memory", "cpu");
     private static final Set<String> FIELDS = Set.of("run_id", "connected_clients", "blocked_clients", "role",
             "total_commands_processed", "keyspace_hits", "keyspace_misses", "evicted_keys", "expired_keys",
             "loading", "rdb_bgsave_in_progress", "rdb_last_bgsave_status", "aof_enabled", "aof_rewrite_in_progress",
-            "aof_last_bgrewrite_status", "aof_last_write_status");
+            "aof_last_bgrewrite_status", "aof_last_write_status", "used_memory", "used_memory_rss", "maxmemory",
+            "used_cpu_user", "used_cpu_sys", "aof_current_size");
     private static final int MAX_INFO_CHARACTERS = 262_144;
     private final MonitoringProperties properties;
     private final RedisMonitoringConnections connections;
@@ -44,8 +45,7 @@ public final class RedisMonitoringAdapter implements MonitoringAdapter {
     @Override public CollectionResult collect(CollectionRequest request) {
         Instant started = atLeast(request.scheduledAt());
         if (request.kind() == CollectionKind.CAPACITY) {
-            return new CollectionResult(CollectionStatus.UNSUPPORTED, started, atLeast(started), List.of(), null,
-                    true, MissingReason.NOT_APPLICABLE);
+            return capacity(request, started);
         }
         Scope scope = new Scope(ScopeKind.PROCESS, request.targetId(), null);
         List<Definition> definitions = definitions(scope);
@@ -92,6 +92,8 @@ public final class RedisMonitoringAdapter implements MonitoringAdapter {
         Read stats = sections.getOrDefault("stats", unavailable);
         Read persistence = sections.getOrDefault("persistence", unavailable);
         Read replication = sections.getOrDefault("replication", unavailable);
+        Read memory = sections.getOrDefault("memory", unavailable);
+        Read cpu = sections.getOrDefault("cpu", unavailable);
         List<MetricSample> metrics = new ArrayList<>();
         metrics.add(latency == null ? MetricSample.missing(definitions.get(0), failure, finished) : latency);
         metrics.add(gauge(definitions.get(1), clients, "connected_clients"));
@@ -114,11 +116,60 @@ public final class RedisMonitoringAdapter implements MonitoringAdapter {
         metrics.add(flag(definitions.get(18), persistence, "aof_rewrite_in_progress"));
         metrics.add(text(definitions.get(19), persistence, "aof_last_bgrewrite_status", Set.of("ok", "err")));
         metrics.add(text(definitions.get(20), persistence, "aof_last_write_status", Set.of("ok", "err")));
+        metrics.add(gauge(definitions.get(21), memory, "used_memory"));
+        metrics.add(gauge(definitions.get(22), memory, "used_memory_rss"));
+        metrics.add(gauge(definitions.get(23), memory, "maxmemory"));
+        metrics.add(memoryPercent(definitions.get(24), memory));
+        metrics.add(derived(request, definitions.get(25), cpu, server, CPU_SINGLE_CORE_PERCENT,
+                "used_cpu_user", "used_cpu_sys"));
         MissingReason missing = failure != null ? failure : metrics.stream().map(MetricSample::missingReason)
                 .filter(Objects::nonNull).findFirst().orElse(null);
         CollectionStatus status = missing == null ? CollectionStatus.SUCCESS
                 : latency != null ? CollectionStatus.PARTIAL : failureStatus(missing);
         return new CollectionResult(status, started, atLeast(finished), metrics, probe, true, missing);
+    }
+
+    /** Capacity has its own sampling time/TTL and never refreshes the ordinary service probe. */
+    private CollectionResult capacity(CollectionRequest request, Instant started) {
+        Definition definition = new Definition("redis.aof.current.bytes", "当前 AOF 文件大小", Unit.BYTES,
+                new Scope(ScopeKind.PROCESS, request.targetId(), null), "INFO persistence: aof_enabled, aof_current_size",
+                "当前 Redis 进程关联的原生 AOF 文件字节数；不是全部持久化大小或文件系统容量；容量周期独立采样");
+        Read persistence;
+        try {
+            request.control().checkActive();
+            try (RedisMonitoringConnections.Session session = connections.open(request)) {
+                persistence = read(request, session, "persistence", started);
+            }
+        } catch (RedisMonitoringConnections.Failure failure) {
+            persistence = new Read(Map.of(), failure.reason(), atLeast(started));
+        } catch (CollectionControl.InactiveCollectionException inactive) {
+            persistence = new Read(Map.of(), inactive.reason(), atLeast(started));
+        }
+        MissingReason missing = missing(persistence, "aof_enabled");
+        if (missing == null) {
+            missing = switch (persistence.values().get("aof_enabled")) {
+                case "0" -> MissingReason.NOT_APPLICABLE;
+                case "1" -> null;
+                default -> MissingReason.INVALID_VALUE;
+            };
+        }
+        NativeNumber size = missing == null ? number(persistence, "aof_current_size") : new NativeNumber(null, missing);
+        MetricSample metric = size.reason() == null
+                ? MetricSample.success(definition, size.value(), persistence.at(),
+                    properties.getCapacityInterval().multipliedBy(properties.getMetricTtlMultiplier()))
+                : MetricSample.missing(definition, size.reason(), persistence.at());
+        return new CollectionResult(size.reason() == null ? CollectionStatus.SUCCESS : failureStatus(size.reason()),
+                started, atLeast(persistence.at()), List.of(metric), null, true, size.reason());
+    }
+
+    private MetricSample memoryPercent(Definition definition, Read memory) {
+        NativeNumber used = number(memory, "used_memory");
+        NativeNumber limit = number(memory, "maxmemory");
+        MissingReason missing = used.reason() != null ? used.reason() : limit.reason();
+        if (missing != null) return MetricSample.missing(definition, missing, memory.at());
+        var result = MonitoringCalculations.percent(used.value(), limit.value());
+        return result.reason() == null ? success(definition, result.value(), memory.at())
+                : MetricSample.missing(definition, result.reason(), memory.at());
     }
 
     private Read read(CollectionRequest request, RedisMonitoringConnections.Session session, String section, Instant previous) {
@@ -178,7 +229,7 @@ public final class RedisMonitoringAdapter implements MonitoringAdapter {
                                  MonitoringCalculations.Calculation calculation, String... fields) {
         List<BigDecimal> counters = new ArrayList<>();
         for (String field : fields) {
-            NativeNumber number = number(stats, field);
+            NativeNumber number = number(stats, field, calculation == CPU_SINGLE_CORE_PERCENT);
             if (number.reason() != null) return MetricSample.missing(definition, number.reason(), stats.at());
             counters.add(number.value());
         }
@@ -197,10 +248,16 @@ public final class RedisMonitoringAdapter implements MonitoringAdapter {
     }
 
     private NativeNumber number(Read data, String field) {
+        return number(data, field, false);
+    }
+
+    private NativeNumber number(Read data, String field, boolean fractional) {
         MissingReason missing = missing(data, field);
         if (missing != null) return new NativeNumber(null, missing);
         String value = data.values().get(field);
-        if (!value.matches("[0-9]{1,20}")) return new NativeNumber(null, MissingReason.INVALID_VALUE);
+        if (!value.matches(fractional ? "[0-9]{1,20}(\\.[0-9]{1,9})?" : "[0-9]{1,20}")) {
+            return new NativeNumber(null, MissingReason.INVALID_VALUE);
+        }
         return new NativeNumber(new BigDecimal(value), null);
     }
 
@@ -250,7 +307,12 @@ public final class RedisMonitoringAdapter implements MonitoringAdapter {
                 new Definition("redis.aof.enabled", "AOF 已启用", Unit.BOOLEAN, scope, "INFO persistence: aof_enabled", "原生 AOF 启用标志，仅将 0/1 转为否/是"),
                 new Definition("redis.aof.rewrite.in_progress", "AOF 重写中", Unit.BOOLEAN, scope, "INFO persistence: aof_rewrite_in_progress", "原生 AOF 重写进行中标志，仅将 0/1 转为否/是"),
                 new Definition("redis.aof.last_bgrewrite.status", "上次 AOF 后台重写状态", Unit.TEXT, scope, "INFO persistence: aof_last_bgrewrite_status", "原生 ok/err 状态；字段缺失时不给出推测值"),
-                new Definition("redis.aof.last_write.status", "上次 AOF 写入状态", Unit.TEXT, scope, "INFO persistence: aof_last_write_status", "原生 ok/err 状态；字段缺失时不给出推测值"));
+                new Definition("redis.aof.last_write.status", "上次 AOF 写入状态", Unit.TEXT, scope, "INFO persistence: aof_last_write_status", "原生 ok/err 状态；字段缺失时不给出推测值"),
+                new Definition("redis.memory.used.bytes", "Redis 分配器内存", Unit.BYTES, scope, "INFO memory: used_memory", "当前 Redis 进程通过分配器分配的字节数；不是某个 DB 或主机总内存"),
+                new Definition("redis.memory.rss.bytes", "Redis 进程 RSS", Unit.BYTES, scope, "INFO memory: used_memory_rss", "操作系统报告的 Redis 进程驻留内存；与分配器内存分别展示，不相加"),
+                new Definition("redis.memory.maxmemory.bytes", "Redis 配置内存上限", Unit.BYTES, scope, "INFO memory: maxmemory", "原生 maxmemory 配置阈值；0 表示未设置上限，不是主机总内存；零上限不计算比例"),
+                new Definition("redis.memory.used.percent", "分配内存与配置上限之比", Unit.PERCENT, scope, "INFO memory: used_memory, maxmemory", "used_memory / maxmemory × 100；仅正上限可计算，0 表示未设置上限；不是主机内存占用率或剩余驱逐额度"),
+                new Definition("redis.cpu.single_core.percent", "Redis 进程 CPU（单核基准）", Unit.PERCENT, scope, "INFO cpu: used_cpu_user, used_cpu_sys", "相邻进程 user/system CPU 秒数增量之和 / 实际采样秒数 × 100；涵盖进程各线程，不累加子进程；可超过 100%"));
     }
 
     private record Read(Map<String, String> values, MissingReason reason, Instant at) { }

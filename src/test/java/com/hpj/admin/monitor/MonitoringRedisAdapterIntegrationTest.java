@@ -52,7 +52,7 @@ import static org.awaitility.Awaitility.await;
 /** An explicit Redis selection must start its own real server; unavailable Docker fails the selected run. */
 @EnabledIfSystemProperty(named = "monitor.test.type", matches = "redis")
 class MonitoringRedisAdapterIntegrationTest {
-    private static final List<String> SECTIONS = List.of("server", "clients", "stats", "persistence", "replication");
+    private static final List<String> SECTIONS = List.of("server", "clients", "stats", "persistence", "replication", "memory", "cpu");
     private static final Set<String> READ_COMMANDS = Set.of("auth", "hello", "ping", "info", "select", "quit",
             "client|setinfo", "client|setname");
 
@@ -77,7 +77,7 @@ class MonitoringRedisAdapterIntegrationTest {
                 assertNativeValues(first, collector.connections.observations.get(0));
                 for (String key : List.of("redis.commands.rate", "redis.keyspace.hits.delta",
                         "redis.keyspace.misses.delta", "redis.keyspace.hit.percent", "redis.keys.evicted.delta",
-                        "redis.keys.expired.delta")) {
+                        "redis.keys.expired.delta", "redis.cpu.single_core.percent")) {
                     assertThat(metric(first, key).missingReason()).as(key).isEqualTo(MissingReason.WAITING_SAMPLE);
                 }
                 assertOnlyReadCommands(before, commandCounts(commands));
@@ -91,6 +91,7 @@ class MonitoringRedisAdapterIntegrationTest {
                 assertThat(value(idle, "redis.keyspace.hits.delta")).isZero();
                 assertThat(value(idle, "redis.keyspace.misses.delta")).isZero();
                 assertRate(first, idle, collector.connections.observations.get(0), idleNative);
+                assertCpu(first, idle, collector.connections.observations.get(0), idleNative);
                 assertOnlyReadCommands(before, commandCounts(commands));
 
                 // These calls target only the random key owned by this fixture, plus a known absent sibling.
@@ -110,6 +111,7 @@ class MonitoringRedisAdapterIntegrationTest {
                 assertThat(number(loadedNative, "stats", "keyspace_misses")
                         .subtract(number(idleNative, "stats", "keyspace_misses"))).isEqualByComparingTo("1");
                 assertRate(idle, loaded, idleNative, loadedNative);
+                assertCpu(idle, loaded, idleNative, loadedNative);
                 assertOnlyReadCommands(afterFixtureReads, commandCounts(commands));
                 assertThat(commands.get(environment.resourceName())).isEqualTo(sentinel);
 
@@ -129,11 +131,64 @@ class MonitoringRedisAdapterIntegrationTest {
                 }
                 assertOnlyReadCommands(afterReset, commandCounts(commands));
                 assertThat(collector.connections.closed).isEqualTo(4);
-                assertThat(collector.counters.seriesCount(target.display().id())).isEqualTo(6);
+                assertThat(collector.counters.seriesCount(target.display().id())).isEqualTo(7);
                 business.guard = false;
                 business.assertStillUsable();
                 business.assertOriginalTemplateStillMutated();
                 assertThat(commands.get(environment.resourceName())).isEqualTo(sentinel);
+            }
+            environment.verifyData();
+        }
+    }
+
+    @ParameterizedTest(name = "native resource scopes and AOF enabled = {0}")
+    @ValueSource(booleans = {false, true})
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void resourceAndCapacityValuesMatchTheOwnedServersActualFields(boolean aofEnabled) throws Exception {
+        try (MonitoringTestEnvironment environment = MonitoringTestEnvironment.start("redis")) {
+            environment.prepareData();
+            try (var observer = environment.redisConnection();
+                 RuntimeClient business = new RuntimeClient("lettuce", environment, environment.username());
+                 Collector collector = new Collector()) {
+                var commands = observer.sync();
+                // Configuration changes belong to this disposable fixture, before the read-only interval.
+                assertThat(commands.configSet("maxmemory", "0")).isEqualTo("OK");
+                if (aofEnabled) {
+                    assertThat(commands.configSet("appendonly", "yes")).isEqualTo("OK");
+                    await().atMost(Duration.ofSeconds(15)).until(() -> {
+                        Map<String, String> persistence = parse(commands.info("persistence"));
+                        return "0".equals(persistence.get("aof_rewrite_in_progress"))
+                                && persistence.containsKey("aof_current_size");
+                    });
+                }
+                ResolvedTarget target = resolve(business);
+                business.guard = true;
+                Map<String, Long> before = commandCounts(commands);
+                CollectionResult ordinary = collector.collect(target);
+                assertNativeValues(ordinary, collector.connections.observations.get(0));
+                assertThat(value(ordinary, "redis.memory.maxmemory.bytes")).isZero();
+                assertThat(metric(ordinary, "redis.memory.used.percent").missingReason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+                CollectionResult capacity = collector.collect(target, CollectionKind.CAPACITY);
+                NativeObservation nativeCapacity = collector.connections.observations.get(1);
+                assertThat(nativeCapacity.attempted).containsExactly("persistence");
+                assertThat(capacity.serviceProbe()).isNull();
+                assertThat(capacity.metrics()).hasSize(1);
+                MetricSample size = metric(capacity, "redis.aof.current.bytes");
+                assertThat(size.definition().unit()).isEqualTo(Unit.BYTES);
+                assertThat(size.definition().scope().kind()).isEqualTo(ScopeKind.PROCESS);
+                assertThat(nativeCapacity.field("persistence", "aof_enabled")).isEqualTo(aofEnabled ? "1" : "0");
+                if (aofEnabled) {
+                    assertThat(value(capacity, "redis.aof.current.bytes"))
+                            .isEqualByComparingTo(number(nativeCapacity, "persistence", "aof_current_size"));
+                    assertThat(size.validUntil()).isEqualTo(size.sampledAt().plusSeconds(180));
+                } else {
+                    assertThat(size.missingReason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+                    assertThat(size.value()).isNull();
+                }
+                assertOnlyReadCommands(before, commandCounts(commands));
+                assertThat(collector.connections.closed).isEqualTo(2);
+                business.guard = false;
+                business.assertStillUsable();
             }
             environment.verifyData();
         }
@@ -224,7 +279,7 @@ class MonitoringRedisAdapterIntegrationTest {
 
     private static void assertNativeValues(CollectionResult result, NativeObservation observation) {
         assertThat(result.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
-        assertThat(result.metrics()).hasSize(21).allSatisfy(sample ->
+        assertThat(result.metrics()).hasSize(26).allSatisfy(sample ->
                 assertThat(sample.definition().scope().kind()).isEqualTo(ScopeKind.PROCESS));
         assertThat(observation.attempted).containsExactlyElementsOf(SECTIONS);
         assertThat(observation.responses.keySet()).containsExactlyElementsOf(SECTIONS);
@@ -239,6 +294,19 @@ class MonitoringRedisAdapterIntegrationTest {
             assertThat(value(result, key)).isEqualByComparingTo(number(observation, field[0], field[1]));
             assertThat(metric(result, key).definition().unit()).isEqualTo(Unit.COUNT);
         });
+        Map.of("redis.memory.used.bytes", "used_memory", "redis.memory.rss.bytes", "used_memory_rss",
+                "redis.memory.maxmemory.bytes", "maxmemory").forEach((key, field) -> {
+            assertThat(value(result, key)).isEqualByComparingTo(number(observation, "memory", field));
+            assertThat(metric(result, key).definition().unit()).isEqualTo(Unit.BYTES);
+        });
+        BigDecimal limit = number(observation, "memory", "maxmemory");
+        if (limit.signum() == 0) {
+            assertThat(metric(result, "redis.memory.used.percent").missingReason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+        } else {
+            assertThat(value(result, "redis.memory.used.percent")).isEqualByComparingTo(
+                    number(observation, "memory", "used_memory").multiply(BigDecimal.valueOf(100))
+                            .divide(limit, MathContext.DECIMAL128));
+        }
         assertNativeScalar(result, observation, "redis.role", "replication", "role", Unit.TEXT);
         Map<String, String> flags = Map.of("redis.persistence.loading", "loading",
                 "redis.rdb.bgsave.in_progress", "rdb_bgsave_in_progress", "redis.aof.enabled", "aof_enabled",
@@ -286,6 +354,17 @@ class MonitoringRedisAdapterIntegrationTest {
             }
         });
         return counts;
+    }
+
+    private static void assertCpu(CollectionResult before, CollectionResult after,
+                                   NativeObservation initial, NativeObservation latest) {
+        BigDecimal delta = number(latest, "cpu", "used_cpu_user").subtract(number(initial, "cpu", "used_cpu_user"))
+                .add(number(latest, "cpu", "used_cpu_sys").subtract(number(initial, "cpu", "used_cpu_sys")));
+        Duration interval = Duration.between(metric(before, "redis.cpu.single_core.percent").sampledAt(),
+                metric(after, "redis.cpu.single_core.percent").sampledAt());
+        BigDecimal elapsed = BigDecimal.valueOf(interval.getSeconds()).add(BigDecimal.valueOf(interval.getNano(), 9));
+        assertThat(value(after, "redis.cpu.single_core.percent"))
+                .isEqualByComparingTo(delta.multiply(BigDecimal.valueOf(100)).divide(elapsed, MathContext.DECIMAL128));
     }
 
     private static void assertOnlyReadCommands(Map<String, Long> before, Map<String, Long> after) {
@@ -358,6 +437,10 @@ class MonitoringRedisAdapterIntegrationTest {
         long sequence;
 
         CollectionResult collect(ResolvedTarget target) throws Exception {
+            return collect(target, CollectionKind.ORDINARY);
+        }
+
+        CollectionResult collect(ResolvedTarget target, CollectionKind kind) throws Exception {
             String id = target.display().id();
             var binding = target.bindings().get(0);
             var source = binding.connection();
@@ -366,8 +449,8 @@ class MonitoringRedisAdapterIntegrationTest {
             Duration timeout = properties.getCollectionTimeout();
             CollectionControl control = new CollectionControl(lifecycle, () -> true, clock, System::nanoTime,
                     System.nanoTime() + timeout.toNanos(), cleanup, counters, id, source.source(),
-                    CollectionKind.ORDINARY, properties.getOrdinaryInterval(), source.client());
-            CollectionRequest request = new CollectionRequest(id, source.source(), source.source(), CollectionKind.ORDINARY,
+                    kind, kind == CollectionKind.ORDINARY ? properties.getOrdinaryInterval() : properties.getCapacityInterval(), source.client());
+            CollectionRequest request = new CollectionRequest(id, source.source(), source.source(), kind,
                     1, ++sequence, scheduled, scheduled.plus(timeout), binding.scope(), source.client(), source.settings(), control);
             try {
                 CollectionResult result = adapter.collect(request);

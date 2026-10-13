@@ -43,7 +43,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * Each acquired socket is registered before connect; cancellation closes it during connect, writes and reads.
  */
 public class RedisMonitoringConnections {
-    static final Set<String> INFO_SECTIONS = Set.of("server", "clients", "stats", "persistence", "replication");
+    static final Set<String> INFO_SECTIONS = Set.of("server", "clients", "stats", "persistence", "replication", "memory", "cpu");
     static final int MAX_REPLY_BYTES = 262144;
     static final int MAX_STATUS_BYTES = 4096;
     private final SocketSupplier sockets;
