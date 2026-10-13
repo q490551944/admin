@@ -190,6 +190,80 @@ test("a paused background return cancels pending detail loading and permits an e
   await page.getByRole("button", { name: "重读详情", exact: true }).click(); await expect(page.locator("#detail-count")).toContainText("4 / 4"); expect(reads).toBe(2);
   await expect(page.locator("#refresh-status")).toContainText("已暂停");
 });
+
+test("individual collection failure keeps the original zero gray with its reason and last successful clock", async ({ page }) => {
+  const data = detailFixture(), detail = data.details["mysql-detail"], metric = detail.metrics[1], at = data.snapshot.serverTime;
+  const previous = new Date(Date.parse(at) - 15000).toISOString();
+  metric.lastSuccess = { ...metric.lastSuccess, sampledAt: previous, lastSuccessAt: previous };
+  metric.latestAttempt = { ...metric.latestAttempt, value: null, missingReason: "TIMEOUT", sampledAt: at, lastSuccessAt: null, validUntil: at }; metric.valueState = "LAST_SUCCESS";
+  detail.target.collections[0].status = "FAILED"; detail.target.collections[0].reason = "TIMEOUT";
+  await routeData(page, data); await login(page); await page.locator('[data-target-id="mysql-detail"] .detail-button').click(); await expect(page.locator("#detail-count")).toContainText("4 / 4");
+  const core = page.locator('[data-target-id="mysql-detail"] .core-metric[data-value-state="LAST_SUCCESS"]'), value = page.locator('#detail-metrics [data-metric-key="mysql.memory.bytes"]');
+  await expect(core).toContainText("0 B"); await expect(core).toContainText("上次成功值 · 超时"); await expect(value.locator(".metric-value")).toHaveText("0 B");
+  const originalClock = await page.evaluate(at => window.MonitorOverview.time(at), previous);
+  await expect(core).toContainText("上次成功 " + originalClock); await expect(value).toContainText("上次成功 " + originalClock);
+  expect(await value.locator(".metric-value").evaluate(element => getComputedStyle(element).color)).toBe("rgb(100, 117, 108)");
+  await expect(page.locator("#detail-states")).toContainText("● 可用"); await expect(page.locator("#detail-states")).toContainText("采集失败");
+});
+
+async function stablePausedClock(page) {
+  await page.getByRole("button", { name: "暂停刷新", exact: true }).click();
+  await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now() + 1000)));
+  await page.getByRole("button", { name: "手动刷新", exact: true }).click();
+  await expect(page.locator("#refresh-snapshot")).toBeEnabled(); await expect(page.locator("#detail-message")).toBeHidden();
+}
+
+test("paused TTL boundaries update cards details summary and exceptional filtering with independent capacity", async ({ page }) => {
+  await page.clock.install(); const data = detailFixture(); let reads = 0;
+  page.on("request", request => { if (request.url().endsWith("/snapshots")) reads++; });
+  await routeData(page, data); await login(page); await page.locator('[data-target-id="mysql-detail"] .detail-button').click(); await expect(page.locator("#detail-count")).toContainText("4 / 4");
+  await page.locator('#detail-metrics [data-metric-key="mysql.memory.bytes"] summary').click();
+  await stablePausedClock(page); const baseline = reads; await page.getByLabel("仅看异常").check();
+  await expect(page.locator('[data-target-id="mysql-detail"]')).toHaveCount(0);
+  await page.clock.runFor(45000); await expect(page.locator('[data-service="AVAILABLE"] strong')).toHaveText("6");
+  await expect(page.locator('#detail-metrics [data-metric-key="mysql.memory.bytes"] .live-freshness')).toHaveText("截止时刻仍有效");
+  await page.clock.runFor(1000); await expect(page.locator('[data-service="UNKNOWN"] strong')).toHaveText("6");
+  await expect(page.locator('[data-target-id="mysql-detail"]')).toContainText("? 未知"); await expect(page.locator('[data-target-id="mysql-detail"] .core-metric[data-value-state="EXPIRED"]')).toHaveCount(2);
+  await expect(page.locator('#detail-metrics [data-metric-key="mysql.memory.bytes"]')).toHaveAttribute("data-value-state", "EXPIRED");
+  await expect(page.locator('#detail-metrics [data-metric-key="mysql.data.bytes"]')).toHaveAttribute("data-value-state", "CURRENT");
+  await expect(page.locator('#detail-metrics [data-metric-key="mysql.memory.bytes"] details')).toHaveAttribute("open", "");
+  await expect(page.locator("#overview-time")).toContainText("已过去 46 秒"); await expect(page.locator("#detail-time")).toContainText("已过去 46 秒");
+  await page.clock.runFor(135000); await expect(page.locator('#detail-metrics [data-metric-key="mysql.data.bytes"]')).toHaveAttribute("data-value-state", "EXPIRED");
+  expect(reads).toBe(baseline); await expect(page.locator("#refresh-status")).toContainText("已暂停");
+});
+
+test("overall network failure keeps aging both views and automatic recovery replaces them with fresh samples", async ({ page }) => {
+  await page.clock.install(); const data = detailFixture(); await routeData(page, data); let offline = false;
+  await page.unroute(`**${API}/snapshots`);
+  await page.route(`**${API}/snapshots`, route => offline ? route.abort("internetdisconnected") : route.fulfill({ json: data.snapshot }));
+  await login(page); await page.locator('[data-target-id="mysql-detail"] .detail-button').click(); await expect(page.locator("#detail-count")).toContainText("4 / 4");
+  await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now() + 1000)));
+  offline = true; await page.clock.runFor(15000); await expect(page.locator("#overview-message")).toContainText("整体快照读取失败");
+  await page.clock.runFor(31000); await expect(page.locator('[data-service="UNKNOWN"] strong')).toHaveText("6");
+  await expect(page.locator("#detail-states")).toContainText("? 未知"); await expect(page.locator('#detail-metrics [data-metric-key="mysql.memory.bytes"]')).toHaveAttribute("data-value-state", "EXPIRED");
+  await page.getByLabel("仅看异常").check(); await expect(page.locator('[data-target-id="mysql-detail"]')).toBeVisible();
+  const recovered = detailFixture(); recovered.details["mysql-detail"].metrics[1].latestAttempt.value = 42;
+  Object.assign(data, recovered); offline = false;
+  await page.clock.runFor(15000); await expect(page.locator("#overview-message")).toBeHidden();
+  await expect(page.locator('[data-service="AVAILABLE"] strong')).toHaveText("6"); await expect(page.locator('[data-target-id="mysql-detail"]')).toHaveCount(0);
+  await expect(page.locator('#detail-metrics [data-metric-key="mysql.memory.bytes"] .metric-value')).toHaveText("42 B");
+  await expect(page.locator('#detail-metrics [data-metric-key="mysql.memory.bytes"]')).toHaveAttribute("data-value-state", "CURRENT");
+});
+
+test("client wall clock jumps do not age samples and background return respects pause then refreshes when active", async ({ page }) => {
+  await page.clock.install({ time: new Date("2035-01-01T00:00:00Z") }); const data = detailFixture(); let reads = 0;
+  await routeData(page, data); page.on("request", request => { if (request.url().endsWith("/snapshots")) reads++; });
+  await login(page); await page.locator('[data-target-id="mysql-detail"] .detail-button').click(); await expect(page.locator("#detail-count")).toContainText("4 / 4");
+  await stablePausedClock(page); const baseline = reads;
+  await page.clock.setSystemTime(new Date("2060-01-01T00:00:00Z")); await page.clock.runFor(1000);
+  await expect(page.locator('[data-service="AVAILABLE"] strong')).toHaveText("6"); await expect(page.locator('#detail-metrics [data-metric-key="mysql.memory.bytes"]')).toHaveAttribute("data-value-state", "CURRENT");
+  async function visibility(state) { await page.evaluate(value => { Object.defineProperty(document, "visibilityState", { configurable: true, value }); document.dispatchEvent(new Event("visibilitychange")); }, state); }
+  await visibility("hidden"); await page.clock.runFor(45000); await visibility("visible");
+  await expect(page.locator("#overview")).toBeVisible(); await expect(page.locator('[data-service="UNKNOWN"] strong')).toHaveText("6"); await expect(page.locator("#detail-states")).toContainText("? 未知"); expect(reads).toBe(baseline);
+  Object.assign(data, detailFixture()); await page.getByRole("button", { name: "继续刷新", exact: true }).click(); await expect.poll(() => reads).toBe(baseline + 1);
+  await expect(page.locator('[data-service="AVAILABLE"] strong')).toHaveText("6");
+  await visibility("hidden"); await page.clock.runFor(15000); await visibility("visible"); await expect.poll(() => reads).toBe(baseline + 2);
+});
 test("overview retries a generation race once without combining different generations", async ({ page }) => {
   const data = fixture(); let reads = 0;
   await page.route(`**${API}/catalog`, route => route.fulfill({ json: data.catalog }));

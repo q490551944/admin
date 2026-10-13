@@ -72,13 +72,29 @@
     }
     const note = state === "EXPIRED" ? "已过期 · 上次成功值" + (latest.missingReason ? " · " + reason(latest.missingReason) : "")
       : latest.missingReason ? (sample ? "上次成功值 · " : "") + reason(latest.missingReason) : "";
-    return { definition: latest.definition, text, unit: UNITS[latest.definition.unit] || "", sample, state, note, source: metric.source };
+    return { definition: latest.definition, text, unit: UNITS[latest.definition.unit] || "", sample, state, note, source: metric.source,
+      validUntil: metric.validUntil || sample?.validUntil };
   }
   function time(value) {
     return Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "暂无采样";
   }
   function scopeText(scope) {
     return [SCOPES[scope?.kind] || "对象", scope?.id, scope?.nodeId && "节点 " + scope.nodeId].filter(Boolean).join(" · ");
+  }
+  function createServerClock(serverTime, now = () => global.performance.now()) {
+    const base = Date.parse(serverTime), receivedAt = now();
+    if (!Number.isFinite(base)) throw new Error("Invalid server clock");
+    return () => base + Math.max(0, now() - receivedAt);
+  }
+  function freshnessText(validUntil, serverMillis) {
+    const deadline = Date.parse(validUntil);
+    if (!Number.isFinite(deadline)) return "暂无成功样本有效期";
+    if (serverMillis > deadline) return "已过期";
+    const seconds = Math.ceil((deadline - serverMillis) / 1000);
+    return seconds ? `有效期剩余 ${seconds} 秒` : "截止时刻仍有效";
+  }
+  function updateFreshness(root, serverMillis) {
+    for (const element of root.querySelectorAll(".live-freshness")) element.textContent = (element.dataset.prefix || "") + freshnessText(element.dataset.validUntil, serverMillis);
   }
   function exceptional(row) {
     if (row.schedulingState === "DISABLED") return false;
@@ -151,7 +167,7 @@
     let current;
     let details;
     let cached;
-    let receivedAt = 0;
+    let serverNow, lastSignature, ticker = null;
     const filters = { type: "", service: "", collection: "", exceptional: false };
     function node(tag, className, text) {
       const element = document.createElement(tag);
@@ -211,17 +227,23 @@
         else states.append(node("span", "state-badge", row.schedulingState === "DISABLED" ? "— 未启用" : row.schedulingState === "CONFIGURATION_MISSING" ? "! 配置问题" : "… 正在解析"));
         header.append(states);
         article.append(header);
+        const probeDeadlines = list(row.serviceObservations).map(item => Date.parse(item.validUntil)).filter(Number.isFinite);
+        const probeTime = node("small", "muted live-freshness"); probeTime.dataset.prefix = "服务探测 · ";
+        probeTime.dataset.validUntil = probeDeadlines.length ? new Date(Math.min(...probeDeadlines)).toISOString() : "";
+        article.append(probeTime);
         const metrics = node("div", "core-metrics");
         const previews = list(row.coreMetrics).map(metricView).filter(Boolean);
         for (const view of previews) {
           const item = node("div", "core-metric");
           item.dataset.valueState = view.state;
           item.append(node("p", "metric-label", view.definition.label), node("strong", "metric-value", view.text + (view.unit ? " " + view.unit : "")),
-            node("small", "metric-scope", scopeText(view.definition.scope)), node("small", "muted", time(view.sample?.sampledAt)));
+            node("small", "metric-scope", scopeText(view.definition.scope)), node("small", "muted", (view.state === "LAST_SUCCESS" || view.state === "EXPIRED" ? "上次成功 " : "采样 ") + time(view.sample?.sampledAt)));
+          const freshness = node("small", "muted live-freshness"); freshness.dataset.validUntil = view.validUntil || ""; item.append(freshness);
+          if (view.state === "NO_DATA") item.append(node("small", "metric-note", "暂无数据"));
           if (view.note) item.append(node("small", "metric-note", view.note));
           metrics.append(item);
         }
-        if (!previews.length) metrics.append(node("p", "muted", row.schedulingState === "ACTIVE" ? "暂无核心数值 · 等待首样本或采集结果" : "未安排采集"));
+        if (!previews.length) metrics.append(node("p", "muted", row.schedulingState === "ACTIVE" ? "暂无数据 · 等待首样本或采集结果" : "未安排采集"));
         article.append(metrics);
         const detail = node("div", "instance-entry");
         const button = node("button", "secondary-button detail-button", "查看实例"); button.type = "button"; button.dataset.openTarget = row.target.id;
@@ -235,10 +257,25 @@
       }
       details?.sync(data);
     }
-    function recompute() {
+    function recompute(force = true) {
       if (!cached) return;
-      render(model(cached.catalog, ageSnapshot(cached.snapshot,
-        Date.parse(cached.snapshot.serverTime) + Math.max(0, global.performance.now() - receivedAt))));
+      const millis = serverNow(), data = model(cached.catalog, ageSnapshot(cached.snapshot, millis));
+      const signature = JSON.stringify(data.rows.map(row => [row.target.id, row.service, row.collection,
+        list(row.collections).map(item => item.expired), list(row.coreMetrics).map(metric => metric.valueState)]));
+      if (force || signature !== lastSignature) { render(data); lastSignature = signature; }
+      else current = data;
+      updateFreshness(byId("instance-list"), millis);
+      byId("overview-time").textContent = "快照读取 " + time(data.serverTime) + ` · 已过去 ${Math.floor((millis - Date.parse(data.serverTime)) / 1000)} 秒`;
+      details?.recompute(false);
+    }
+    function clearTicker() { if (ticker !== null) global.clearTimeout(ticker); ticker = null; }
+    function startTicker(reset = false) {
+      if (reset) clearTicker();
+      if (ticker !== null) return;
+      ticker = global.setTimeout(() => {
+        ticker = null;
+        if (!root.hidden && document.visibilityState === "visible" && poller.state().active) { recompute(false); startTicker(); }
+      }, 1000);
     }
     const poller = createPoller({
       visible: () => document.visibilityState === "visible",
@@ -251,15 +288,16 @@
         throw new Error("Directory changed");
       },
       onData(data) {
-        cached = data; receivedAt = global.performance.now();
+        cached = data; serverNow = createServerClock(data.snapshot.serverTime);
         byId("overview-message").hidden = true;
         recompute();
         details?.refresh();
+        startTicker(true);
       },
       onError(error) {
         if (["SESSION_EXPIRED", "ACCESS_DENIED", "IDENTITY_UNAVAILABLE", "MONITOR_DISABLED"].includes(error.code)) { onSessionError(error); return; }
         const message = byId("overview-message"); message.hidden = false;
-        message.textContent = "! 当前快照读取失败，保留上次结果；可手动刷新重试。";
+        message.textContent = cached ? "! 整体快照读取失败，保留上次结果；各项仍按有效期过期，可手动刷新重试。" : "! 整体快照读取失败，暂无数据；可手动刷新重试。";
       },
       onState(state) {
         root.setAttribute("aria-busy", String(state.busy));
@@ -297,9 +335,9 @@
     });
     byId("refresh-snapshot").addEventListener("click", () => poller.refresh());
     byId("pause-snapshot").addEventListener("click", () => poller.setPaused(!poller.state().paused));
-    function suspend() { poller.suspend(); details?.suspend(); root.hidden = true; }
+    function suspend() { clearTicker(); poller.suspend(); details?.suspend(); root.hidden = true; }
     function stop() {
-      poller.stop(); current = null; cached = null;
+      clearTicker(); poller.stop(); current = null; cached = null; serverNow = null; lastSignature = null;
       details?.close();
       root.hidden = true;
       for (const id of ["service-summary", "type-cards", "instance-list"]) byId(id).replaceChildren();
@@ -313,12 +351,13 @@
         const message = byId("overview-message"); message.hidden = false; message.textContent = "正在读取当前快照…";
       }
       details?.resume();
+      startTicker();
       return poller.start(!cached);
     }
     return Object.freeze({ start, stop, suspend, recompute, current: () => current, details: () => details?.current() });
   }
   const api = Object.freeze({ TYPES, NAMES, SERVICE, COLLECTION, REASONS, SCOPES, model, serviceState, collectionState, metricView, time, scopeText,
-    exceptional, matches, ageMetric, ageSnapshot, createPoller, create });
+    exceptional, matches, ageMetric, ageSnapshot, createServerClock, freshnessText, updateFreshness, createPoller, create });
   if (typeof module === "object" && module.exports) module.exports = api;
   else global.MonitorOverview = api;
 })(typeof window === "object" ? window : globalThis);

@@ -36,7 +36,7 @@
   }
   function create({ client, onSessionError }) {
     const document = global.document, byId = id => document.getElementById(id), root = byId("target-detail");
-    let selected, cached, current, receivedAt = 0, limit = 200, suspended = false, directoryGeneration, loading = false;
+    let selected, cached, current, serverNow, lastSignature, limit = 200, suspended = false, directoryGeneration, loading = false;
     function node(tag, className, text) {
       const element = document.createElement(tag); if (className) element.className = className;
       if (text !== undefined) element.textContent = text; return element;
@@ -51,6 +51,7 @@
       byId("detail-identity").textContent = "目标 " + target.id + " · 连接来源 " + (list(target.connectionSources).join("、") || "暂无连接");
     }
     function render(data) {
+      const opened = new Set([...root.querySelectorAll(".detail-metric")].filter(card => card.querySelector("details")?.open).map(card => JSON.stringify([card.dataset.metricKey, card.dataset.bindingId])));
       current = data; heading(data.target.target);
       const states = byId("detail-states"); states.replaceChildren();
       if (data.target.schedulingState === "ACTIVE") states.append(badge(monitor.serviceState(data.target), monitor.SERVICE), badge(monitor.collectionState(data.target), monitor.COLLECTION));
@@ -71,17 +72,20 @@
         const grid = node("div", "detail-metric-grid");
         for (const metric of visible) {
           const view = monitor.metricView(metric); if (!view) continue;
-          const card = node("article", "detail-metric"); card.dataset.metricKey = view.definition.key; card.dataset.valueState = view.state;
+          const card = node("article", "detail-metric"); card.dataset.metricKey = view.definition.key; card.dataset.bindingId = metric.bindingId; card.dataset.valueState = view.state;
           card.append(node("h4", "metric-label", view.definition.label), node("strong", "metric-value", view.text + (view.unit ? " " + view.unit : "")));
           if (view.note) card.append(node("p", "metric-note", view.note));
+          if (view.state === "NO_DATA") card.append(node("p", "metric-note", "暂无数据"));
           card.append(node("p", "metric-scope", "对象范围 " + monitor.scopeText(view.definition.scope)),
             node("p", "muted", "单位 " + (view.unit || ({ TEXT: "文本", BOOLEAN: "是否" }[view.definition.unit]) || "未知")),
-            node("p", "muted", "数值采样 " + monitor.time(view.sample?.sampledAt)),
+            node("p", "muted", (view.state === "LAST_SUCCESS" || view.state === "EXPIRED" ? "上次成功 " : "数值采样 ") + monitor.time(view.sample?.sampledAt)),
             node("p", "muted", "最近尝试 " + monitor.time(metric.latestAttempt.sampledAt)));
+          const freshness = node("p", "muted live-freshness"); freshness.dataset.validUntil = view.validUntil || ""; card.append(freshness);
           if (metric.kind === "CAPACITY") card.append(node("p", "metric-period", `容量独立采样 · ${(rules.capacityIntervalMillis || 60000) / 1000} 秒周期`));
           const explanation = node("details", "metric-explanation"); explanation.append(node("summary", "", "来源与计算说明"),
             node("p", "muted", "指标 " + view.definition.key), node("p", "muted", "绑定 " + metric.bindingId + " · " + metric.source),
             node("p", "", "原生来源 " + view.definition.source), node("p", "", "计算说明 " + view.definition.calculation));
+          explanation.open = opened.has(JSON.stringify([view.definition.key, metric.bindingId]));
           card.append(explanation); grid.append(card);
         }
         section.append(grid); groups.append(section);
@@ -93,22 +97,28 @@
       for (const item of data.target.collections) collection.append(node("p", "muted", `${item.source} · 绑定 ${item.bindingId} · ${item.kind === "CAPACITY" ? "容量" : "普通"} · ${monitor.COLLECTION[item.status]?.[1] || "等待采样"}${item.reason ? " · " + (monitor.REASONS[item.reason] || "暂无数据") : ""} · 最近完成 ${monitor.time(item.lastAttempt?.completedAt)}`));
       byId("detail-time").textContent = "详情读取 " + monitor.time(data.serverTime);
     }
-    function recompute() {
-      if (cached && !suspended) render(ageDetail(cached, Date.parse(cached.serverTime) + Math.max(0, global.performance.now() - receivedAt)));
+    function recompute(force = true) {
+      if (!cached || suspended) return;
+      const millis = serverNow(), data = ageDetail(cached, millis);
+      const signature = JSON.stringify([limit, monitor.serviceState(data.target), monitor.collectionState(data.target), data.metrics.map(metric => metric.valueState)]);
+      if (force || signature !== lastSignature) { render(data); lastSignature = signature; }
+      else current = data;
+      monitor.updateFreshness(root, millis);
+      byId("detail-time").textContent = "详情读取 " + monitor.time(data.serverTime) + ` · 已过去 ${Math.floor((millis - Date.parse(data.serverTime)) / 1000)} 秒`;
     }
     const reader = createReader({ load: (id, signal) => client.detail(id, signal),
       onLoading() { loading = true; root.setAttribute("aria-busy", "true"); message(cached ? "正在更新当前实例详情…" : "正在读取当前实例详情…"); },
       onData(data) {
-        loading = false; cached = data; receivedAt = global.performance.now(); root.setAttribute("aria-busy", "false"); byId("detail-message").hidden = true; recompute();
+        loading = false; cached = data; serverNow = monitor.createServerClock(data.serverTime); root.setAttribute("aria-busy", "false"); byId("detail-message").hidden = true; recompute();
       },
       onError(error) {
         loading = false; root.setAttribute("aria-busy", "false");
         if (["SESSION_EXPIRED", "ACCESS_DENIED", "IDENTITY_UNAVAILABLE", "MONITOR_DISABLED"].includes(error.code)) { onSessionError(error); return; }
-        message(error.code === "TARGET_NOT_FOUND" ? "! 此实例已不在当前目录，请重新选择实例。" : "! 当前实例详情读取失败，可重试；已保留该实例上次结果。");
+        message(error.code === "TARGET_NOT_FOUND" ? "! 此实例已不在当前目录，请重新选择实例。" : cached ? "! 当前实例详情读取失败，可重试；已保留该实例上次结果。" : "! 当前实例详情读取失败，暂无数据；可重试。");
       }
     });
     function clearValues() {
-      cached = null; current = null;
+      cached = null; current = null; serverNow = null; lastSignature = null;
       for (const id of ["detail-states", "detail-metrics", "detail-collection"]) byId(id).replaceChildren();
       for (const id of ["detail-periods", "detail-count", "detail-time"]) byId(id).textContent = "";
       byId("detail-more").hidden = true;

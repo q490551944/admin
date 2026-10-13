@@ -46,3 +46,18 @@ test("repeated detail clicks coalesce and stopping after logout prevents late pr
   await new Promise(resolve => setImmediate(resolve)); reader.stop(); assert.equal(signal.aborted, true);
   release(data(target)); await pending; assert.deepEqual(rendered, []);
 });
+
+test("retained detail ages ordinary and capacity independently without replacing successful clocks or zero", () => {
+  const base = Date.parse("2026-10-13T07:00:00Z"), until = delay => new Date(base + delay).toISOString();
+  const sample = { definition: { key: "redis.memory.bytes", label: "内存", unit: "BYTES", scope: {} }, value: 0, sampledAt: until(0), validUntil: until(45000) };
+  const ordinary = { latestAttempt: { ...sample, value: null, missingReason: "TIMEOUT", sampledAt: until(15000) }, lastSuccess: sample, valueState: "LAST_SUCCESS", validUntil: until(45000) };
+  const capacity = { latestAttempt: sample, lastSuccess: { ...sample, validUntil: until(180000) }, valueState: "CURRENT", validUntil: until(180000) };
+  const original = { ...data(target), target: { target, serviceObservations: [{ availability: "AVAILABLE", validUntil: until(45000) }], collections: [] }, metrics: [ordinary, capacity] };
+  const atBoundary = details.ageDetail(original, base + 45000);
+  assert.equal(atBoundary.target.serviceObservations[0].availability, "AVAILABLE"); assert.equal(atBoundary.metrics[0].valueState, "LAST_SUCCESS");
+  const aged = details.ageDetail(original, base + 45001);
+  assert.equal(aged.target.serviceObservations[0].availability, "UNKNOWN"); assert.deepEqual(aged.metrics.map(item => item.valueState), ["EXPIRED", "CURRENT"]);
+  assert.equal(monitor.metricView(aged.metrics[0]).text, "0"); assert.match(monitor.metricView(aged.metrics[0]).note, /超时/);
+  assert.equal(aged.metrics[0].lastSuccess.sampledAt, until(0)); assert.equal(original.metrics[0].valueState, "LAST_SUCCESS");
+  assert.equal(details.ageDetail(original, base + 180001).metrics[1].valueState, "EXPIRED");
+});
