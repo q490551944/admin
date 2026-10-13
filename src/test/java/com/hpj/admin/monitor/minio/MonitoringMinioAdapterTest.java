@@ -441,6 +441,25 @@ class MonitoringMinioAdapterTest {
     }
 
     @Test
+    void nativeNodeProcessCollectorNamesUseItsUnlabelledStartupOnlyForOneReportedServer() throws Exception {
+        try (Fixture f = new Fixture()) {
+            when(f.connections.metricsEnabled(any())).thenReturn(true);
+            String first = "minio_process_start_time_seconds 100\nminio_process_cpu_seconds_total 2\nminio_process_resident_memory_bytes 1234\nminio_process_virtual_memory_bytes 2000\nminio_s3_requests_total{server=\"private-node:9000\",api=\"GetObject\"} 10\n";
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, first));
+            CollectionResult baseline = f.collect(0);
+            assertThat(number(baseline, "minio.native.process.resident.bytes")).isEqualByComparingTo("1234");
+            assertThat(metric(baseline, "minio.native.process.resident.bytes").definition().source()).contains("minio_process_resident_memory_bytes");
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, first.replace("} 10", "} 40").replace("total 2", "total 32")));
+            CollectionResult rate = f.collect(15_000);
+            assertThat(number(rate, "minio.native.requests.total.rate")).isEqualByComparingTo("2");
+            assertThat(number(rate, "minio.native.process.cpu.seconds.rate")).isEqualByComparingTo("2");
+            when(f.session.metrics(any())).thenReturn(new MinioMonitoringConnections.MetricsObservation(200, first + "minio_s3_requests_total{server=\"second-node:9000\",api=\"GetObject\"} 5\n"));
+            assertThat(f.collect(30_000).metrics()).filteredOn(sample -> sample.definition().key().equals("minio.native.requests.total.rate"))
+                    .allSatisfy(sample -> assertThat(sample.missingReason()).isEqualTo(MissingReason.UNSUPPORTED));
+        }
+    }
+
+    @Test
     void labelDelimitersCannotMergeDifferentNativeScopesOrCounterBaselines() throws Exception {
         try (Fixture f = new Fixture()) {
             when(f.connections.metricsEnabled(any())).thenReturn(true);

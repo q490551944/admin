@@ -49,7 +49,7 @@ S3 密钥不证明 metrics 授权。没有应用已有的独立 Bearer 授权时
 
 应用可以把已准备好的授权注册为 `MinioMetricsAuthorization` 单例，绑定同一个 `MinioClient` / `ChatProperties` 对象、其当前已配置 origin、已有 Bearer 及明确授权的 NODE / CLUSTER 端点集合。监控只读取已经创建的单例，不初始化懒加载 Bean，也不提供新的凭据配置。origin 漂移、不同 owner、重复授权或不匹配的端点均不使用。监控不生成 token、不自动刷新 token、不改认证模式；授权轮换由应用现有机制负责。
 
-普通周期固定读取 `GET /minio/v2/metrics/node`，映射原生请求总数、4xx/5xx/全部错误累计、S3 收发字节、进程 CPU 累计秒、驻留与虚拟内存以及进程启动时间。CPU 秒的增量 / 实际秒数以 `CORES` 表达，不猜测宿主机核数或百分比。请求与流量速率使用通用计数器和同节点原生启动时间；缺少启动证据时累计值仍可显示，速率不支持。首次、重启与计数回退等待新基线，失败不推进基线。
+普通周期固定读取 `GET /minio/v2/metrics/node`，映射原生请求总数、4xx/5xx/全部错误累计、S3 收发字节、进程 CPU 累计秒、驻留与虚拟内存以及进程启动时间。此版本 node 端点使用标准 ProcessCollector 的 `minio_process_cpu_seconds_total`、`minio_process_resident_memory_bytes`、`minio_process_virtual_memory_bytes` 与 `minio_process_start_time_seconds`；字段表中的 `minio_node_process_*` 也被识别，但不把两个来源重复合并。每条成功指标保留实际原生字段名。CPU 秒的增量 / 实际秒数以 `CORES` 表达，不猜测宿主机核数或百分比。请求与流量速率使用通用计数器和同节点原生启动时间；无 label 的 node 进程启动值只在同响应至多一个 server 时关联，缺少启动证据时累计值仍可显示，速率不支持。首次、重启与计数回退等待新基线，失败不推进基线。
 
 容量周期固定读取 `GET /minio/v2/metrics/cluster`，仅映射集群 raw / usable total、free 字节、后台扫描器对象数量和逻辑字节，以及在线/离线磁盘数、原生磁盘 free。逻辑对象量可能滞后于写入，与原始卷容量分开；不遍历对象、不跨 label 或磁盘求和。原始节点及路径 label 只参与稳定摘要，不能泄露地址和私有目录。普通 / 容量 TTL 为 45 / 180 秒；容量不会刷新普通样本或服务探测。
 

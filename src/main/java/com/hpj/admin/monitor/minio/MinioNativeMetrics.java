@@ -18,6 +18,11 @@ final class MinioNativeMetrics {
     private static final Pattern SAMPLE = Pattern.compile("([a-zA-Z_:][a-zA-Z0-9_:]*)(\\{([^}]{0,8192})})?\\s+([^\\s]{1,64})(?:\\s+[0-9]{1,20})?");
     private static final Pattern LABEL = Pattern.compile("([a-zA-Z_][a-zA-Z0-9_]*)=\"((?:[^\"\\\\]|\\\\[\\\\\"n]){0,512})\"");
     private static final Map<String, Field> FIELDS = new LinkedHashMap<>();
+    private static final Map<String, String> NODE_PROCESS_NAMES = Map.of(
+            "minio_process_cpu_seconds_total", "minio_node_process_cpu_total_seconds",
+            "minio_process_resident_memory_bytes", "minio_node_process_resident_memory_bytes",
+            "minio_process_virtual_memory_bytes", "minio_node_process_virtual_memory_bytes",
+            "minio_process_start_time_seconds", "minio_node_process_starttime_seconds");
     static {
         field("minio_s3_requests_total", "requests.total", "S3 请求累计", Unit.COUNT, false, true, false);
         field("minio_s3_requests_errors_total", "requests.errors.total", "S3 请求错误累计", Unit.COUNT, false, true, false);
@@ -43,7 +48,7 @@ final class MinioNativeMetrics {
         FIELDS.put(nativeName, new Field(nativeName, key, label, unit, capacity, rate, process));
     }
     private record Field(String nativeName, String key, String label, Unit unit, boolean capacity, boolean rate, boolean process) { }
-    private record Row(Field field, Map<String, String> labels, BigDecimal value, MissingReason reason) { }
+    private record Row(Field field, String nativeName, Map<String, String> labels, BigDecimal value, MissingReason reason) { }
     record Result(List<MetricSample> metrics, MissingReason reason, boolean inventoryComplete) { }
 
     static Result unavailable(CollectionRequest request, Instant at, MissingReason reason) {
@@ -64,7 +69,7 @@ final class MinioNativeMetrics {
                 if (line.isEmpty() || line.startsWith("#")) continue;
                 var sample = SAMPLE.matcher(line);
                 if (!sample.matches()) return unavailable(request, at, MissingReason.INVALID_VALUE);
-                Field field = FIELDS.get(sample.group(1));
+                Field field = FIELDS.get(NODE_PROCESS_NAMES.getOrDefault(sample.group(1), sample.group(1)));
                 if (field == null || field.capacity() != capacity) continue;
                 Map<String, String> labels = labels(sample.group(3));
                 BigDecimal value = null; MissingReason reason = null;
@@ -74,7 +79,7 @@ final class MinioNativeMetrics {
                             || (field.unit() == Unit.BYTES || field.unit() == Unit.COUNT) && value.stripTrailingZeros().scale() > 0) reason = MissingReason.INVALID_VALUE;
                 } catch (NumberFormatException invalid) { reason = MissingReason.INVALID_VALUE; }
                 String identity = field.nativeName() + ":" + canonicalLabels(labels);
-                if (rows.putIfAbsent(identity, new Row(field, labels, reason == null ? value : null, reason)) != null) return unavailable(request, at, MissingReason.INVALID_VALUE);
+                if (rows.putIfAbsent(identity, new Row(field, sample.group(1), labels, reason == null ? value : null, reason)) != null) return unavailable(request, at, MissingReason.INVALID_VALUE);
                 if (rows.size() > 2000) { rows.pollLastEntry(); truncated = true; }
             }
         } catch (com.hpj.admin.monitor.metric.CollectionControl.InactiveCollectionException inactive) {
@@ -95,6 +100,7 @@ final class MinioNativeMetrics {
             if (starts.putIfAbsent(server, row) != null) ambiguousStarts.add(server);
         }
         for (Row row : rows.values()) nodes.add(row.labels().getOrDefault("server", ""));
+        long reportedServers = nodes.stream().filter(node -> !node.isEmpty()).count();
         Set<String> selectedNodes = new HashSet<>(nodes.stream().limit(Math.min(128, properties.getLimits().getNodes())).toList());
         truncated |= selectedNodes.size() < nodes.size();
         for (Row row : rows.values()) {
@@ -103,12 +109,15 @@ final class MinioNativeMetrics {
             if (metrics.size() + (row.field().rate() ? 2 : 1) > limit) { truncated = true; continue; }
             observed.add(row.field().nativeName());
             Scope scope = scope(request, row);
-            Definition definition = definition(row.field(), scope);
+            Definition definition = definition(row.field(), scope, row.nativeName());
             metrics.add(row.reason() == null ? MetricSample.success(definition, row.value(), at, ttl) : MetricSample.missing(definition, row.reason(), at));
             if (failure == null && row.reason() != null) failure = row.reason();
             if (row.field().rate()) {
                 String server = row.labels().getOrDefault("server", "");
                 Row start = ambiguousStarts.contains(server) ? null : starts.get(server);
+                // The NODE endpoint is local. Its standard ProcessCollector is unlabelled; associate it
+                // only when this same response has at most one reported server, never a cluster response.
+                if (start == null && reportedServers <= 1 && !ambiguousStarts.contains("")) start = starts.get("");
                 Definition rate = new Definition("minio.native." + row.field().key() + ".rate", row.field().label() + "速率",
                         row.field().process() ? Unit.CORES : row.field().unit() == Unit.BYTES ? Unit.BYTES_PER_SECOND : Unit.COUNT_PER_SECOND,
                         scope, definition.source(), row.field().process() ? "进程 CPU 秒增量 / 实际秒数，单位为 CPU 核；不推定主机核数或百分比"
@@ -163,8 +172,11 @@ final class MinioNativeMetrics {
                 request.kind() == CollectionKind.CAPACITY ? "GET /minio/v2/metrics/cluster" : "GET /minio/v2/metrics/node", "仅使用应用已有且匹配当前连接的独立 Bearer 授权；S3 密钥不作为统计凭据");
     }
     private static Definition definition(Field field, Scope scope) {
+        return definition(field, scope, field.nativeName());
+    }
+    private static Definition definition(Field field, Scope scope, String nativeName) {
         return new Definition("minio.native." + field.key(), field.label(), field.unit(), scope,
-                "MinIO 原生 v2 " + field.nativeName(), field.capacity() ? "原生集群/磁盘统计，逻辑对象量来自后台扫描器，可能滞后；不遍历对象，不跨 label 或磁盘求和"
+                "MinIO 原生 v2 " + nativeName, field.capacity() ? "原生集群/磁盘统计，逻辑对象量来自后台扫描器，可能滞后；不遍历对象，不跨 label 或磁盘求和"
                 : "原生返回的指定 label 范围；不使用 admin 资源，不推定为宿主机，不跨节点或 API 求和");
     }
     private static MissingReason httpReason(int status) {

@@ -253,7 +253,7 @@ class MonitoringMinioAdapterIntegrationTest {
             assertThat(metric(ordinary, "native.metrics.available", null).value()).isEqualTo(true);
             assertThat(number(metric(ordinary, "native.process.resident.bytes", null))).isPositive();
             assertThat(metric(ordinary, "native.process.resident.bytes", null).definition().scope().kind()).isEqualTo(ScopeKind.PROCESS);
-            assertThat(collector.last().nativeMetrics.get(MinioMonitoringConnections.MetricsEndpoint.NODE).body()).contains("minio_node_process_resident_memory_bytes");
+            assertThat(collector.last().nativeMetrics.get(MinioMonitoringConnections.MetricsEndpoint.NODE).body()).contains("minio_process_resident_memory_bytes");
             assertThat(metric(ordinary, "bucket.accessible", environment.bucket).value()).isEqualTo(true);
             Instant memoryAt = metric(ordinary, "native.process.resident.bytes", null).sampledAt();
             CollectionResult capacity = collector.collect(target, CollectionKind.CAPACITY);
