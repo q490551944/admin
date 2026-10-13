@@ -1,0 +1,45 @@
+name: Monitoring real browser
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  monitor-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Verify owned container runtime
+        run: docker info
+      - name: Compile real runtime and verify network fault fixture
+        run: >-
+          bash mvnw -B -Dtest=OwnedRedisProxyTest test dependency:build-classpath
+          -Dmdep.outputFile=target/monitor-e2e-classpath.txt -DincludeScope=test
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Real MySQL and Redis periodic browser acceptance
+        run: npm run test:monitor:runtime:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: monitor-real-browser-validation
+          path: |
+            target/surefire-reports
+            target/monitor-runtime-browser-report
+            target/monitor-runtime-browser-results
+            target/monitor-runtime-e2e-*/app.log
+            target/monitor-runtime-e2e-*/ready.json
+            target/monitor-runtime-e2e-*/cleanup.json
+            target/monitor-runtime-e2e-*/acceptance-*.json

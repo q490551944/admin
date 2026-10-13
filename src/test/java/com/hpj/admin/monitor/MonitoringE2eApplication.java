@@ -94,7 +94,7 @@ public class MonitoringE2eApplication {
     @Bean
     IdentityOutage monitorE2eIdentityOutage() { return new IdentityOutage(); }
 
-    private static byte[] requireControlToken() {
+    static byte[] requireControlToken() {
         String token = System.getenv("MONITOR_E2E_CONTROL_TOKEN");
         if (token == null || token.length() < 32 || token.length() > 256 || token.isBlank()) {
             throw new IllegalArgumentException("Set MONITOR_E2E_CONTROL_TOKEN to a fresh random test token (32-256 characters)");
