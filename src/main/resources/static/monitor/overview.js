@@ -61,7 +61,8 @@
   function metricView(metric) {
     const latest = metric.latestAttempt;
     if (!latest?.definition) return null;
-    const sample = latest.missingReason ? metric.lastSuccess : latest;
+    const state = metric.valueState || (latest.missingReason ? (metric.lastSuccess ? "LAST_SUCCESS" : "NO_DATA") : "CURRENT");
+    const sample = state === "NO_DATA" ? null : state === "CURRENT" ? latest : metric.lastSuccess;
     const value = sample?.value;
     let text = "—";
     if (value !== null && value !== undefined) {
@@ -69,8 +70,9 @@
       else if (typeof value === "number") text = Number.isFinite(value) ? value.toLocaleString("zh-CN", { maximumFractionDigits: 3 }) : "—";
       else text = String(value);
     }
-    return { definition: latest.definition, text, unit: UNITS[latest.definition.unit] || "", sample,
-      note: latest.missingReason ? (sample ? "上次成功值 · " : "") + reason(latest.missingReason) : "", source: metric.source };
+    const note = state === "EXPIRED" ? "已过期 · 上次成功值" + (latest.missingReason ? " · " + reason(latest.missingReason) : "")
+      : latest.missingReason ? (sample ? "上次成功值 · " : "") + reason(latest.missingReason) : "";
+    return { definition: latest.definition, text, unit: UNITS[latest.definition.unit] || "", sample, state, note, source: metric.source };
   }
   function time(value) {
     return Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "暂无采样";
@@ -144,6 +146,7 @@
         const previews = list(row.coreMetrics).map(metricView).filter(Boolean);
         for (const view of previews) {
           const item = node("div", "core-metric");
+          item.dataset.valueState = view.state;
           item.append(node("p", "metric-label", view.definition.label), node("strong", "metric-value", view.text + (view.unit ? " " + view.unit : "")),
             node("small", "metric-scope", scopeText(view.definition.scope)), node("small", "muted", time(view.sample?.sampledAt)));
           if (view.note) item.append(node("small", "metric-note", view.note));

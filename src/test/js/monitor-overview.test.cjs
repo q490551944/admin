@@ -63,3 +63,11 @@ test("a real zero stays zero; missing values have reasons and failures retain th
   assert.equal(retained.sample.sampledAt, at);
   assert.match(monitor.scopeText(definition.scope), /进程.*remote-process/);
 });
+
+test("backend expiry marks a retained zero as old and does not invent a zero for never-observed metrics", () => {
+  const sample = { definition: { label: "容量", unit: "BYTES", scope: {} }, value: 0, sampledAt: at };
+  const expired = monitor.metricView({ latestAttempt: sample, lastSuccess: sample, valueState: "EXPIRED" });
+  assert.equal(expired.text, "0"); assert.equal(expired.note, "已过期 · 上次成功值"); assert.equal(expired.state, "EXPIRED");
+  const empty = monitor.metricView({ latestAttempt: { ...sample, value: null, missingReason: "WAITING_SAMPLE" }, valueState: "NO_DATA" });
+  assert.equal(empty.text, "—"); assert.equal(empty.note, "等待采样"); assert.equal(empty.sample, null);
+});

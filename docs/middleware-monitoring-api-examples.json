@@ -133,7 +133,10 @@
           "completedAt" : "2026-09-14T02:00:00Z",
           "status" : "SUCCESS",
           "reason" : null
-        }
+        },
+        "validUntil" : "2026-09-14T02:00:45Z",
+        "valuesValidUntil" : "2026-09-14T02:00:45Z",
+        "expired" : false
       }, {
         "bindingId" : "redis-a",
         "source" : "sharedRedis",
@@ -149,7 +152,10 @@
           "completedAt" : "2026-09-14T02:00:00Z",
           "status" : "FAILED",
           "reason" : "TIMEOUT"
-        }
+        },
+        "validUntil" : "2026-09-14T02:03:00Z",
+        "valuesValidUntil" : "2026-09-14T02:02:00Z",
+        "expired" : false
       } ],
       "serviceObservations" : [ {
         "bindingId" : "redis-a",
@@ -166,11 +172,75 @@
           },
           "sampledAt" : "2026-09-14T02:00:00Z",
           "validUntil" : "2026-09-14T02:00:45Z"
-        }
+        },
+        "validUntil" : "2026-09-14T02:00:45Z",
+        "expired" : false
       } ],
       "metricCount" : 2,
-      "missingMetricCount" : 1
-    } ]
+      "missingMetricCount" : 1,
+      "coreMetrics" : [ {
+        "source" : "sharedRedis",
+        "bindingId" : "redis-a",
+        "kind" : "ORDINARY",
+        "latestAttempt" : {
+          "definition" : {
+            "key" : "connections",
+            "label" : "Connected clients",
+            "unit" : "COUNT",
+            "scope" : {
+              "kind" : "PROCESS",
+              "id" : "redis-process",
+              "nodeId" : null
+            },
+            "source" : "INFO clients",
+            "calculation" : "Native connected_clients"
+          },
+          "value" : 0,
+          "missingReason" : null,
+          "sampledAt" : "2026-09-14T02:00:00Z",
+          "lastSuccessAt" : "2026-09-14T02:00:00Z",
+          "validUntil" : "2026-09-14T02:00:45Z"
+        },
+        "lastSuccess" : {
+          "definition" : {
+            "key" : "connections",
+            "label" : "Connected clients",
+            "unit" : "COUNT",
+            "scope" : {
+              "kind" : "PROCESS",
+              "id" : "redis-process",
+              "nodeId" : null
+            },
+            "source" : "INFO clients",
+            "calculation" : "Native connected_clients"
+          },
+          "value" : 0,
+          "missingReason" : null,
+          "sampledAt" : "2026-09-14T02:00:00Z",
+          "lastSuccessAt" : "2026-09-14T02:00:00Z",
+          "validUntil" : "2026-09-14T02:00:45Z"
+        },
+        "valueState" : "CURRENT",
+        "validUntil" : "2026-09-14T02:00:45Z"
+      } ],
+      "serviceAvailability" : "AVAILABLE",
+      "collectionStatus" : "FAILED",
+      "exceptional" : true
+    } ],
+    "freshnessRules" : {
+      "refreshIntervalMillis" : 15000,
+      "ordinaryIntervalMillis" : 15000,
+      "capacityIntervalMillis" : 60000,
+      "serviceTtlMillis" : 45000,
+      "metricTtlMultiplier" : 3,
+      "expiresAfterValidUntil" : true
+    },
+    "serviceSummary" : {
+      "CONNECTION_FAILED" : 0,
+      "AVAILABLE" : 1,
+      "UNKNOWN" : 0,
+      "DEGRADED" : 0
+    }
   },
   "detail" : {
     "serverTime" : "2026-09-14T02:00:20Z",
@@ -220,7 +290,10 @@
           "completedAt" : "2026-09-14T02:00:00Z",
           "status" : "SUCCESS",
           "reason" : null
-        }
+        },
+        "validUntil" : "2026-09-14T02:00:45Z",
+        "valuesValidUntil" : "2026-09-14T02:00:45Z",
+        "expired" : false
       }, {
         "bindingId" : "redis-a",
         "source" : "sharedRedis",
@@ -236,7 +309,10 @@
           "completedAt" : "2026-09-14T02:00:00Z",
           "status" : "FAILED",
           "reason" : "TIMEOUT"
-        }
+        },
+        "validUntil" : "2026-09-14T02:03:00Z",
+        "valuesValidUntil" : "2026-09-14T02:02:00Z",
+        "expired" : false
       } ],
       "serviceObservations" : [ {
         "bindingId" : "redis-a",
@@ -253,10 +329,60 @@
           },
           "sampledAt" : "2026-09-14T02:00:00Z",
           "validUntil" : "2026-09-14T02:00:45Z"
-        }
+        },
+        "validUntil" : "2026-09-14T02:00:45Z",
+        "expired" : false
       } ],
       "metricCount" : 2,
-      "missingMetricCount" : 1
+      "missingMetricCount" : 1,
+      "coreMetrics" : [ {
+        "source" : "sharedRedis",
+        "bindingId" : "redis-a",
+        "kind" : "ORDINARY",
+        "latestAttempt" : {
+          "definition" : {
+            "key" : "connections",
+            "label" : "Connected clients",
+            "unit" : "COUNT",
+            "scope" : {
+              "kind" : "PROCESS",
+              "id" : "redis-process",
+              "nodeId" : null
+            },
+            "source" : "INFO clients",
+            "calculation" : "Native connected_clients"
+          },
+          "value" : 0,
+          "missingReason" : null,
+          "sampledAt" : "2026-09-14T02:00:00Z",
+          "lastSuccessAt" : "2026-09-14T02:00:00Z",
+          "validUntil" : "2026-09-14T02:00:45Z"
+        },
+        "lastSuccess" : {
+          "definition" : {
+            "key" : "connections",
+            "label" : "Connected clients",
+            "unit" : "COUNT",
+            "scope" : {
+              "kind" : "PROCESS",
+              "id" : "redis-process",
+              "nodeId" : null
+            },
+            "source" : "INFO clients",
+            "calculation" : "Native connected_clients"
+          },
+          "value" : 0,
+          "missingReason" : null,
+          "sampledAt" : "2026-09-14T02:00:00Z",
+          "lastSuccessAt" : "2026-09-14T02:00:00Z",
+          "validUntil" : "2026-09-14T02:00:45Z"
+        },
+        "valueState" : "CURRENT",
+        "validUntil" : "2026-09-14T02:00:45Z"
+      } ],
+      "serviceAvailability" : "AVAILABLE",
+      "collectionStatus" : "FAILED",
+      "exceptional" : true
     },
     "metrics" : [ {
       "source" : "sharedRedis",
@@ -299,7 +425,9 @@
         "sampledAt" : "2026-09-14T02:00:00Z",
         "lastSuccessAt" : "2026-09-14T02:00:00Z",
         "validUntil" : "2026-09-14T02:00:45Z"
-      }
+      },
+      "valueState" : "CURRENT",
+      "validUntil" : "2026-09-14T02:00:45Z"
     }, {
       "source" : "sharedRedis",
       "bindingId" : "redis-a",
@@ -341,7 +469,9 @@
         "sampledAt" : "2026-09-14T01:59:00Z",
         "lastSuccessAt" : "2026-09-14T01:59:00Z",
         "validUntil" : "2026-09-14T02:02:00Z"
-      }
+      },
+      "valueState" : "LAST_SUCCESS",
+      "validUntil" : "2026-09-14T02:02:00Z"
     } ],
     "capabilityState" : "OBSERVED",
     "capabilities" : [ {
@@ -364,7 +494,8 @@
       "latestMissingReason" : null,
       "sampledAt" : "2026-09-14T02:00:00Z",
       "lastSuccessAt" : "2026-09-14T02:00:00Z",
-      "validUntil" : "2026-09-14T02:00:45Z"
+      "validUntil" : "2026-09-14T02:00:45Z",
+      "valueState" : "CURRENT"
     }, {
       "bindingId" : "redis-a",
       "source" : "sharedRedis",
@@ -385,7 +516,16 @@
       "latestMissingReason" : "TIMEOUT",
       "sampledAt" : "2026-09-14T02:00:00Z",
       "lastSuccessAt" : "2026-09-14T01:59:00Z",
-      "validUntil" : "2026-09-14T02:00:00Z"
-    } ]
+      "validUntil" : "2026-09-14T02:02:00Z",
+      "valueState" : "LAST_SUCCESS"
+    } ],
+    "freshnessRules" : {
+      "refreshIntervalMillis" : 15000,
+      "ordinaryIntervalMillis" : 15000,
+      "capacityIntervalMillis" : 60000,
+      "serviceTtlMillis" : 45000,
+      "metricTtlMultiplier" : 3,
+      "expiresAfterValidUntil" : true
+    }
   }
 }

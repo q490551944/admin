@@ -94,6 +94,7 @@ body[data-page="index"] .actions:has(button:not([hidden])) { margin-top: 14px; }
 .metric-value { font-size: 20px; font-weight: 500; line-height: 1.6; }
 .metric-scope { color: var(--muted); font-size: 11px; line-height: 1.6; }
 .metric-note { color: #92601e; font-size: 11px; }
+.core-metric[data-value-state="LAST_SUCCESS"] .metric-value, .core-metric[data-value-state="EXPIRED"] .metric-value { color: var(--muted); }
 .instance-entry { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 20px; }
 .instance-entry summary { cursor: pointer; font-size: 12px; color: var(--green); }
 .empty-state { border: 1px dashed #bacbbd; padding: 30px; border-radius: 12px; color: var(--muted); font-size: 14px; line-height: 1.8; }
