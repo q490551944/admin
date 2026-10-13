@@ -42,6 +42,133 @@ async function routeData(page, data) {
       target: row, metrics: row?.coreMetrics || [], capabilityState: "UNKNOWN", capabilities: [], freshnessRules: data.snapshot.freshnessRules } });
   });
 }
+function resourceFixture() {
+  const data = detailFixture(), at = data.snapshot.serverTime;
+  for (const detail of Object.values(data.details)) {
+    detail.metrics = [];
+    for (const record of [...detail.target.collections, ...detail.target.serviceObservations]) record.bindingId = detail.target.target.id;
+  }
+  function add(type, key, label, value, unit = "BYTES", scope = "PROCESS", options = {}) {
+    const id = type.toLowerCase() + "-detail", kind = options.kind || "ORDINARY";
+    const definition = { key, label, unit, scope: { kind: scope, id: options.id || "native-" + scope.toLowerCase(), nodeId: options.nodeId || null },
+      source: options.source || "原生适配器字段", calculation: options.calculation || "原生范围直接读取；不跨对象相加" };
+    const sample = { definition, value, missingReason: options.reason || null, sampledAt: at,
+      validUntil: new Date(Date.parse(at) + (kind === "CAPACITY" ? 180000 : 45000)).toISOString() };
+    data.details[id].metrics.push({ source: "existingClient", bindingId: id, kind, latestAttempt: sample,
+      lastSuccess: options.reason ? null : sample, valueState: options.reason ? "NO_DATA" : "CURRENT", validUntil: options.reason ? null : sample.validUntil });
+  }
+  add("REDIS", "redis.cpu.single_core.percent", "Redis 进程 CPU（单核基准）", 175, "PERCENT");
+  add("REDIS", "redis.memory.maxmemory.bytes", "Redis 配置内存上限", 0);
+  add("REDIS", "redis.memory.used.percent", "分配内存与配置上限之比", null, "PERCENT", "PROCESS", { reason: "NOT_APPLICABLE" });
+  add("REDIS", "redis.aof.current.bytes", "AOF 当前大小", 32, "BYTES", "PROCESS");
+  add("MYSQL", "mysql.innodb.buffer_pool.data.bytes", "InnoDB 缓冲池数据字节", 64, "BYTES", "CACHE");
+  add("MYSQL", "mysql.database.data.bytes", "可见基础表数据空间估算", 100, "BYTES", "DATABASE", { kind: "CAPACITY" });
+  add("MYSQL", "mysql.database.index.bytes", "可见基础表索引空间估算", 20, "BYTES", "DATABASE", { kind: "CAPACITY" });
+  add("MYSQL", "mysql.filesystem.total.bytes", "MySQL 文件系统总量", null, "BYTES", "FILESYSTEM", { kind: "CAPACITY", reason: "UNSUPPORTED" });
+  add("KAFKA", "kafka.replica.log.bytes", "分区副本日志段字节", 100, "BYTES", "PARTITION", { kind: "CAPACITY" });
+  add("KAFKA", "kafka.log_directory.volume.total.bytes", "目录所在卷原生总字节", null, "BYTES", "FILESYSTEM", { kind: "CAPACITY", reason: "UNSUPPORTED" });
+  add("MONGODB", "mongodb.process.kind", "当前进程类型", "mongos", "TEXT");
+  add("MONGODB", "mongodb.wiredtiger.cache.used.bytes", "WiredTiger 缓存已用量", null, "BYTES", "CACHE", { reason: "NOT_APPLICABLE" });
+  add("MONGODB", "mongodb.database.dataSize.bytes", "数据库未压缩逻辑数据", 100, "BYTES", "DATABASE", { kind: "CAPACITY" });
+  add("MINIO", "minio.bucket.accessible", "配置桶可访问", true, "BOOLEAN", "BUCKET");
+  add("MINIO", "minio.native.metrics.available", "原生统计接口能力", null, "BOOLEAN", "ENDPOINT", { reason: "UNSUPPORTED" });
+  add("MINIO", "minio.native.cluster.raw.total.bytes", "集群原始在线容量", null, "BYTES", "CLUSTER", { kind: "CAPACITY", reason: "UNSUPPORTED" });
+  for (const [nodeId, cpu] of [["node-a", 15], ["node-b", 80]]) {
+    add("ELASTICSEARCH", "elasticsearch.process.cpu.percent", "节点进程 CPU 使用率", cpu, "PERCENT", "PROCESS", { nodeId });
+    add("ELASTICSEARCH", "elasticsearch.jvm.heap.used.percent", "JVM 堆使用率", cpu, "PERCENT", "JVM_HEAP", { nodeId });
+    add("ELASTICSEARCH", "elasticsearch.os.memory.used.percent", "节点报告 OS 内存使用率", null, "PERCENT", "NODE_REPORTED_OS", { nodeId, reason: "UNSUPPORTED" });
+    add("ELASTICSEARCH", "elasticsearch.filesystem.total.bytes", "节点文件系统总量", 0, "BYTES", "FILESYSTEM", { nodeId, kind: "CAPACITY" });
+    add("ELASTICSEARCH", "elasticsearch.filesystem.used.percent", "节点文件系统占用比例", null, "PERCENT", "FILESYSTEM", { nodeId, kind: "CAPACITY", reason: "NOT_APPLICABLE" });
+  }
+  for (const id of ["path-1", "path-2"]) add("ELASTICSEARCH", "elasticsearch.data_path.total.bytes", "数据路径报告的总字节", 100, "BYTES", "FILESYSTEM", { nodeId: "node-a", id, kind: "CAPACITY", calculation: "多个路径共享同一卷，绝不累加这些行" });
+  add("ELASTICSEARCH", "elasticsearch.nodes.failed", "原生节点失败数", 1, "COUNT", "CLUSTER");
+  return data;
+}
+for (const width of [1280, 390]) {
+  test(`resource Redis ${width}px preserves CPU above 100 and explains unlimited maxmemory without zero ratio`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 }); await routeData(page, resourceFixture()); await login(page);
+    await page.locator('[data-target-id="redis-detail"] .detail-button').click();
+    await expect(page.locator('[data-metric-key="redis.cpu.single_core.percent"] .metric-value')).toHaveText("175 %");
+    await expect(page.locator('[data-metric-key="redis.memory.maxmemory.bytes"] .metric-value')).toHaveText("未设置上限");
+    await expect(page.locator('[data-metric-key="redis.memory.maxmemory.bytes"]')).toContainText("单位 B");
+    await expect(page.locator('[data-metric-key="redis.memory.used.percent"]')).toContainText("不适用");
+    await expect(page.locator('[data-metric-key="redis.memory.used.percent"] .metric-value')).toHaveText("— %");
+    await expect(page.locator("#detail-resource-context")).toContainText("可超过 100%");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const file = testInfo.outputPath(`resources-${width}.png`); await page.locator("#target-detail").screenshot({ path: file }); await testInfo.attach(`resources-${width}`, { path: file, contentType: "image/png" });
+  });
+}
+test("resource MySQL cache and Kafka replica bytes keep their native scope and missing capacity", async ({ page }) => {
+  await routeData(page, resourceFixture()); await login(page);
+  await page.locator('[data-target-id="mysql-detail"] .detail-button').click();
+  await expect(page.locator("#detail-resource-context")).toContainText("缓冲池是数据库缓存");
+  await expect(page.locator('[data-metric-key="mysql.innodb.buffer_pool.data.bytes"]')).toContainText("对象范围 缓存");
+  await expect(page.locator('[data-metric-key="mysql.filesystem.total.bytes"] .metric-value')).toHaveText("— B");
+  await page.locator('[data-target-id="kafka-detail"] .detail-button').click();
+  await expect(page.locator("#detail-resource-context")).toContainText("副本日志大小与文件系统容量分别展示");
+  await expect(page.locator('[data-metric-key="kafka.log_directory.volume.total.bytes"] .metric-value')).toHaveText("— B");
+});
+test("resource Elasticsearch node selection retains cluster evidence, shared volume rows and zero denominator absence", async ({ page }) => {
+  await routeData(page, resourceFixture()); await login(page); let reads = 0;
+  page.on("request", request => { if (request.url().endsWith("/targets/elasticsearch-detail")) reads++; });
+  await page.locator('[data-target-id="elasticsearch-detail"] .detail-button').click();
+  await expect(page.locator("#detail-node-coverage")).toContainText("已报告 2 个节点");
+  await expect(page.locator("#detail-resource-context")).toContainText("部分节点");
+  await page.getByLabel("查看节点", { exact: true }).selectOption("node-a");
+  await expect(page.locator('#detail-metrics [data-node-id="node-b"]')).toHaveCount(0);
+  await expect(page.locator('[data-metric-key="elasticsearch.process.cpu.percent"] .metric-value')).toHaveText("15 %");
+  await expect(page.locator('[data-metric-key="elasticsearch.data_path.total.bytes"] .metric-value')).toHaveText(["100 B", "100 B"]);
+  await expect(page.locator('[data-metric-key="elasticsearch.filesystem.used.percent"] .metric-value')).toHaveText("— %");
+  await expect(page.locator('[data-metric-key="elasticsearch.nodes.failed"]')).toBeVisible();
+  await page.getByLabel("查看节点", { exact: true }).selectOption("node-b");
+  await expect(page.locator('[data-metric-key="elasticsearch.process.cpu.percent"] .metric-value')).toHaveText("80 %");
+  await expect(page.locator('#detail-metrics [data-node-id="node-a"]')).toHaveCount(0); expect(reads).toBe(1);
+});
+test("resource MongoDB router and MinIO S3-only capability retain absence reasons and clear node controls", async ({ page }) => {
+  await routeData(page, resourceFixture()); await login(page);
+  await page.locator('[data-target-id="elasticsearch-detail"] .detail-button').click(); await expect(page.locator("#detail-node-filter")).toBeVisible();
+  await page.locator('[data-target-id="mongodb-detail"] .detail-button').click();
+  await expect(page.locator("#detail-resource-context")).toContainText("当前对象为路由进程"); await expect(page.locator("#detail-node-filter")).not.toBeVisible();
+  await expect(page.locator('[data-metric-key="mongodb.wiredtiger.cache.used.bytes"]')).toContainText("不适用");
+  await expect(page.locator('[data-metric-key="mongodb.database.dataSize.bytes"] .metric-value')).toHaveText("100 B");
+  await page.locator('[data-target-id="minio-detail"] .detail-button').click();
+  await expect(page.locator("#detail-resource-context")).toContainText("原生统计能力有限 · 不支持");
+  await expect(page.locator('[data-metric-key="minio.bucket.accessible"] .metric-value')).toHaveText("是");
+  await expect(page.locator('[data-metric-key="minio.native.cluster.raw.total.bytes"] .metric-value')).toHaveText("— B");
+});
+test("resource MinIO independently reports capacity limitation and new authorization loss over retained success", async ({ page }) => {
+  const data = resourceFixture(), detail = data.details["minio-detail"], ordinary = detail.metrics.find(metric => metric.latestAttempt.definition.key === "minio.native.metrics.available");
+  const capacity = structuredClone(ordinary); capacity.kind = "CAPACITY"; detail.metrics.push(capacity);
+  ordinary.latestAttempt = { ...ordinary.latestAttempt, value: true, missingReason: null };
+  ordinary.lastSuccess = ordinary.latestAttempt; ordinary.valueState = "CURRENT";
+  await routeData(page, data); await login(page); await page.locator('[data-target-id="minio-detail"] .detail-button').click();
+  await expect(page.locator("#detail-resource-context")).toContainText("容量原生统计能力有限 · 不支持");
+  ordinary.latestAttempt = { ...ordinary.latestAttempt, value: null, missingReason: "UNAUTHORIZED" }; ordinary.valueState = "LAST_SUCCESS";
+  await page.getByRole("button", { name: "重读详情", exact: true }).click();
+  await expect(page.locator("#detail-resource-context")).toContainText("普通原生统计能力有限 · 未授权");
+  const capability = page.locator('[data-category="SPECIFIC"] [data-metric-key="minio.native.metrics.available"]');
+  await expect(capability).toContainText("上次成功值 · 未授权"); await expect(capability.locator(".metric-value")).toHaveText("是");
+});
+test("resource node removal after refresh clears the obsolete selection without mixing another instance", async ({ page }) => {
+  const data = resourceFixture(); await routeData(page, data); await login(page);
+  await page.locator('[data-target-id="elasticsearch-detail"] .detail-button').click(); await page.getByLabel("查看节点", { exact: true }).selectOption("node-b");
+  data.details["elasticsearch-detail"].metrics = data.details["elasticsearch-detail"].metrics.filter(metric => metric.latestAttempt.definition.scope.nodeId !== "node-b");
+  await page.getByRole("button", { name: "重读详情", exact: true }).click();
+  await expect(page.getByLabel("查看节点", { exact: true })).toHaveValue(""); await expect(page.locator("#detail-node-coverage")).toContainText("已报告 1 个节点");
+  await expect(page.locator('[data-metric-key="elasticsearch.process.cpu.percent"] .metric-value')).toHaveText("15 %");
+});
+test("resource node choice limit never leaves visible metrics filtered by an unavailable option", async ({ page }) => {
+  const data = resourceFixture(), detail = data.details["elasticsearch-detail"], template = detail.metrics[0];
+  const make = nodeId => ({ ...template, latestAttempt: { ...template.latestAttempt, definition: { ...template.latestAttempt.definition, scope: { kind: "PROCESS", id: "native-process", nodeId } } } });
+  detail.metrics = Array.from({ length: 129 }, (_, index) => make("node-" + String(index + 1).padStart(3, "0")));
+  await routeData(page, data); await login(page); await page.locator('[data-target-id="elasticsearch-detail"] .detail-button').click();
+  await page.getByLabel("查看节点", { exact: true }).selectOption("node-128");
+  await expect(page.locator("#detail-metrics .detail-metric")).toHaveCount(1);
+  detail.metrics.unshift(make("node-000")); await page.getByRole("button", { name: "重读详情", exact: true }).click();
+  await expect(page.getByLabel("查看节点", { exact: true })).toHaveValue("");
+  await expect(page.locator("#detail-metrics .detail-metric")).toHaveCount(130);
+  await expect(page.locator("#detail-node-coverage")).toContainText("选择列表限于前 128 个节点");
+});
 async function login(page) {
   await page.goto("/monitor/login.html");
   await page.getByLabel("用户名", { exact: true }).fill("monitor-allowed");

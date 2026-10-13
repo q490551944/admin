@@ -4,6 +4,43 @@ const details = require("../../main/resources/static/monitor/details.js");
 const monitor = require("../../main/resources/static/monitor/overview.js");
 const target = { id: "redis-a", type: "REDIS" };
 const data = identity => ({ generation: 1, serverTime: "2026-10-13T07:00:00Z", target: { target: identity }, metrics: [] });
+const nativeMetric = (key, value, scope = {}, missingReason = null) => {
+  const sample = { definition: { key, unit: key.endsWith("percent") ? "PERCENT" : "BYTES", scope }, value, missingReason };
+  return { latestAttempt: sample, lastSuccess: missingReason ? null : sample, valueState: missingReason ? "NO_DATA" : "CURRENT" };
+};
+test("resource views preserve CPU above one core and distinguish zero maxmemory from missing or other real zero", () => {
+  assert.equal(details.resourceView("REDIS", nativeMetric("redis.cpu.single_core.percent", 175)).text, "175");
+  assert.equal(details.resourceView("REDIS", nativeMetric("redis.memory.maxmemory.bytes", 0)).text, "未设置上限");
+  assert.equal(details.resourceView("REDIS", nativeMetric("redis.memory.maxmemory.bytes", 0)).nativeUnit, "B");
+  assert.equal(details.resourceView("REDIS", nativeMetric("redis.memory.maxmemory.bytes", null, {}, "UNAUTHORIZED")).text, "—");
+  assert.equal(details.resourceView("REDIS", nativeMetric("redis.memory.used.bytes", 0)).text, "0");
+  const old = nativeMetric("redis.memory.maxmemory.bytes", 0); old.valueState = "EXPIRED";
+  assert.match(details.resourceView("REDIS", old).note, /已过期/);
+});
+test("resource context keeps cache, process, logical data, file and volume scopes distinct", () => {
+  assert.match(details.resourceNotes("MYSQL", []).join(" "), /缓冲池.*数据库缓存.*进程内存/);
+  assert.match(details.resourceNotes("KAFKA", []).join(" "), /副本日志.*文件系统.*共享同一卷/);
+  assert.match(details.resourceNotes("MONGODB", []).join(" "), /逻辑数据.*分配空间.*索引空间/);
+  assert.equal(details.category(nativeMetric("minio.native.process.resident.bytes", 1)), "MEMORY");
+  assert.equal(details.category(nativeMetric("minio.native.process.virtual.bytes", 1)), "MEMORY");
+});
+test("node ids are stable and incomplete native coverage has a visible explanation", () => {
+  const metrics = [nativeMetric("elasticsearch.process.cpu.percent", 1, { nodeId: "b" }), nativeMetric("elasticsearch.jvm.heap.used.percent", 2, { nodeId: "a" }), nativeMetric("elasticsearch.nodes.failed", 1), nativeMetric("other", 1, { nodeId: "b" })];
+  assert.deepEqual(details.nodes(metrics), ["a", "b"]);
+  assert.match(details.resourceNotes("ELASTICSEARCH", metrics).join(" "), /部分节点/);
+});
+test("S3-only native absence and router resources remain missing instead of inferred zero", () => {
+  assert.match(details.resourceNotes("MINIO", [nativeMetric("minio.native.metrics.available", null, {}, "UNSUPPORTED")]).join(" "), /能力有限.*不支持/);
+  assert.match(details.resourceNotes("MONGODB", [nativeMetric("mongodb.process.kind", "mongos")]).join(" "), /当前对象为路由进程/);
+});
+test("MinIO capability warnings use both cycles latest attempts even while a successful old value remains", () => {
+  const ordinary = { ...nativeMetric("minio.native.metrics.available", true), kind: "ORDINARY" };
+  const capacity = { ...nativeMetric("minio.native.metrics.available", null, {}, "UNSUPPORTED"), kind: "CAPACITY" };
+  assert.match(details.resourceNotes("MINIO", [ordinary, capacity]).join(" "), /容量原生统计能力有限.*不支持/);
+  const denied = { ...ordinary, latestAttempt: { ...ordinary.latestAttempt, value: null, missingReason: "UNAUTHORIZED" }, valueState: "LAST_SUCCESS" };
+  assert.match(details.resourceNotes("MINIO", [denied]).join(" "), /普通原生统计能力有限.*未授权/);
+  assert.match(details.resourceNotes("MINIO", [{ ...ordinary, valueState: "EXPIRED" }]).join(" "), /已过期/);
+});
 test("generic categories retain native scope and classify independent capacity without guessing missing resources", () => {
   const metric = (key, kind = "ORDINARY", scope = "PROCESS") => ({ kind, latestAttempt: { definition: { key, scope: { kind: scope } } } });
   assert.equal(details.category(metric("redis.cpu.single_core.percent")), "CPU");
