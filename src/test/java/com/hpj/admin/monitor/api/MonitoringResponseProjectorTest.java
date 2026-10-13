@@ -43,6 +43,43 @@ class MonitoringResponseProjectorTest {
     private final MonitoringResponseProjector projector = new MonitoringResponseProjector();
 
     @Test
+    void overviewPreviewIsBoundedAndKeepsFailedSeriesOriginalSuccessAndScope() {
+        ReadTarget target = configured("redis-a", binding("redis-a", "0"));
+        StoredMetric old = success("redis-a", CollectionKind.ORDINARY, "redis.commands.rate", "native-node", 0, SAMPLE_TIME, 45);
+        StoredMetric failed = new StoredMetric(SOURCE, "redis-a", CollectionKind.ORDINARY,
+                MetricSample.missing(old.latestAttempt().definition(), MissingReason.TIMEOUT, SAMPLE_TIME.plusSeconds(10)), old.lastSuccess());
+        List<StoredMetric> metrics = new ArrayList<>();
+        metrics.add(success("redis-a", CollectionKind.CAPACITY, "capacity.bytes", "disk", 99, SAMPLE_TIME, 180));
+        metrics.add(success("redis-a", CollectionKind.ORDINARY, "redis.memory.used.bytes", "native-node", 512, SAMPLE_TIME, 45));
+        metrics.add(failed);
+        metrics.add(success("redis-a", CollectionKind.ORDINARY, "redis.probe.duration", "endpoint", 7, SAMPLE_TIME, 45));
+        for (int i = 0; i < 50; i++) metrics.add(success("redis-a", CollectionKind.ORDINARY, "other." + i, "scope", i, SAMPLE_TIME, 45));
+        ReadState state = state(List.of(target), snapshot("redis-a", List.of(), metrics, Map.of()));
+
+        TargetOverview overview = projector.project(state, SERVER_TIME).targets().get(0);
+        assertThat(overview.metricCount()).isEqualTo(54);
+        assertThat(overview.coreMetrics()).extracting(metric -> metric.latestAttempt().definition().key())
+                .containsExactly("redis.probe.duration", "redis.commands.rate", "redis.memory.used.bytes");
+        assertThat(overview.coreMetrics().get(1)).isSameAs(failed);
+        assertThat(overview.coreMetrics().get(1).lastSuccess().value()).isEqualTo(BigDecimal.ZERO);
+        assertThat(overview.coreMetrics().get(1).lastSuccess().sampledAt()).isEqualTo(SAMPLE_TIME);
+        assertThat(overview.coreMetrics().get(1).latestAttempt().definition().scope().id()).isEqualTo("native-node");
+        assertThat(projector.detail(state, SERVER_TIME, "redis-a").orElseThrow().target()).isEqualTo(overview);
+        assertThatThrownBy(() -> overview.coreMetrics().clear()).isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @ParameterizedTest
+    @EnumSource(MiddlewareType.class)
+    void everyTypeCanPreviewItsOriginalOrdinaryValuesWithoutCapacityOrInventedFields(MiddlewareType type) {
+        ReadTarget target = target("target", type, CONFIGURED, ResolvedTarget.Reason.CONFIGURED, List.of(binding("target")));
+        StoredMetric original = success("target", CollectionKind.ORDINARY, "native.value", "node-a", 0, SAMPLE_TIME, 45);
+        StoredMetric capacity = success("target", CollectionKind.CAPACITY, "storage.bytes", "volume-a", 1, SAMPLE_TIME, 180);
+        ReadState state = state(List.of(target), snapshot("target", List.of(), List.of(capacity, original), Map.of()));
+        assertThat(projector.project(state, SERVER_TIME).targets().get(0).coreMetrics()).containsExactly(original);
+        assertThat(projector.project(state(List.of(target)), SERVER_TIME).targets().get(0).coreMetrics()).isEmpty();
+    }
+
+    @Test
     void catalogAlwaysContainsSixTypesAndKeepsConfigurationCountsSeparate() {
         ReadTarget configured = configured("redis-a", binding("redis-a", "0"));
         ReadTarget missing = target("redis-b", MiddlewareType.REDIS, CONFIGURATION_MISSING,

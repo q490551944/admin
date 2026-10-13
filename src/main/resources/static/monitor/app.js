@@ -10,6 +10,7 @@
   const identity = byId("identity");
   const logout = byId("logout-button");
   const retry = byId("retry-button");
+  const overview = loginPage ? null : window.MonitorOverview?.create({ client, onSessionError: error => showError(error, "snapshot") });
   let generation = 0;
   let active;
   let mutating = false;
@@ -30,6 +31,7 @@
   }
 
   function display(title, text, kind = "neutral") {
+    overview?.stop();
     heading.textContent = title;
     description.textContent = text;
     panel.dataset.kind = kind;
@@ -103,6 +105,7 @@
       byId("identity-name").textContent = current.username;
       identity.hidden = false;
       logout.hidden = false;
+      overview?.start();
     } catch (error) {
       if (task.valid()) showError(error, "check");
     } finally {

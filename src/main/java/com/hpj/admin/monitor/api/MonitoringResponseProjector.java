@@ -8,6 +8,7 @@ import com.hpj.admin.monitor.scheduling.MonitoringScheduler.ReadTarget;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -86,7 +87,29 @@ public final class MonitoringResponseProjector {
         }
         List<StoredMetric> metrics = sample == null ? List.of() : sample.metrics();
         return new TargetOverview(directory(target), scheduling, collections, services, metrics.size(),
-                (int) metrics.stream().filter(metric -> metric.latestAttempt().missingReason() != null).count());
+                (int) metrics.stream().filter(metric -> metric.latestAttempt().missingReason() != null).count(),
+                coreMetrics(target.display().type(), metrics));
+    }
+
+    /** A bounded preview of original series, with no cross-binding/scope aggregation or invented samples. */
+    private static List<StoredMetric> coreMetrics(MiddlewareType type, List<StoredMetric> metrics) {
+        List<String> preferred = switch (type) {
+            case MYSQL -> List.of("mysql.probe.duration", "mysql.threads.running", "mysql.questions.rate");
+            case REDIS -> List.of("redis.probe.duration", "redis.commands.rate", "redis.memory.used.bytes");
+            case KAFKA -> List.of("kafka.probe.duration", "kafka.brokers.discovered", "kafka.topics.observed");
+            case MONGODB -> List.of("mongodb.probe.duration", "mongodb.memory.resident.bytes", "mongodb.operations.query.rate");
+            case ELASTICSEARCH -> List.of("elasticsearch.probe.duration", "elasticsearch.cluster.health", "elasticsearch.jvm.heap.used.bytes");
+            case MINIO -> List.of("minio.health.live", "minio.health.read.ready", "minio.bucket.accessible");
+        };
+        Comparator<StoredMetric> order = Comparator.comparingInt((StoredMetric metric) -> {
+            int rank = preferred.indexOf(metric.latestAttempt().definition().key());
+            return rank < 0 ? preferred.size() : rank;
+        }).thenComparing(StoredMetric::bindingId)
+                .thenComparing(metric -> metric.latestAttempt().definition().key())
+                .thenComparing(metric -> metric.latestAttempt().definition().scope().kind())
+                .thenComparing(metric -> metric.latestAttempt().definition().scope().id())
+                .thenComparing(metric -> metric.latestAttempt().definition().scope().nodeId(), Comparator.nullsFirst(String::compareTo));
+        return metrics.stream().filter(metric -> metric.kind() == CollectionKind.ORDINARY).sorted(order).limit(3).toList();
     }
 
     private MetricCapability capability(StoredMetric metric) {

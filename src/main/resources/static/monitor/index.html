@@ -13,7 +13,7 @@
     <section class="intro" aria-labelledby="page-title">
       <p class="eyebrow">MIDDLEWARE MONITORING</p>
       <h1 id="page-title">监控入口</h1>
-      <p class="intro-copy">在这里确认账号的监控访问状态。</p>
+      <p class="intro-copy">查看中间件的当前服务状态、采集结果与资源范围。</p>
       <div class="intro-note"><span class="note-line" aria-hidden="true"></span><p>访问由管理员授权。<br>使用完毕后，请退出登录。</p></div>
     </section>
     <section class="card" id="shell" aria-busy="true" aria-label="监控访问状态">
@@ -27,9 +27,19 @@
       <a class="back-link" href="./index.html">返回监控入口 <span aria-hidden="true">↗</span></a>
       <noscript><p class="noscript">请启用 JavaScript 后确认监控访问状态。</p></noscript>
     </section>
+    <section id="overview" class="overview" aria-labelledby="overview-title" hidden>
+      <div class="overview-heading"><div><p class="eyebrow">CURRENT SNAPSHOT</p><h2 id="overview-title">中间件总览</h2></div><p id="overview-time" class="muted"></p></div>
+      <p id="overview-message" class="overview-message" role="status" aria-live="polite">正在读取当前快照…</p>
+      <div id="service-summary" class="service-summary" aria-label="服务状态汇总"></div>
+      <p id="configuration-summary" class="muted"></p>
+      <div id="type-cards" class="type-cards" aria-label="中间件类型"></div>
+      <div class="instances-heading"><h2 id="instances">实例列表</h2><p id="instance-count" class="muted"></p></div>
+      <div id="instance-list" class="instance-list"></div>
+    </section>
   </main>
   <footer>ADMIN <span aria-hidden="true">·</span> 中间件监控</footer>
   <script src="./session.js"></script>
+  <script src="./overview.js"></script>
   <script src="./app.js" defer></script>
 </body>
 </html>
