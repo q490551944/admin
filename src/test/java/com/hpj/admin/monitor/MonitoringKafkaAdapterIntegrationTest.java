@@ -444,6 +444,11 @@ class MonitoringKafkaAdapterIntegrationTest {
             List<String> owned = topicNames(environment);
             AclBinding denial = new AclBinding(new ResourcePattern(ResourceType.CLUSTER, "kafka-cluster", PatternType.LITERAL),
                     new AccessControlEntry("User:ANONYMOUS", "*", AclOperation.DESCRIBE, AclPermissionType.DENY));
+            // Once a resource has ACLs, allow.everyone.if.no.acl.found no longer applies to its other operations.
+            // Preserve this disposable fixture's baseline permissions, including controller forwarding and ACL cleanup.
+            AclBinding baseline = new AclBinding(denial.pattern(),
+                    new AccessControlEntry("User:ANONYMOUS", "*", AclOperation.ALL, AclPermissionType.ALLOW));
+            List<AclBinding> bindings = List.of(baseline, denial);
             boolean created = false;
             try {
                 prepareTopics(observer, owned);
@@ -452,7 +457,7 @@ class MonitoringKafkaAdapterIntegrationTest {
                 ResolvedTarget target = resolve(source(environment), "log-acl", owned.subList(0, 2));
                 CollectionResult first = collector.collect(target, CollectionKind.CAPACITY);
                 List<Integer> brokers = collector.connections.observations.get(0).requestedBrokers;
-                observer.createAcls(List.of(denial), new CreateAclsOptions().timeoutMs(NATIVE_TIMEOUT_MS)).all().get(5, TimeUnit.SECONDS);
+                observer.createAcls(bindings, new CreateAclsOptions().timeoutMs(NATIVE_TIMEOUT_MS)).all().get(5, TimeUnit.SECONDS);
                 created = true;
                 await().atMost(Duration.ofSeconds(15)).until(() -> logDirectoriesDenied(observer, brokers));
                 CollectionResult denied = collector.collect(target, CollectionKind.CAPACITY);
@@ -464,13 +469,13 @@ class MonitoringKafkaAdapterIntegrationTest {
                 assertThat(collector.snapshots.snapshot(target.display().id()).orElseThrow().metrics())
                         .filteredOn(stored -> stored.kind() == CollectionKind.CAPACITY && stored.latestAttempt().definition().key().equals("kafka.replica.log.bytes"))
                         .isNotEmpty().allSatisfy(stored -> assertThat(stored.lastSuccess().sampledAt()).isEqualTo(first.completedAt()));
-                observer.deleteAcls(List.of(denial.toFilter()), new DeleteAclsOptions().timeoutMs(NATIVE_TIMEOUT_MS)).all().get(5, TimeUnit.SECONDS);
+                observer.deleteAcls(bindings.stream().map(AclBinding::toFilter).toList(), new DeleteAclsOptions().timeoutMs(NATIVE_TIMEOUT_MS)).all().get(5, TimeUnit.SECONDS);
                 created = false;
                 await().atMost(Duration.ofSeconds(15)).until(() -> !logDirectoriesDenied(observer, brokers));
                 assertThat(state(observer, owned)).isEqualTo(before);
                 assertThat(collector.connections.closed).isEqualTo(2);
             } finally {
-                if (created) observer.deleteAcls(List.of(denial.toFilter())).all().get(5, TimeUnit.SECONDS);
+                if (created) observer.deleteAcls(bindings.stream().map(AclBinding::toFilter).toList()).all().get(5, TimeUnit.SECONDS);
                 deleteOwnedTopics(observer, owned);
             }
         }
