@@ -24,6 +24,9 @@ jobs:
           cache: maven
       - name: Verify container runtime
         run: docker info
+      - name: Prepare checksum-pinned official MinIO test artifacts
+        if: matrix.type == 'minio'
+        run: bash scripts/prepare-minio-test.sh image
       - name: Start, prepare, verify and clean two independent environments
         run: >-
           bash mvnw -B -Dtest=MonitoringEnvironmentIntegrationTest,MonitoringArchiveCompatibilityTest

@@ -24,11 +24,11 @@
 | `kafka` | `apache/kafka-native:3.8.0` | [Apache Kafka Native 镜像](https://hub.docker.com/r/apache/kafka-native) |
 | `mongodb` | `mongo:6.0.11` | [MongoDB 官方镜像](https://hub.docker.com/_/mongo) |
 | `elasticsearch` | `docker.elastic.co/elasticsearch/elasticsearch:8.10.4` | [Elastic 官方镜像仓库](https://www.docker.elastic.co/r/elasticsearch/elasticsearch) |
-| `minio` | `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` | [MinIO 对应该版本的官方容器文档](https://github.com/minio/minio/blob/RELEASE.2025-09-07T16-13-09Z/docs/docker/README.md)，release 与现有 chat CI 一致 |
+| `minio` | `admin-monitor-minio:RELEASE.2025-09-07T16-13-09Z`（本地测试镜像） | [MinIO 官方发行制品](https://github.com/minio/minio/releases/tag/RELEASE.2025-09-07T16-13-09Z)，release 与 chat CI 一致；由仓库脚本组装 |
 
 镜像标签和启动选项由测试辅助类 `MonitoringTestEnvironment` 集中管理。调整测试版本时，应同步修改本表并重新运行对应真实环境验收，不能仅修改说明中的版本号。
 
-聊天浏览器 CI 也从同一官方 Quay 镜像提取 `/usr/bin/minio`，替代已返回 HTTP 410 的旧二进制下载地址。提取用容器不启动，退出步骤时按本次创建的容器 ID 清理；实际浏览器测试仍使用原有隔离 MinIO 进程和临时数据目录。二进制位置来自该版本的 [Dockerfile.release](https://github.com/minio/minio/blob/RELEASE.2025-09-07T16-13-09Z/Dockerfile.release#L61)。
+MinIO 的旧下载入口返回 HTTP 410，固定 Quay 镜像也已返回未授权错误。`scripts/prepare-minio-test.sh` 使用同版本 GitHub 官方发行制品，在执行前校验仓库固定的 SHA-256。`image` 模式加入固定 [mc 发行版](https://github.com/minio/mc/releases/tag/RELEASE.2025-08-13T08-35-41Z)，在本机组装带 IAM 测试工具的 Linux amd64 镜像；只用于本次隔离测试，不发布镜像。`binary` 模式供 Linux amd64 chat CI 使用同一服务端程序，保留原有隔离进程和临时数据目录。校验失败会停止，不能继续执行下载内容。
 
 ## 应用客户端基线
 
@@ -68,6 +68,8 @@ PowerShell，在项目根目录执行：
 ```
 
 将 `mysql` 替换为 `redis`、`kafka`、`mongodb`、`elasticsearch` 或 `minio`，分别验证对应环境。类型名称使用小写完整值，例如 MongoDB 使用 `mongodb`。
+
+选择 `minio` 前，先在项目根目录执行 `bash scripts/prepare-minio-test.sh image`；Windows 可在 Git Bash 中调用已启用 Linux 容器的 Docker。脚本下载的二进制、组装上下文均在已忽略的 `target/minio-test-image/` 中。CI 的 MinIO 作业自动执行此准备步骤。
 
 省略 `monitor.test.type` 时，真实环境测试默认跳过，便于普通单元测试在无 Docker 的机器上执行。**显式指定类型后，Docker 不可用、镜像获取失败或服务未就绪必须导致测试失败，不能转为跳过或使用模拟响应。** 不要将默认跳过的绿色构建记录为真实环境验收通过。
 
