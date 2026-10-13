@@ -32,7 +32,7 @@ monitor:
 | `mongodb.operations.<type>.rate` | 相邻有效样本的操作数差值除以实际间隔 |
 | `mongodb.cpu.percent` | 无通用可靠来源，明确显示 `UNSUPPORTED` |
 
-操作类型固定为 insert、query、update、delete、getmore、command，共 18 个指标。opcounters 的操作数不等于文档数，也不等于成功请求数。监控自身的原生命令也可能计入服务统计。
+操作类型固定为 insert、query、update、delete、getmore、command；原有 18 个进程指标补充 5 个内存、引擎和缓存指标，共 23 项。opcounters 的操作数不等于文档数，也不等于成功请求数。监控自身的原生命令也可能计入服务统计。
 
 ping 成功只证明服务响应命令。hello 和 serverStatus 的权限、能力与单字段缺失独立表达，不会把缺失指标填成零。角色由受限的原生字段组合判断，不单凭 `isWritablePrimary=true` 断言副本集主节点。原始主机、凭据、副本集名、进程标识与错误文本不进入页面。
 
@@ -69,4 +69,15 @@ ping 成功只证明服务响应命令。hello 和 serverStatus 的权限、能�
 - [MongoDB 6.0.11 启动程序名](https://github.com/mongodb/mongo/blob/r6.0.11/src/mongo/db/server_options_server_helpers.cpp)：`process` 名称的来源与路径处理。
 - [驱动 4.11.1 原生连接](https://github.com/mongodb/mongo-java-driver/blob/r4.11.1/driver-core/src/main/com/mongodb/internal/connection/InternalStreamConnection.java)：协议、认证和套接字生命周期。
 
-内存、WiredTiger 与配置数据库存储指标由 #35 接续。
+## 内存、缓存与配置库存储
+
+普通任务新增 `mongodb.memory.resident.bytes`：原生 `mem.resident` 的 MiB 乘 1048576，范围是同一所选 mongod/mongos 进程。`mongodb.storage.engine` 只输出已知引擎、other 或 router；WiredTiger 的 `mongodb.wiredtiger.cache.used.bytes`、`.maximum.bytes` 和 `.used.percent` 属于独立缓存范围，不能替代进程内存或宿主机内存。非 WiredTiger、mongos 缓存不适用；缺失字段不支持；零缓存上限不计算比例，实际瞬时超限不截断。新增资源带稳定匿名节点标识，不泄露地址或原始进程身份。
+
+容量任务独立按 60 秒采集、180 秒有效期，在同一原生连接执行 hello 和配置库的 `dbStats:1, scale:1, freeStorage:0`。不 ping、不读 serverStatus、不刷新普通或服务样本，不枚举数据库、集合或内容。有效库数受配置与 100 库硬上限共同限制；每库分别返回 `mongodb.database.dataSize.bytes`（未压缩逻辑数据）、`.storageSize.bytes`（集合分配存储，含空闲但不含索引）和 `.indexSize.bytes`（索引分配存储），不可互相替代。
+
+同一所选 mongod 的 dbStats 文件系统字段归属 dbpath 所在文件系统，与数据库大小不同。使用一个成功的原生响应返回 `mongodb.filesystem.used.bytes`、`.total.bytes`、`.used.percent`，多个配置库不重复展示或累加；也不跨目标推断卷身份或求和。缺失字段单独不支持，零总量不计算比例，used > total 的比例标为无效。mongos 的库字段是原生分片聚合，不能代表路由进程本机文件系统，文件系统指标不适用。部分库拒绝只降低该库能力，保留原成功值的时间及有效期。
+
+新增契约验证非 WiredTiger、mongos、缺失/异常字段、零分母、共享文件系统、范围上限及独立有效期。真实 6.0.11 单机容器逐项对比内存/缓存和两个配置库的原生返回，确认文件系统只展示一次、第三个库未查询、每库权限拒绝和业务数据/写入计数不变；非 WiredTiger、mongos 和零文件系统容量由契约覆盖，不声称真实容器使用这些部署拓扑。
+
+- [MongoDB dbStats 字段](https://www.mongodb.com/docs/manual/reference/command/dbstats/)：逻辑数据、集合/索引分配存储及文件系统范围。
+- [MongoDB 6.0.11 mongos dbStats 聚合](https://github.com/mongodb/mongo/blob/r6.0.11/src/mongo/s/commands/cluster_db_stats_cmd.cpp)：聚合库大小，不能当作路由进程本机容量。

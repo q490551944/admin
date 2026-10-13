@@ -41,17 +41,17 @@ class MonitoringMongoAdapterTest {
     private static final List<String> OPERATIONS = List.of("insert", "query", "update", "delete", "getmore", "command");
 
     @Test
-    void firstSampleExposesExactlyEighteenProcessMetricsWithoutClaimingCpuOrClusterTotals() throws Exception {
+    void firstSampleKeepsProcessMetricsAndAddsScopedResourcesWithoutClaimingCpuOrClusterTotals() throws Exception {
         try (Fixture fixture = new Fixture()) {
             CollectionResult result = fixture.collect(0);
             assertThat(fixture.adapter.type()).isEqualTo(MiddlewareType.MONGODB);
             assertThat(result.status()).isEqualTo(CollectionStatus.PARTIAL);
             assertThat(result.reason()).isEqualTo(MissingReason.WAITING_SAMPLE);
             assertThat(result.inventoryComplete()).isTrue();
-            assertThat(result.metrics()).hasSize(18);
-            assertThat(result.metrics()).extracting(sample -> sample.definition().scope().kind()).containsOnly(ScopeKind.PROCESS);
-            assertThat(result.metrics()).extracting(sample -> sample.definition().scope().id()).containsOnly("mongo-target");
-            assertThat(result.metrics()).extracting(sample -> sample.definition().scope().nodeId()).containsOnlyNulls();
+            assertThat(result.metrics()).hasSize(23);
+            assertThat(result.metrics().subList(0, 18)).extracting(sample -> sample.definition().scope().kind()).containsOnly(ScopeKind.PROCESS);
+            assertThat(result.metrics().subList(0, 18)).extracting(sample -> sample.definition().scope().id()).containsOnly("mongo-target");
+            assertThat(result.metrics().subList(0, 18)).extracting(sample -> sample.definition().scope().nodeId()).containsOnlyNulls();
             assertThat(result.serviceProbe().availability()).isEqualTo(ServiceAvailability.AVAILABLE);
             assertThat(result.serviceProbe().reason()).isNull();
             assertThat(number(result, "mongodb.probe.duration")).isGreaterThanOrEqualTo(BigDecimal.ZERO);
@@ -555,7 +555,7 @@ class MonitoringMongoAdapterTest {
     }
 
     @Test
-    void databaseScopeNeverAddsDiscoveryOrExtraCommandsAndCapacityIsDeferred() throws Exception {
+    void ordinaryDatabaseScopeNeverAddsDiscoveryAndEmptyCapacityDoesNotConnect() throws Exception {
         for (List<String> databases : List.of(List.<String>of(), List.of("allowed-one", "allowed-two"))) {
             try (Fixture fixture = new Fixture()) {
                 fixture.databases = databases;
@@ -569,15 +569,167 @@ class MonitoringMongoAdapterTest {
             }
         }
         try (Fixture fixture = new Fixture()) {
+            fixture.databases = List.of();
             CollectionResult result = fixture.adapter.collect(fixture.request(0, CollectionKind.CAPACITY));
             assertThat(result.status()).isEqualTo(CollectionStatus.UNSUPPORTED);
             assertThat(result.reason()).isEqualTo(MissingReason.NOT_APPLICABLE);
             assertThat(result.inventoryComplete()).isTrue();
-            assertThat(result.metrics()).isEmpty();
+            assertThat(result.metrics()).hasSize(4);
             assertThat(result.serviceProbe()).isNull();
             verifyNoInteractions(fixture.connections, fixture.session);
         }
     }
+
+    @Test
+    void residentUsesMibWhileWiredTigerUsesBytesAndCarriesOneOpaqueNode() throws Exception {
+        try (Fixture f = new Fixture()) {
+            CollectionResult result = f.collect(0);
+            assertThat(number(result, "mongodb.memory.resident.bytes")).isEqualByComparingTo("67108864");
+            assertThat(number(result, "mongodb.wiredtiger.cache.used.bytes")).isEqualByComparingTo("256");
+            assertThat(number(result, "mongodb.wiredtiger.cache.maximum.bytes")).isEqualByComparingTo("1024");
+            assertThat(number(result, "mongodb.wiredtiger.cache.used.percent")).isEqualByComparingTo("25");
+            var memory = metric(result, "mongodb.memory.resident.bytes");
+            var cache = metric(result, "mongodb.wiredtiger.cache.used.bytes");
+            assertThat(memory.definition().scope().nodeId()).startsWith("mongo-node-").isEqualTo(cache.definition().scope().nodeId());
+            assertThat(cache.definition().scope().kind()).isEqualTo(ScopeKind.CACHE);
+            assertThat(memory.validUntil()).isEqualTo(START.plusSeconds(45));
+            assertSafe(result);
+        }
+    }
+
+    @Test
+    void nonWiredTigerAndRouterCacheAreNotApplicableEvenIfCacheFieldsExist() throws Exception {
+        for (boolean router : List.of(false, true)) try (Fixture f = new Fixture()) {
+            if (router) { f.hello.put("msg", new BsonString("isdbgrid")); f.status.put("process", new BsonString("mongos")); }
+            else f.status.getDocument("storageEngine").put("name", new BsonString("inMemory"));
+            CollectionResult result = f.collect(0);
+            assertThat(number(result, "mongodb.memory.resident.bytes")).isEqualByComparingTo("67108864");
+            for (String key : List.of("used.bytes", "maximum.bytes", "used.percent")) {
+                assertThat(metric(result, "mongodb.wiredtiger.cache." + key).missingReason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+            }
+            assertThat(metric(result, "mongodb.storage.engine").value()).isEqualTo(router ? "router" : "inMemory");
+        }
+    }
+
+    @Test
+    void resourceFieldsDegradeIndividuallyAndZeroCacheLimitDoesNotInventPercentage() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.status.getDocument("mem").remove("resident");
+            f.status.getDocument("wiredTiger").getDocument("cache").put("maximum bytes configured", new BsonInt64(0));
+            CollectionResult result = f.collect(0);
+            assertThat(metric(result, "mongodb.memory.resident.bytes").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(number(result, "mongodb.wiredtiger.cache.used.bytes")).isEqualByComparingTo("256");
+            assertThat(number(result, "mongodb.wiredtiger.cache.maximum.bytes")).isZero();
+            assertThat(metric(result, "mongodb.wiredtiger.cache.used.percent").missingReason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+            f.status.getDocument("wiredTiger").getDocument("cache").put("bytes currently in the cache", new BsonInt64(-1));
+            assertThat(metric(f.collect(15_000), "mongodb.wiredtiger.cache.used.bytes").missingReason()).isEqualTo(MissingReason.INVALID_VALUE);
+        }
+    }
+
+    @Test
+    void capacityKeepsThreeDistinctDatabaseValuesAndOneSharedFilesystemWithIndependentTtl() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.databases = List.of("allowed-db", "second-db");
+            f.stats.put("second-db", stats("second-db", 10, 40, 80, 500, 1000));
+            f.collect(0);
+            clearInvocations(f.session);
+            CollectionResult result = f.collectCapacity(15_000);
+            assertThat(result.status()).isEqualTo(CollectionStatus.SUCCESS);
+            assertThat(result.serviceProbe()).isNull();
+            assertThat(dbNumber(result, "allowed-db", "dataSize")).isEqualByComparingTo("100");
+            assertThat(dbNumber(result, "allowed-db", "storageSize")).isEqualByComparingTo("300");
+            assertThat(dbNumber(result, "allowed-db", "indexSize")).isEqualByComparingTo("50");
+            assertThat(dbNumber(result, "second-db", "dataSize")).isEqualByComparingTo("10");
+            assertThat(number(result, "mongodb.filesystem.used.bytes")).isEqualByComparingTo("500");
+            assertThat(number(result, "mongodb.filesystem.total.bytes")).isEqualByComparingTo("1000");
+            assertThat(number(result, "mongodb.filesystem.used.percent")).isEqualByComparingTo("50");
+            assertThat(result.metrics()).filteredOn(sample -> sample.definition().scope().kind() == ScopeKind.FILESYSTEM).hasSize(3);
+            assertThat(metric(result, "mongodb.filesystem.total.bytes").validUntil()).isEqualTo(START.plusSeconds(195));
+            verify(f.session).nodeIdentity(); verify(f.session).hello();
+            verify(f.session).dbStats("allowed-db"); verify(f.session).dbStats("second-db"); verify(f.session).close();
+            verifyNoMoreInteractions(f.session);
+            assertThat(f.snapshots.snapshot("mongo-target").orElseThrow().metrics())
+                    .filteredOn(stored -> stored.kind() == CollectionKind.ORDINARY)
+                    .allSatisfy(stored -> assertThat(stored.lastSuccess() == null || stored.lastSuccess().sampledAt().equals(START)).isTrue());
+            assertSafe(result);
+        }
+    }
+
+    @Test
+    void routerCapacityKeepsNativeDatabaseAggregateButNeverCallsItALocalFilesystem() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.hello.put("msg", new BsonString("isdbgrid"));
+            CollectionResult result = f.collectCapacity(0);
+            assertThat(dbNumber(result, "allowed-db", "dataSize")).isEqualByComparingTo("100");
+            for (String key : List.of("used.bytes", "total.bytes", "used.percent"))
+                assertThat(metric(result, "mongodb.filesystem." + key).missingReason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+            assertThat(result.serviceProbe()).isNull();
+        }
+    }
+
+    @Test
+    void missingFsFieldsZeroCapacityAndInvalidScaleLeaveLogicalSizesReadable() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.stats.get("allowed-db").remove("fsUsedSize");
+            CollectionResult absent = f.collectCapacity(0);
+            assertThat(metric(absent, "mongodb.filesystem.used.bytes").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(number(absent, "mongodb.filesystem.total.bytes")).isEqualByComparingTo("1000");
+            f.stats.get("allowed-db").put("scaleFactor", new BsonDouble(1.0));
+            f.stats.get("allowed-db").remove("dataSize");
+            CollectionResult oneMissing = f.collectCapacity(30_000);
+            assertThat(metric(oneMissing, "mongodb.database.dataSize.bytes").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
+            assertThat(dbNumber(oneMissing, "allowed-db", "storageSize")).isEqualByComparingTo("300");
+            f.stats.put("allowed-db", stats("allowed-db", 0, 0, 0, 0, 0));
+            CollectionResult zero = f.collectCapacity(60_000);
+            assertThat(dbNumber(zero, "allowed-db", "dataSize")).isZero();
+            assertThat(number(zero, "mongodb.filesystem.total.bytes")).isZero();
+            assertThat(metric(zero, "mongodb.filesystem.used.percent").missingReason()).isEqualTo(MissingReason.NOT_APPLICABLE);
+            f.stats.get("allowed-db").put("scaleFactor", new BsonInt32(1024));
+            assertThat(metric(f.collectCapacity(120_000), "mongodb.database.dataSize.bytes").missingReason()).isEqualTo(MissingReason.INVALID_VALUE);
+        }
+    }
+
+    @Test
+    void perDatabaseDenialRetainsOldEvidenceWithoutClaimingAProbeOrRefreshingIt() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.databases = List.of("allowed-db", "second-db");
+            f.stats.put("second-db", stats("second-db", 10, 40, 80, 500, 1000));
+            f.collectCapacity(0);
+            when(f.session.dbStats("second-db")).thenThrow(new MongoMonitoringConnections.Failure(MissingReason.UNAUTHORIZED, false));
+            CollectionResult partial = f.collectCapacity(60_000);
+            assertThat(partial.status()).isEqualTo(CollectionStatus.PARTIAL);
+            assertThat(partial.reason()).isEqualTo(MissingReason.UNAUTHORIZED);
+            assertThat(dbMetric(partial, "second-db", "storageSize").missingReason()).isEqualTo(MissingReason.UNAUTHORIZED);
+            assertThat(f.snapshots.snapshot("mongo-target").orElseThrow().metrics())
+                    .filteredOn(stored -> stored.latestAttempt().definition().scope().id().equals("second-db"))
+                    .allSatisfy(stored -> assertThat(stored.lastSuccess().sampledAt()).isEqualTo(START));
+            verify(f.session, never()).ping(); verify(f.session, never()).serverStatus();
+        }
+    }
+
+    @Test
+    void capacityRejectsInvalidNamesAndBoundsRequestsToConfiguredDatabaseLimit() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.properties.getLimits().setDatabases(2);
+            f.databases = List.of("allowed-db", "invalid.name", "second-db", "allowed-db");
+            CollectionResult result = f.collectCapacity(0);
+            assertThat(metric(result, "mongodb.capacity.coverage.truncated").value()).isEqualTo(true);
+            assertThat(result.reason()).isEqualTo(MissingReason.INVALID_VALUE);
+            verify(f.session).dbStats("allowed-db");
+            verify(f.session, never()).dbStats("invalid.name"); verify(f.session, never()).dbStats("second-db");
+        }
+    }
+
+    private static BsonDocument stats(String db, long data, long storage, long indexes, long used, long total) {
+        return ok().append("db", new BsonString(db)).append("scaleFactor", new BsonInt32(1))
+                .append("dataSize", new BsonInt64(data)).append("storageSize", new BsonInt64(storage)).append("indexSize", new BsonInt64(indexes))
+                .append("fsUsedSize", new BsonInt64(used)).append("fsTotalSize", new BsonInt64(total));
+    }
+    private static MetricSample dbMetric(CollectionResult result, String db, String field) {
+        return result.metrics().stream().filter(sample -> sample.definition().key().equals("mongodb.database." + field + ".bytes")
+                && sample.definition().scope().id().equals(db)).findFirst().orElseThrow();
+    }
+    private static BigDecimal dbNumber(CollectionResult result, String db, String field) { return (BigDecimal) dbMetric(result, db, field).value(); }
 
     private static BsonDocument ok() { return new BsonDocument("ok", new BsonDouble(1)); }
     private static String total(String operation) { return "mongodb.operations." + operation + ".total"; }
@@ -614,7 +766,12 @@ class MonitoringMongoAdapterTest {
                 .append("connections", new BsonDocument("current", new BsonInt32(4)).append("available", new BsonInt32(100)))
                 .append("opcounters", new BsonDocument("insert", new BsonInt64(100)).append("query", new BsonInt64(40))
                         .append("update", new BsonInt64(30)).append("delete", new BsonInt64(20))
-                        .append("getmore", new BsonInt64(10)).append("command", new BsonInt64(200)));
+                        .append("getmore", new BsonInt64(10)).append("command", new BsonInt64(200)))
+                .append("mem", new BsonDocument("resident", new BsonInt32(64)))
+                .append("storageEngine", new BsonDocument("name", new BsonString("wiredTiger")))
+                .append("wiredTiger", new BsonDocument("cache", new BsonDocument("bytes currently in the cache", new BsonInt64(256))
+                        .append("maximum bytes configured", new BsonInt64(1024))));
+        final Map<String, BsonDocument> stats = new java.util.LinkedHashMap<>(Map.of("allowed-db", stats("allowed-db", 100, 300, 50, 500, 1000)));
         String nodeIdentity = NODE_ID;
         List<String> databases = List.of("allowed-db");
         final MonitoringCounterStore counters = new MonitoringCounterStore(2, 40);
@@ -635,6 +792,7 @@ class MonitoringMongoAdapterTest {
             when(session.ping()).thenReturn(ok());
             when(session.hello()).thenAnswer(call -> hello.clone());
             when(session.serverStatus()).thenAnswer(call -> status.clone());
+            when(session.dbStats(anyString())).thenAnswer(call -> stats.get(call.<String>getArgument(0)).clone());
             snapshots.activate("mongo-target", 1);
         }
         BigDecimal counter(String operation) { return BigDecimal.valueOf(status.getDocument("opcounters").getInt64(operation).getValue()); }
@@ -645,14 +803,18 @@ class MonitoringMongoAdapterTest {
             clock.now = START.plusMillis(millis);
             CollectionControl control = new CollectionControl(new Object(), () -> true, clock, ticker::get,
                     ticker.get() + Duration.ofSeconds(5).toNanos(), cleanup, counters, "mongo-target", "mongo-binding",
-                    kind, Duration.ofSeconds(15), borrowed);
+                    kind, kind == CollectionKind.CAPACITY ? Duration.ofSeconds(60) : Duration.ofSeconds(15), borrowed);
             controls.add(control);
             return new CollectionRequest("mongo-target", "mongoClient", "mongo-binding", kind, 1, sequence++, clock.now,
                     clock.now.plusSeconds(5), new MonitoringTarget.Scope(databases, List.of(), List.of(), List.of(), List.of()),
                     borrowed, Map.of("private-settings", SECRET), control);
         }
         CollectionResult collect(long millis) {
-            CollectionRequest request = request(millis, CollectionKind.ORDINARY);
+            return collect(millis, CollectionKind.ORDINARY);
+        }
+        CollectionResult collectCapacity(long millis) { return collect(millis, CollectionKind.CAPACITY); }
+        CollectionResult collect(long millis, CollectionKind kind) {
+            CollectionRequest request = request(millis, kind);
             CollectionResult result = adapter.collect(request);
             assertThat(request.control().complete(request, result, snapshots)).isEqualTo(MonitoringSnapshotStore.Acceptance.ACCEPTED);
             return result;

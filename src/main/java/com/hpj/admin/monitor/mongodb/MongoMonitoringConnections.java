@@ -60,6 +60,7 @@ public class MongoMonitoringConnections {
         BsonDocument ping();
         BsonDocument hello();
         BsonDocument serverStatus();
+        BsonDocument dbStats(String configuredDatabase);
         /** Stable physical endpoint hash, used only for internal counter identity. */
         String nodeIdentity();
         @Override void close();
@@ -102,7 +103,7 @@ public class MongoMonitoringConnections {
                         && cluster.getRequiredClusterType() != actual.getType().getClusterType()) throw unsupported();
             }
             success = true;
-            return new NativeSession(attempt, connection, settings);
+            return new NativeSession(attempt, connection, settings, request);
         } catch (RuntimeException failure) {
             throw sanitized(failure, request.control());
         } finally {
@@ -171,33 +172,44 @@ public class MongoMonitoringConnections {
         private final Attempt attempt;
         private final InternalConnection connection;
         private final MongoClientSettings settings;
+        private final Set<String> databases;
+        private final boolean capacity;
         private final AtomicBoolean closed = new AtomicBoolean();
         private Failure terminal;
 
-        private NativeSession(Attempt attempt, InternalConnection connection, MongoClientSettings settings) {
+        private NativeSession(Attempt attempt, InternalConnection connection, MongoClientSettings settings, CollectionRequest request) {
             this.attempt = attempt;
             this.connection = connection;
             this.settings = settings;
+            capacity = request.kind() == com.hpj.admin.monitor.metric.MetricContract.CollectionKind.CAPACITY;
+            databases = Set.copyOf(request.scope().databases().stream().distinct().limit(100).toList());
         }
         @Override public BsonDocument ping() { return command("ping"); }
         @Override public BsonDocument hello() { return command("hello"); }
         @Override public BsonDocument serverStatus() { return command("serverStatus"); }
+        @Override public BsonDocument dbStats(String database) {
+            if (!capacity || !validDatabase(database) || !databases.contains(database)) throw unsupported();
+            return command(database, "dbStats");
+        }
         @Override public String nodeIdentity() {
             if (attempt.identity == null) throw unsupported();
             return attempt.identity;
         }
         private BsonDocument command(String name) {
+            return command("admin", name);
+        }
+        private BsonDocument command(String database, String name) {
             if (terminal != null) throw terminal;
             if (closed.get()) throw new Failure(MissingReason.FAILED, true);
             try {
                 checkActive(attempt.control);
                 BsonDocument result;
-                try { result = execute(name); }
+                try { result = execute(database, name); }
                 catch (MongoCommandException missing) {
                     // 4.11's native initial handshake already supports legacy isMaster. A command-not-found
                     // response alone allows this same read-only fallback; never retry an authorization error.
                     if (!"hello".equals(name) || missing.getErrorCode() != 59) throw missing;
-                    result = execute("isMaster");
+                    result = execute(database, "isMaster");
                 }
                 checkActive(attempt.control);
                 if (result == null) throw new Failure(MissingReason.INVALID_VALUE, true);
@@ -213,13 +225,20 @@ public class MongoMonitoringConnections {
                 throw safe;
             }
         }
-        private BsonDocument execute(String name) {
+        private BsonDocument execute(String database, String name) {
             // No implicit session, database discovery, retry-read loop or topology selection. The same
             // physical connection handles all three fixed commands, including a direct secondary/mongos.
-            return CommandHelper.executeCommand("admin", new BsonDocument(name, new BsonInt32(1)), null,
+            BsonDocument command = new BsonDocument(name, new BsonInt32(1));
+            if ("dbStats".equals(name)) command.append("scale", new BsonInt32(1)).append("freeStorage", new BsonInt32(0));
+            return CommandHelper.executeCommand(database, command, null,
                     settings.getClusterSettings().getMode(), settings.getServerApi(), connection);
         }
         @Override public void close() { if (closed.compareAndSet(false, true)) attempt.finish(connection); }
+    }
+
+    static boolean validDatabase(String name) {
+        return name != null && !name.isBlank() && name.getBytes(StandardCharsets.UTF_8).length <= 63
+                && name.chars().noneMatch(character -> Character.isISOControl(character) || "/\\. \"$*<>:|?".indexOf(character) >= 0);
     }
 
     private static final class Attempt {

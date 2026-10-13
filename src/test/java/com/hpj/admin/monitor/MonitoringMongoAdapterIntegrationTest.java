@@ -73,7 +73,7 @@ class MonitoringMongoAdapterIntegrationTest {
             CollectionResult first = collector.collect(target);
             Observation firstNative = collector.connections.observations.get(0);
             assertNative(first, firstNative);
-            assertThat(first.metrics()).hasSize(18);
+            assertThat(first.metrics()).hasSize(23);
             assertThat(first.status()).isEqualTo(CollectionStatus.PARTIAL);
             assertThat(metric(first, "mongodb.cpu.percent").missingReason()).isEqualTo(MissingReason.UNSUPPORTED);
             for (String operation : OPERATIONS) {
@@ -163,6 +163,87 @@ class MonitoringMongoAdapterIntegrationTest {
         }
     }
 
+    @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void nativeCapacityQueriesOnlyTwoConfiguredDatabasesAndReportsOneSharedFilesystemWithoutWrites() throws Exception {
+        try (MonitoringTestEnvironment environment = MonitoringTestEnvironment.start("mongodb");
+             MongoClient observer = environment.mongoClient();
+             MongoClient business = source(environment, environment.username(), environment.password());
+             Collector collector = new Collector()) {
+            environment.prepareData();
+            String second = environment.resourceName() + "_second";
+            String excluded = environment.resourceName() + "_excluded";
+            for (String database : List.of(second, excluded)) observer.getDatabase(database).getCollection("fixture")
+                    .insertOne(new Document("_id", "capacity-owned").append("sentinel", "unchanged"));
+            List<String> configured = List.of(environment.resourceName(), second);
+            Map<String, BusinessState> before = new LinkedHashMap<>();
+            for (String database : List.of(environment.resourceName(), second, excluded)) before.put(database, state(observer, database));
+            Map<String, Long> writes = writeCounters(observer);
+            var settings = ((MongoClientImpl) business).getSettings();
+            ResolvedTarget target = resolve(business, configured);
+            CollectionResult ordinary = collector.collect(target);
+            CollectionResult capacity = collector.collect(target, CollectionKind.CAPACITY);
+            Observation nativeRead = collector.connections.observations.get(1);
+            assertThat(nativeRead.commands).containsExactly("hello", "dbStats:" + configured.get(0), "dbStats:" + configured.get(1));
+            assertThat(nativeRead.stats).containsOnlyKeys(configured.get(0), configured.get(1));
+            assertThat(capacity.status()).isEqualTo(CollectionStatus.SUCCESS);
+            assertThat(capacity.serviceProbe()).isNull();
+            for (String database : configured) for (String field : List.of("dataSize", "storageSize", "indexSize")) {
+                MetricSample sample = capacity.metrics().stream().filter(value -> value.definition().scope().id().equals(database)
+                        && value.definition().key().equals("mongodb.database." + field + ".bytes")).findFirst().orElseThrow();
+                assertThat((BigDecimal) sample.value()).isEqualByComparingTo(BigDecimal.valueOf(nativeRead.stats.get(database).getNumber(field).longValue()));
+                assertThat(Duration.between(sample.sampledAt(), sample.validUntil())).isEqualTo(Duration.ofSeconds(180));
+                assertThat(sample.definition().scope().nodeId()).startsWith("mongo-node-");
+            }
+            var fs = nativeRead.stats.get(configured.get(0));
+            assertThat((BigDecimal) metric(capacity, "mongodb.filesystem.total.bytes").value())
+                    .isEqualByComparingTo(BigDecimal.valueOf(fs.getNumber("fsTotalSize").longValue()));
+            assertThat((BigDecimal) metric(capacity, "mongodb.filesystem.used.bytes").value())
+                    .isEqualByComparingTo(BigDecimal.valueOf(fs.getNumber("fsUsedSize").longValue()));
+            assertThat(capacity.metrics()).filteredOn(sample -> sample.definition().scope().kind() == ScopeKind.FILESYSTEM).hasSize(3);
+            assertThat(collector.snapshots.snapshot("mongo-target").orElseThrow().metrics())
+                    .filteredOn(stored -> stored.kind() == CollectionKind.ORDINARY && stored.latestAttempt().definition().key().equals("mongodb.memory.resident.bytes"))
+                    .singleElement().satisfies(stored -> assertThat(stored.lastSuccess().sampledAt()).isEqualTo(metric(ordinary, "mongodb.memory.resident.bytes").sampledAt()));
+            assertThat(writeCounters(observer)).isEqualTo(writes);
+            for (var entry : before.entrySet()) assertThat(state(observer, entry.getKey())).isEqualTo(entry.getValue());
+            assertThat(((MongoClientImpl) business).getSettings()).isSameAs(settings);
+            assertThat(collector.connections.closed).isEqualTo(2);
+            environment.verifyData(); assertPing(business); assertSafe(capacity, environment);
+        }
+    }
+
+    @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void nativeDatabaseReadPermissionKeepsAllowedDbStatsWhileOtherDatabaseIsDenied() throws Exception {
+        try (MonitoringTestEnvironment environment = MonitoringTestEnvironment.start("mongodb");
+             MongoClient observer = environment.mongoClient(); Collector collector = new Collector()) {
+            environment.prepareData();
+            String denied = environment.resourceName() + "_denied";
+            observer.getDatabase(denied).getCollection("fixture").insertOne(new Document("_id", "owned"));
+            String username = "stats_" + UUID.randomUUID().toString().replace("-", ""), password = UUID.randomUUID().toString();
+            observer.getDatabase("admin").runCommand(new Document("createUser", username).append("pwd", password)
+                    .append("roles", List.of(new Document("role", "read").append("db", environment.resourceName()))));
+            try (MongoClient business = source(environment, username, password)) {
+                BusinessState beforeAllowed = state(observer, environment.resourceName()), beforeDenied = state(observer, denied);
+                Map<String, Long> writes = writeCounters(observer);
+                CollectionResult result = collector.collect(resolve(business, List.of(environment.resourceName(), denied)), CollectionKind.CAPACITY);
+                Observation nativeRead = collector.connections.observations.get(0);
+                assertThat(nativeRead.stats).containsOnlyKeys(environment.resourceName());
+                assertThat(nativeRead.statsFailures).containsEntry(denied, MissingReason.UNAUTHORIZED);
+                assertThat(result.status()).isEqualTo(CollectionStatus.PARTIAL);
+                assertThat(result.reason()).isEqualTo(MissingReason.UNAUTHORIZED);
+                assertThat(result.serviceProbe()).isNull();
+                assertThat(result.metrics()).filteredOn(sample -> sample.definition().scope().id().equals(denied))
+                        .hasSize(3).allSatisfy(sample -> assertThat(sample.missingReason()).isEqualTo(MissingReason.UNAUTHORIZED));
+                assertThat(writeCounters(observer)).isEqualTo(writes);
+                assertThat(state(observer, environment.resourceName())).isEqualTo(beforeAllowed);
+                assertThat(state(observer, denied)).isEqualTo(beforeDenied);
+                assertThat(collector.connections.closed).isEqualTo(1);
+                assertSafe(result, environment);
+            } finally { observer.getDatabase("admin").runCommand(new Document("dropUser", username)); }
+        }
+    }
+
     private static MongoClient source(MonitoringTestEnvironment environment, String username, String password) {
         return MongoClients.create(MongoClientSettings.builder()
                 .credential(MongoCredential.createCredential(username, "admin", password.toCharArray()))
@@ -174,12 +255,15 @@ class MonitoringMongoAdapterIntegrationTest {
     }
 
     private static ResolvedTarget resolve(MongoClient source, String database) {
+        return resolve(source, List.of(database));
+    }
+    private static ResolvedTarget resolve(MongoClient source, List<String> databases) {
         var declaration = new MonitoringProperties.Target();
         declaration.setId("mongo-target");
         declaration.setType(MiddlewareType.MONGODB);
         declaration.setEnabled(true);
         declaration.setConnectionSource("businessMongo");
-        declaration.getScope().setDatabases(List.of(database));
+        declaration.getScope().setDatabases(databases);
         var properties = new MonitoringProperties();
         properties.setEnabled(true);
         properties.setTargets(List.of(declaration));
@@ -189,7 +273,7 @@ class MonitoringMongoAdapterIntegrationTest {
         assertThat(resolved).hasSize(1);
         ResolvedTarget target = resolved.get(0);
         assertThat(target.reason()).isEqualTo(ResolvedTarget.Reason.CONFIGURED);
-        assertThat(target.bindings().get(0).scope().databases()).containsExactly(database);
+        assertThat(target.bindings().get(0).scope().databases()).containsExactlyElementsOf(databases);
         var connection = target.bindings().get(0).connection();
         assertThat(connection.client()).isSameAs(source);
         var settings = (MongoClientSettings) connection.settings().get("mongoSettings");
@@ -219,10 +303,19 @@ class MonitoringMongoAdapterIntegrationTest {
             assertThat((BigDecimal) metric(result, totalKey(operation)).value())
                     .isEqualByComparingTo(BigDecimal.valueOf(counter(nativeRead.status, operation)));
         }
-        assertThat(result.metrics()).allSatisfy(sample -> {
+        assertThat(result.metrics().subList(0, 18)).allSatisfy(sample -> {
             assertThat(sample.definition().scope().kind()).isEqualTo(ScopeKind.PROCESS);
             assertThat(sample.definition().scope().id()).isEqualTo("mongo-target");
         });
+        assertThat((BigDecimal) metric(result, "mongodb.memory.resident.bytes").value())
+                .isEqualByComparingTo(BigDecimal.valueOf(nativeRead.status.getDocument("mem").getNumber("resident").longValue()).multiply(BigDecimal.valueOf(1_048_576)));
+        var cache = nativeRead.status.getDocument("wiredTiger").getDocument("cache");
+        assertThat((BigDecimal) metric(result, "mongodb.wiredtiger.cache.used.bytes").value())
+                .isEqualByComparingTo(BigDecimal.valueOf(cache.getNumber("bytes currently in the cache").longValue()));
+        assertThat((BigDecimal) metric(result, "mongodb.wiredtiger.cache.maximum.bytes").value())
+                .isEqualByComparingTo(BigDecimal.valueOf(cache.getNumber("maximum bytes configured").longValue()));
+        assertThat(metric(result, "mongodb.memory.resident.bytes").definition().scope().nodeId())
+                .startsWith("mongo-node-").isEqualTo(metric(result, "mongodb.wiredtiger.cache.used.bytes").definition().scope().nodeId());
     }
 
     private static void assertPing(MongoClient client) {
@@ -263,6 +356,8 @@ class MonitoringMongoAdapterIntegrationTest {
         BsonDocument status;
         String nodeIdentity;
         MissingReason statusFailure;
+        final Map<String, BsonDocument> stats = new LinkedHashMap<>();
+        final Map<String, MissingReason> statsFailures = new LinkedHashMap<>();
     }
 
     private static final class RecordingConnections extends MongoMonitoringConnections {
@@ -289,6 +384,11 @@ class MonitoringMongoAdapterIntegrationTest {
                     catch (Failure failure) { observation.statusFailure = failure.reason(); throw failure; }
                 }
                 @Override public String nodeIdentity() { observation.nodeIdentity = delegate.nodeIdentity(); return observation.nodeIdentity; }
+                @Override public BsonDocument dbStats(String database) {
+                    observation.commands.add("dbStats:" + database);
+                    try { BsonDocument stats = delegate.dbStats(database); observation.stats.put(database, stats); return stats; }
+                    catch (Failure failure) { observation.statsFailures.put(database, failure.reason()); throw failure; }
+                }
                 @Override public void close() { try { delegate.close(); } finally { closed++; } }
             };
         }
@@ -306,6 +406,9 @@ class MonitoringMongoAdapterIntegrationTest {
         long sequence;
 
         CollectionResult collect(ResolvedTarget target) {
+            return collect(target, CollectionKind.ORDINARY);
+        }
+        CollectionResult collect(ResolvedTarget target, CollectionKind kind) {
             var binding = target.bindings().get(0);
             var source = binding.connection();
             snapshots.activate(target.display().id(), 1);
@@ -313,8 +416,8 @@ class MonitoringMongoAdapterIntegrationTest {
             Duration timeout = properties.getCollectionTimeout();
             var control = new CollectionControl(new Object(), () -> true, clock, System::nanoTime,
                     System.nanoTime() + timeout.toNanos(), cleanup, counters, target.display().id(), source.source(),
-                    CollectionKind.ORDINARY, properties.getOrdinaryInterval(), source.client());
-            var request = new CollectionRequest(target.display().id(), source.source(), source.source(), CollectionKind.ORDINARY,
+                    kind, kind == CollectionKind.CAPACITY ? properties.getCapacityInterval() : properties.getOrdinaryInterval(), source.client());
+            var request = new CollectionRequest(target.display().id(), source.source(), source.source(), kind,
                     1, ++sequence, scheduled, scheduled.plus(timeout), binding.scope(), source.client(), source.settings(), control);
             try {
                 CollectionResult result = adapter.collect(request);
